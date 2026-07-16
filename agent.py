@@ -195,6 +195,8 @@ def on_command(data):
             handle_delete(req_id, payload)
         elif action == "delete_many":
             handle_delete_many(req_id, payload)
+        elif action == "count_heroes":
+            handle_count_heroes(req_id, payload)
         elif action == "rename_file":
             handle_rename(req_id, payload)
         elif action == "move_file":
@@ -565,6 +567,40 @@ def handle_move(req_id, data):
         send_response(req_id, {"success": True})
     except Exception as e:
         send_response(req_id, {"error": str(e)})
+
+
+def handle_count_heroes(req_id, data):
+    """นับจำนวนไฟล์ตามชื่อฮีโร่ในโฟลเดอร์ (เช่น found-hero)"""
+    names = data.get("names", [])
+    subpath = data.get("subpath", "found-hero")
+
+    # หา base folder จาก ALLOWED_PATHS (เช่น ...\Desktop\pes) แล้วต่อด้วย subpath
+    if ALLOWED_PATHS:
+        base = os.path.abspath(ALLOWED_PATHS[0].strip())
+    else:
+        base = os.path.join(os.path.expanduser("~"), "Desktop", "pes")
+    folder = os.path.join(base, subpath)
+
+    counts = {n: 0 for n in names}
+    total_files = 0
+    exists = os.path.isdir(folder)
+    if exists:
+        try:
+            for fn in os.listdir(folder):
+                if not os.path.isfile(os.path.join(folder, fn)):
+                    continue
+                total_files += 1
+                low = fn.lower()
+                for n in names:
+                    if n and n.lower() in low:
+                        counts[n] += 1
+        except Exception as e:
+            send_response(req_id, {"error": str(e)})
+            return
+
+    logger.info(f"  count_heroes: {total_files} files in {folder} (exists={exists})")
+    send_response(req_id, {"success": True, "counts": counts,
+                           "total_files": total_files, "folder": folder, "exists": exists})
 
 
 # ═══════════════════════════════════════════════════════════

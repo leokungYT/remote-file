@@ -222,6 +222,19 @@ def handle_delete_many(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_count_heroes")
+def handle_count_heroes(data):
+    """ขอให้เครื่องลูกนับไฟล์ตามชื่อฮีโร่ในโฟลเดอร์ found-hero"""
+    req_id = send_to_agent(data["agent_id"], "count_heroes", {
+        "names": data.get("names", []),
+        "subpath": data.get("subpath", "found-hero"),
+    }, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 @socketio.on("request_rename")
 def handle_rename(data):
     """เปลี่ยนชื่อไฟล์ในเครื่องลูก"""
@@ -706,6 +719,57 @@ WEB_UI_HTML = r"""
   .empty-state .icon { font-size: 60px; margin-bottom: 16px; }
   .empty-state h3 { font-size: 18px; margin-bottom: 8px; color: var(--text-secondary); }
 
+  /* ── DASHBOARD ── */
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat-tile {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .stat-label { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+  .stat-val { font-size: 28px; font-weight: 700; }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 10px;
+  }
+  .hero-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .hero-card.has { border-color: var(--accent); }
+  .hero-name {
+    font-size: 13px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hero-count { font-size: 20px; font-weight: 700; color: var(--text-primary); flex-shrink: 0; }
+  .hero-card.has .hero-count { color: var(--accent); }
+  .agent-stats { display: flex; flex-direction: column; gap: 6px; }
+  .agent-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    padding: 8px 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
   /* ── RESPONSIVE ── */
   @media (max-width: 768px) {
     .main-layout { grid-template-columns: 1fr; }
@@ -730,7 +794,8 @@ WEB_UI_HTML = r"""
     <span class="icon">📁</span>
     Remote File Manager
   </h1>
-  <div>
+  <div style="display:flex; align-items:center; gap:12px">
+    <button class="btn" onclick="openDashboard()">📊 Dashboard</button>
     <span class="status-badge status-online" id="connStatus">● เชื่อมต่อแล้ว</span>
   </div>
 </div>
@@ -800,6 +865,92 @@ let currentPath = '';
 let currentFiles = [];
 let renameTarget = null;
 let agentsData = [];
+
+// ═══════════════════════════════════════════════════════════
+//  DASHBOARD (นับ found-hero รวมทุกเครื่อง)
+// ═══════════════════════════════════════════════════════════
+const HERO_LIST = ["Fabio Cannavaro","Paolo Maldini","Daniele De Rossi","Didier Drogba","Mohamed Salah","Nico Paz","Federico Dimarco","Luka","rgson","Arribas","Aubameyang","Ramedhan Saifullah","Chrigor","Lamine=x2","Mbappe","Joan Garcia","Martin Odegaard","Atep","Gareth Bale","Marcelo","Peter Schmeichel","Leonardo Bonucci","Ronald Koeman","Casemiro","Erling Haaland","Hugo Ekitike","Declan Rice","Hidetoshi Nakata","Seigo Narazaki","Shunsuke Nakamura","Vitinha","David Raya","Kvaratskhelia","Johan Cruyff","Filippo Inzaghi","Jordi Alba","Oliver Kahn","David Beckham","Rivaldo","Gianluigi Buffon","Andrea Pirlo","Gialuca Zambrotta","Lilian Thuram","Patrick Vieira","Marcel Desailly","Luis Suarez","Schweinsteiger","Bronckhorst"];
+
+function countHeroesOnAgent(agentId) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      socket.once('response_' + rid, (resp) => {
+        settled = true;
+        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
+      });
+    });
+    socket.emit('request_count_heroes', { agent_id: agentId, names: HERO_LIST, subpath: 'found-hero' });
+    setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 20000);
+  });
+}
+
+async function openDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const agents = agentsData || [];
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">📊 Dashboard — รวม found-hero ทุกเครื่อง</h2>
+      <button class="btn btn-primary" onclick="openDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+
+  if (!agents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+
+  const totals = {}; HERO_LIST.forEach(n => totals[n] = 0);
+  let grandTotal = 0, onlineCount = 0;
+  const perAgent = [];
+
+  for (const a of agents) {
+    try {
+      const res = await countHeroesOnAgent(a.agent_id);
+      onlineCount++;
+      grandTotal += res.total_files || 0;
+      perAgent.push({ name: a.hostname || a.agent_id, total: res.total_files || 0, exists: res.exists });
+      HERO_LIST.forEach(n => { totals[n] += (res.counts && res.counts[n]) || 0; });
+    } catch (e) {
+      perAgent.push({ name: a.hostname || a.agent_id, error: String(e.message || e) });
+    }
+  }
+  renderDashboard(totals, grandTotal, perAgent, agents.length, onlineCount);
+}
+
+function renderDashboard(totals, grandTotal, perAgent, totalMachines, onlineCount) {
+  const content = document.getElementById('contentArea');
+  const sorted = HERO_LIST.map(n => ({ name: n, count: totals[n] })).sort((a, b) => b.count - a.count);
+  const cards = sorted.map(h => `
+    <div class="hero-card ${h.count > 0 ? 'has' : ''}">
+      <div class="hero-name" title="${escHtml(h.name)}">${escHtml(h.name)}</div>
+      <div class="hero-count">${h.count}</div>
+    </div>`).join('');
+  const agentRows = perAgent.map(p => `
+    <div class="agent-stat">
+      <span>🖥️ ${escHtml(p.name)}</span>
+      <span>${p.error ? '<span style="color:var(--danger)">' + escHtml(p.error) + '</span>' : (p.exists === false ? '<span style="color:var(--warning)">ไม่พบโฟลเดอร์ found-hero</span>' : p.total + ' ไฟล์')}</span>
+    </div>`).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">📊 Dashboard — รวม found-hero ทุกเครื่อง</h2>
+      <button class="btn btn-primary" onclick="openDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
+      <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ found-hero รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal}</div></div>
+      <div class="stat-tile"><div class="stat-label">จำนวนชื่อฮีโร่</div><div class="stat-val">${HERO_LIST.length}</div></div>
+    </div>
+    <div class="hero-grid">${cards}</div>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง</h3>
+    <div class="agent-stats">${agentRows}</div>
+  `;
+}
 
 // ═══════════════════════════════════════════════════════════
 //  SOCKET CONNECTION
