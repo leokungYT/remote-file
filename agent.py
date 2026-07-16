@@ -43,6 +43,7 @@ _cfg = _load_config()
 SERVER_URL = os.environ.get("SERVER_URL") or _cfg.get("server_url") or "http://YOUR_SERVER_IP:5000"
 AGENT_SECRET = os.environ.get("AGENT_SECRET") or _cfg.get("agent_secret") or "my-agent-secret-2024"
 AGENT_ID = os.environ.get("AGENT_ID") or _cfg.get("agent_id") or ""  # ปล่อยว่าง = ใช้ชื่อเครื่อง
+AGENT_NAME = os.environ.get("AGENT_NAME") or _cfg.get("name") or ""  # ชื่อที่แสดงในเว็บ (ปล่อยว่าง = ใช้ hostname)
 
 # โฟลเดอร์ที่อนุญาต: env ALLOWED_PATHS (คั่น ;) > config.json "allowed_paths" (list หรือ string) > ค่าเริ่มต้น
 DEFAULT_ALLOWED_PATHS = [
@@ -174,6 +175,7 @@ def connect():
     sio.emit("agent_register", {
         "secret": AGENT_SECRET,
         "agent_id": agent_id,
+        "name": AGENT_NAME,
         "hostname": get_hostname(),
         "os_info": get_os_info(),
         "ip": get_local_ip(),

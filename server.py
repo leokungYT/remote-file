@@ -69,6 +69,7 @@ def handle_agent_register(data):
     agent_id = data.get("agent_id", f"agent-{len(agents)+1}")
     agents[request.sid] = {
         "agent_id": agent_id,
+        "name": data.get("name", ""),
         "hostname": data.get("hostname", "unknown"),
         "os_info": data.get("os_info", "unknown"),
         "ip": data.get("ip", "unknown"),
@@ -269,6 +270,7 @@ def get_agents_list():
     return [
         {
             "agent_id": info["agent_id"],
+            "name": info.get("name", ""),
             "hostname": info["hostname"],
             "os_info": info["os_info"],
             "ip": info["ip"],
@@ -731,52 +733,103 @@ WEB_UI_HTML = r"""
   /* ── DASHBOARD ── */
   .stat-row {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 12px;
-    margin-bottom: 20px;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+    margin-bottom: 26px;
   }
   .stat-tile {
+    background: linear-gradient(140deg, var(--bg-card), var(--bg-secondary));
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px 22px;
+    position: relative;
+    overflow: hidden;
+  }
+  .stat-tile::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 3px; height: 100%;
+    background: var(--accent);
+    opacity: 0.7;
+  }
+  .stat-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    font-weight: 600;
+  }
+  .stat-val { font-size: 32px; font-weight: 800; line-height: 1; letter-spacing: -0.5px; }
+
+  .dash-search {
+    padding: 9px 14px;
     background: var(--bg-card);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px;
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 13px;
+    min-width: 240px;
   }
-  .stat-label { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
-  .stat-val { font-size: 28px; font-weight: 700; }
+  .dash-search:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .dash-search::placeholder { color: var(--text-dim); }
+
   .hero-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(135px, 1fr));
+    gap: 9px;
   }
   .hero-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 12px 14px;
+    padding: 10px 12px;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 62px;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   }
-  .hero-card.has { border-color: var(--accent); }
+  .hero-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.3);
+  }
   .hero-name {
-    font-size: 13px;
+    font-size: 12px;
+    font-weight: 500;
     color: var(--text-secondary);
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    word-break: break-word;
   }
-  .hero-count { font-size: 20px; font-weight: 700; color: var(--text-primary); flex-shrink: 0; }
-  .hero-card.has .hero-count { color: var(--accent); }
-  .agent-stats { display: flex; flex-direction: column; gap: 6px; }
+  .hero-count {
+    font-size: 22px;
+    font-weight: 800;
+    color: var(--accent);
+    line-height: 1;
+    letter-spacing: -0.3px;
+    margin-top: auto;
+  }
+  /* combo (หลายฮีโร่รวมกัน) ใช้สีส้มแยกจากฮีโร่เดี่ยว */
+  .hero-card.combo { border-color: rgba(245,158,11,0.35); background: linear-gradient(140deg, var(--bg-card), rgba(245,158,11,0.05)); }
+  .hero-card.combo .hero-count { color: var(--warning); }
+
+  .agent-stats { display: flex; flex-direction: column; gap: 8px; }
   .agent-stat {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     font-size: 13px;
-    padding: 8px 14px;
+    padding: 12px 16px;
     background: var(--bg-card);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 10px;
   }
 
   /* ── RESPONSIVE ── */
@@ -880,6 +933,15 @@ let agentsData = [];
 // ═══════════════════════════════════════════════════════════
 const HERO_LIST = ["Fabio Cannavaro","Paolo Maldini","Daniele De Rossi","Didier Drogba","Mohamed Salah","Nico Paz","Federico Dimarco","Luka","rgson","Arribas","Aubameyang","Ramedhan Saifullah","Chrigor","Lamine=x2","Mbappe","Joan Garcia","Martin Odegaard","Atep","Gareth Bale","Marcelo","Peter Schmeichel","Leonardo Bonucci","Ronald Koeman","Casemiro","Erling Haaland","Hugo Ekitike","Declan Rice","Hidetoshi Nakata","Seigo Narazaki","Shunsuke Nakamura","Vitinha","David Raya","Kvaratskhelia","Johan Cruyff","Filippo Inzaghi","Jordi Alba","Oliver Kahn","David Beckham","Rivaldo","Gianluigi Buffon","Andrea Pirlo","Gialuca Zambrotta","Lilian Thuram","Patrick Vieira","Marcel Desailly","Luis Suarez","Schweinsteiger","Bronckhorst"];
 
+let dashboardScope = 'ALL';  // 'ALL' = รวมทุกเครื่อง, หรือ agent_id ของเครื่องที่เลือก
+
+function pcSelectHtml() {
+  const agents = agentsData || [];
+  let opts = `<option value="ALL"${dashboardScope === 'ALL' ? ' selected' : ''}>🖥️ รวมทุกเครื่อง</option>`;
+  opts += agents.map(a => `<option value="${escHtml(a.agent_id)}"${dashboardScope === a.agent_id ? ' selected' : ''}>🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}</option>`).join('');
+  return `<select class="btn project-select" onchange="dashboardScope=this.value; openDashboard()" title="เลือกเครื่องที่จะแสดง">${opts}</select>`;
+}
+
 function countHeroesOnAgent(agentId) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -899,15 +961,19 @@ async function openDashboard() {
   currentAgent = null;
   document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
   const content = document.getElementById('contentArea');
-  const agents = agentsData || [];
+  const allAgents = agentsData || [];
+  if (dashboardScope !== 'ALL' && !allAgents.some(a => a.agent_id === dashboardScope)) dashboardScope = 'ALL';
+  const agents = dashboardScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === dashboardScope);
+
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">📊 Dashboard — รวม found-hero ทุกเครื่อง</h2>
+      <h2 style="flex:1; font-size:18px">📊 Dashboard — found-hero</h2>
+      ${pcSelectHtml()}
       <button class="btn btn-primary" onclick="openDashboard()">🔄 รีเฟรช</button>
     </div>
     <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
 
-  if (!agents.length) {
+  if (!allAgents.length) {
     content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
     return;
   }
@@ -921,14 +987,26 @@ async function openDashboard() {
       const res = await countHeroesOnAgent(a.agent_id);
       onlineCount++;
       grandTotal += res.total_files || 0;
-      perAgent.push({ name: a.hostname || a.agent_id, total: res.total_files || 0, exists: res.exists });
+      perAgent.push({ name: a.name || a.hostname || a.agent_id, total: res.total_files || 0, exists: res.exists });
       const combos = res.combos || {};
       for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
     } catch (e) {
-      perAgent.push({ name: a.hostname || a.agent_id, error: String(e.message || e) });
+      perAgent.push({ name: a.name || a.hostname || a.agent_id, error: String(e.message || e) });
     }
   }
   renderDashboard(comboTotals, grandTotal, perAgent, agents.length, onlineCount);
+}
+
+function filterHeroCards(q) {
+  q = (q || '').trim().toLowerCase();
+  let shown = 0;
+  document.querySelectorAll('.hero-card').forEach(card => {
+    const match = !q || (card.dataset.name || '').toLowerCase().includes(q);
+    card.style.display = match ? '' : 'none';
+    if (match) shown++;
+  });
+  const noRes = document.getElementById('dashNoResult');
+  if (noRes) noRes.style.display = shown === 0 ? '' : 'none';
 }
 
 function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlineCount) {
@@ -938,7 +1016,7 @@ function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlin
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   const matchedTotal = sorted.reduce((s, h) => s + h.count, 0);
   const cards = sorted.length ? sorted.map(h => `
-    <div class="hero-card has">
+    <div class="hero-card${h.name.includes('+') ? ' combo' : ''}" data-name="${escHtml(h.name)}">
       <div class="hero-name" title="${escHtml(h.name)}">${escHtml(h.name)}</div>
       <div class="hero-count">${h.count}</div>
     </div>`).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ที่ตรงกับชื่อฮีโร่</h3></div>';
@@ -950,7 +1028,9 @@ function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlin
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">📊 Dashboard — รวม found-hero ทุกเครื่อง</h2>
+      <h2 style="flex:1; font-size:18px">📊 Dashboard — found-hero</h2>
+      ${pcSelectHtml()}
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อฮีโร่ / combo..." oninput="filterHeroCards(this.value)">
       <button class="btn btn-primary" onclick="openDashboard()">🔄 รีเฟรช</button>
     </div>
     <div class="stat-row">
@@ -961,6 +1041,7 @@ function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlin
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
     </div>
     <div class="hero-grid">${cards}</div>
+    <div id="dashNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง</h3>
     <div class="agent-stats">${agentRows}</div>
   `;
@@ -1006,8 +1087,8 @@ function renderAgents(agents) {
     <div class="agent-card ${currentAgent === a.agent_id ? 'active' : ''}"
          onclick="selectAgent('${a.agent_id}')">
       <div class="dot"></div>
-      <h3>🖥️ ${escHtml(a.hostname)}</h3>
-      <div class="meta">${escHtml(a.agent_id)}</div>
+      <h3>🖥️ ${escHtml(a.name || a.hostname)}</h3>
+      <div class="meta">${escHtml(a.name ? a.hostname : a.agent_id)}</div>
       <div class="meta">${escHtml(a.ip)}</div>
       <div class="meta" style="margin-top:4px; color: var(--text-dim)">${escHtml(a.os_info)}</div>
     </div>
