@@ -308,6 +308,13 @@ def serve_agent_py():
     return send_file(p, mimetype="text/plain", as_attachment=False)
 
 
+@app.route("/autoupdate.bat")
+def serve_autoupdate_bat():
+    """ให้เครื่องลูกดาวน์โหลด autoupdate.bat (ตัวติดตั้ง/อัปเดต agent) จาก server"""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "autoupdate.bat")
+    return send_file(p, mimetype="text/plain", as_attachment=False)
+
+
 # ═══════════════════════════════════════════════════════════
 #  HTML TEMPLATE (embedded)
 # ═══════════════════════════════════════════════════════════
