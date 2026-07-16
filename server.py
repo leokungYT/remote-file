@@ -210,6 +210,18 @@ def handle_delete(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_delete_many")
+def handle_delete_many(data):
+    """ลบหลายไฟล์ในคำสั่งเดียว (เร็วกว่าลบทีละไฟล์)"""
+    req_id = send_to_agent(data["agent_id"], "delete_many", {
+        "paths": data.get("paths", []),
+    }, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 @socketio.on("request_rename")
 def handle_rename(data):
     """เปลี่ยนชื่อไฟล์ในเครื่องลูก"""
@@ -1025,24 +1037,22 @@ function deleteSelected() {
   if (!sel.length) { toast('ยังไม่ได้เลือกไฟล์', 'info'); return; }
   if (!confirm(`ต้องการลบ ${sel.length} รายการที่เลือกจริงหรือไม่?\n\n⚠️ การลบไม่สามารถกู้คืนได้`)) return;
 
-  let i = 0, ok = 0, fail = 0;
-  const next = () => {
-    if (i >= sel.length) {
-      toast(`ลบแล้ว ${ok} รายการ` + (fail ? `, ล้มเหลว ${fail}` : ''), fail ? 'error' : 'success');
-      loadDir(currentPath);
-      return;
-    }
-    const f = sel[i++];
-    socket.once('request_sent', (data) => {
-      socket.on('response_' + data.request_id, (resp) => {
-        socket.off('response_' + data.request_id);
-        if (resp.error) fail++; else ok++;
-        next();
-      });
+  const paths = sel.map(f => f.full_path);
+  toast(`กำลังลบ ${paths.length} รายการ...`, 'info');
+
+  // ส่งคำสั่งเดียว ให้ agent ลบทั้งหมดในเครื่อง (เร็วกว่าลบทีละไฟล์มาก)
+  socket.once('request_sent', (data) => {
+    socket.on('response_' + data.request_id, (resp) => {
+      socket.off('response_' + data.request_id);
+      if (resp.error) {
+        toast('ลบล้มเหลว: ' + resp.error, 'error');
+      } else {
+        toast(`ลบแล้ว ${resp.deleted} รายการ` + (resp.failed ? `, ล้มเหลว ${resp.failed}` : ''), resp.failed ? 'error' : 'success');
+        loadDir(currentPath);
+      }
     });
-    socket.emit('request_delete', { agent_id: currentAgent, path: f.full_path });
-  };
-  next();
+  });
+  socket.emit('request_delete_many', { agent_id: currentAgent, paths: paths });
 }
 
 // ดึง bytes ของไฟล์เดียว (ใช้สำหรับรวมเป็น zip) - เรียกทีละไฟล์เท่านั้น

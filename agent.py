@@ -193,6 +193,8 @@ def on_command(data):
             handle_upload_chunk(req_id, payload)
         elif action == "delete_file":
             handle_delete(req_id, payload)
+        elif action == "delete_many":
+            handle_delete_many(req_id, payload)
         elif action == "rename_file":
             handle_rename(req_id, payload)
         elif action == "move_file":
@@ -482,6 +484,33 @@ def handle_delete(req_id, data):
         send_response(req_id, {"error": "ไม่มีสิทธิ์ลบ"})
     except Exception as e:
         send_response(req_id, {"error": str(e)})
+
+
+def handle_delete_many(req_id, data):
+    """ลบหลายไฟล์/โฟลเดอร์ในคำสั่งเดียว (เร็วกว่าลบทีละไฟล์มาก)"""
+    paths = data.get("paths", [])
+    deleted = 0
+    failed = 0
+    errors = []
+    for p in paths:
+        if not is_path_allowed(p):
+            failed += 1
+            continue
+        try:
+            if os.path.isdir(p):
+                shutil.rmtree(p)
+            elif os.path.exists(p):
+                os.remove(p)
+            else:
+                failed += 1
+                continue
+            deleted += 1
+        except Exception as e:
+            failed += 1
+            if len(errors) < 5:
+                errors.append(str(e))
+    logger.info(f"  Bulk delete: {deleted} deleted, {failed} failed ({len(paths)} requested)")
+    send_response(req_id, {"success": True, "deleted": deleted, "failed": failed, "errors": errors})
 
 
 def handle_rename(req_id, data):
