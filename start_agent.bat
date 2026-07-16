@@ -16,9 +16,9 @@ set AGENT_SECRET=2ec990f60382a004d664f06f99a3e7f5
 :: Agent name (leave empty = use hostname automatically)
 set AGENT_ID=
 
-:: Restrict accessible folders (separate with ;)
-:: Leave empty = access everything (not recommended)
-set ALLOWED_PATHS=C:\Users\Administrator\Desktop\pes
+:: Allowed folders - leave empty to use the default baked in agent.py (pes + cookie-run)
+:: Or set explicitly here (separate with ;) to override, e.g. C:\path1;C:\path2
+set ALLOWED_PATHS=
 :: ------------------------------------------------
 
 echo   Server URL  : %SERVER_URL%

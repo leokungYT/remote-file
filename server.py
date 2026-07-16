@@ -537,6 +537,15 @@ WEB_UI_HTML = r"""
   .btn-primary:hover { background: #2563eb; }
   .btn-danger { border-color: var(--danger); color: var(--danger); }
   .btn-danger:hover { background: rgba(239,68,68,0.1); }
+  select.project-select {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  select.project-select option {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+  }
 
   /* ── FILE LIST ── */
   .file-table {
@@ -1042,6 +1051,8 @@ function loadDir(path) {
 // ═══════════════════════════════════════════════════════════
 function renderFiles(files, path) {
   const content = document.getElementById('contentArea');
+  const agent = agentsData.find(a => a.agent_id === currentAgent);
+  const allowed = (agent && agent.allowed_paths) || [];
 
   // Sort: folders first, then by name
   files.sort((a, b) => {
@@ -1050,9 +1061,14 @@ function renderFiles(files, path) {
   });
 
   const breadcrumb = buildBreadcrumb(path);
+  const projectSelect = allowed.length ? `
+      <select class="btn project-select" onchange="if(this.value) loadDir(this.value)" title="เลือกโปรเจกต์/โฟลเดอร์">
+        ${allowed.map(p => `<option value="${escHtml(p)}" ${sameRoot(path, p) ? 'selected' : ''}>📁 ${escHtml(baseName(p))}</option>`).join('')}
+      </select>` : '';
 
   content.innerHTML = `
     <div class="toolbar">
+      ${projectSelect}
       <div class="breadcrumb">${breadcrumb}</div>
       <button class="btn" onclick="downloadSelected()">💾 โหลดที่เลือก</button>
       <button class="btn btn-danger" onclick="deleteSelected()">🗑️ ลบที่เลือก</button>
@@ -1097,6 +1113,16 @@ function renderFiles(files, path) {
     </table>
     `}
   `;
+}
+
+function baseName(p) {
+  return (p || '').split(/[\\\/]/).filter(Boolean).pop() || p;
+}
+function sameRoot(path, base) {
+  if (!path || !base) return false;
+  const np = path.replace(/\\/g, '/').toLowerCase();
+  const nb = base.replace(/\\/g, '/').toLowerCase();
+  return np === nb || np.indexOf(nb + '/') === 0;
 }
 
 function buildBreadcrumb(path) {

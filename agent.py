@@ -29,13 +29,12 @@ import socketio
 SERVER_URL = os.environ.get("SERVER_URL", "http://YOUR_SERVER_IP:5000")
 AGENT_SECRET = os.environ.get("AGENT_SECRET", "my-agent-secret-2024")
 AGENT_ID = os.environ.get("AGENT_ID", "")  # ปล่อยว่างจะใช้ชื่อเครื่อง
-ALLOWED_PATHS = os.environ.get("ALLOWED_PATHS", "").split(";")  # เช่น "C:\Users;D:\Data"
+# โฟลเดอร์ที่อนุญาต - แก้ค่าเริ่มต้นตรงนี้ได้เลย (คั่นด้วย ;) หรือ override ด้วย env ALLOWED_PATHS
+DEFAULT_ALLOWED_PATHS = r"C:\Users\Administrator\Desktop\pes;C:\Users\Administrator\Desktop\cookie-run"
+_allowed_env = os.environ.get("ALLOWED_PATHS", "").strip()
+ALLOWED_PATHS = [p.strip() for p in (_allowed_env or DEFAULT_ALLOWED_PATHS).split(";") if p.strip()]
 CHUNK_SIZE = 512 * 1024  # 512KB per chunk
 RECONNECT_DELAY = 5  # seconds
-
-# ถ้าไม่กำหนด allowed paths จะเข้าถึงได้ทุก drive
-if ALLOWED_PATHS == ['']:
-    ALLOWED_PATHS = []
 
 # ─── LOGGING ──────────────────────────────────────────────
 logging.basicConfig(
