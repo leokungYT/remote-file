@@ -586,14 +586,14 @@ def handle_count_heroes(req_id, data):
     exists = os.path.isdir(folder)
     if exists:
         try:
-            for fn in os.listdir(folder):
-                if not os.path.isfile(os.path.join(folder, fn)):
-                    continue
-                total_files += 1
-                low = fn.lower()
-                for n in names:
-                    if n and n.lower() in low:
-                        counts[n] += 1
+            # เดินทุกโฟลเดอร์ย่อย (hero1, hero2, ...) แล้วนับไฟล์ทั้งหมด
+            for root, dirs, filenames in os.walk(folder):
+                for fn in filenames:
+                    total_files += 1
+                    low = fn.lower()
+                    for n in names:
+                        if n and n.lower() in low:
+                            counts[n] += 1
         except Exception as e:
             send_response(req_id, {"error": str(e)})
             return
