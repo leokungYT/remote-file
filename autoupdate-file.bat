@@ -13,9 +13,8 @@ echo      Auto Update: Ranger Bot System
 echo ============================================
 echo.
 
-:: Kill ADB and Python processes to prevent file locks
-echo [PRE] Stopping ADB and Bot processes...
-taskkill /f /im adb.exe >nul 2>&1
+:: Kill only Python (Bot) processes to release file locks - keep ADB running
+echo [PRE] Stopping Bot (python) processes... (ADB is left running)
 taskkill /f /im python.exe >nul 2>&1
 timeout /t 2 /nobreak >nul
 
