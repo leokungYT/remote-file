@@ -1,0 +1,9 @@
+{
+  "server_url": "http://26.155.240.151:5000",
+  "agent_secret": "2ec990f60382a004d664f06f99a3e7f5",
+  "agent_id": "",
+  "allowed_paths": [
+    "C:/Users/Administrator/Desktop/pes",
+    "C:/Users/Administrator/Desktop/cookie-run"
+  ]
+}

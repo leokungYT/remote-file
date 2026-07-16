@@ -25,14 +25,41 @@ from datetime import datetime
 import socketio
 
 # ─── CONFIG ───────────────────────────────────────────────
-# แก้ค่าเหล่านี้ให้ตรงกับระบบของคุณ
-SERVER_URL = os.environ.get("SERVER_URL", "http://YOUR_SERVER_IP:5000")
-AGENT_SECRET = os.environ.get("AGENT_SECRET", "my-agent-secret-2024")
-AGENT_ID = os.environ.get("AGENT_ID", "")  # ปล่อยว่างจะใช้ชื่อเครื่อง
-# โฟลเดอร์ที่อนุญาต - แก้ค่าเริ่มต้นตรงนี้ได้เลย (คั่นด้วย ;) หรือ override ด้วย env ALLOWED_PATHS
-DEFAULT_ALLOWED_PATHS = r"C:\Users\Administrator\Desktop\pes;C:\Users\Administrator\Desktop\cookie-run"
-_allowed_env = os.environ.get("ALLOWED_PATHS", "").strip()
-ALLOWED_PATHS = [p.strip() for p in (_allowed_env or DEFAULT_ALLOWED_PATHS).split(";") if p.strip()]
+# แก้ค่าได้ง่ายๆ ในไฟล์ config.json (วางไว้โฟลเดอร์เดียวกับ agent.py)
+# ลำดับความสำคัญ: environment variable > config.json > ค่าเริ่มต้นด้านล่าง
+
+def _load_config():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[WARN] อ่าน config.json ไม่ได้ ใช้ค่าเริ่มต้นแทน: {e}")
+    return {}
+
+_cfg = _load_config()
+
+SERVER_URL = os.environ.get("SERVER_URL") or _cfg.get("server_url") or "http://YOUR_SERVER_IP:5000"
+AGENT_SECRET = os.environ.get("AGENT_SECRET") or _cfg.get("agent_secret") or "my-agent-secret-2024"
+AGENT_ID = os.environ.get("AGENT_ID") or _cfg.get("agent_id") or ""  # ปล่อยว่าง = ใช้ชื่อเครื่อง
+
+# โฟลเดอร์ที่อนุญาต: env ALLOWED_PATHS (คั่น ;) > config.json "allowed_paths" (list หรือ string) > ค่าเริ่มต้น
+DEFAULT_ALLOWED_PATHS = [
+    r"C:\Users\Administrator\Desktop\pes",
+    r"C:\Users\Administrator\Desktop\cookie-run",
+]
+_env_allowed = os.environ.get("ALLOWED_PATHS", "").strip()
+_cfg_allowed = _cfg.get("allowed_paths")
+if _env_allowed:
+    ALLOWED_PATHS = [p.strip() for p in _env_allowed.split(";") if p.strip()]
+elif isinstance(_cfg_allowed, list) and _cfg_allowed:
+    ALLOWED_PATHS = [str(p).strip() for p in _cfg_allowed if str(p).strip()]
+elif isinstance(_cfg_allowed, str) and _cfg_allowed.strip():
+    ALLOWED_PATHS = [p.strip() for p in _cfg_allowed.split(";") if p.strip()]
+else:
+    ALLOWED_PATHS = list(DEFAULT_ALLOWED_PATHS)
+
 CHUNK_SIZE = 512 * 1024  # 512KB per chunk
 RECONNECT_DELAY = 5  # seconds
 
