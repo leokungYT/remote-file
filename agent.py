@@ -19,6 +19,7 @@ import socket
 import shutil
 import platform
 import logging
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -638,6 +639,55 @@ def handle_count_heroes(req_id, data):
 # ═══════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════
+def agent_loop():
+    """ลูปเชื่อมต่อ server + reconnect อัตโนมัติ"""
+    while True:
+        try:
+            logger.info(f"🔗 Connecting to {SERVER_URL}...")
+            sio.connect(SERVER_URL, transports=["websocket", "polling"])
+            sio.wait()
+        except socketio.exceptions.ConnectionError as e:
+            logger.warning(f"Connection failed: {e}")
+            logger.info(f"Retrying in {RECONNECT_DELAY}s...")
+            time.sleep(RECONNECT_DELAY)
+        except KeyboardInterrupt:
+            logger.info("Agent stopped by user")
+            if sio.connected:
+                sio.disconnect()
+            break
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+            time.sleep(RECONNECT_DELAY)
+
+
+def run_tray():
+    """แสดงไอคอนใน system tray + คลิกขวาเลือก Exit เพื่อปิด"""
+    import pystray
+    from PIL import Image, ImageDraw
+
+    def make_icon():
+        img = Image.new("RGB", (64, 64), (26, 34, 53))
+        d = ImageDraw.Draw(img)
+        d.rectangle([10, 18, 30, 26], fill=(59, 130, 246))   # แถบโฟลเดอร์
+        d.rectangle([10, 24, 54, 50], fill=(59, 130, 246))   # ตัวโฟลเดอร์
+        return img
+
+    def on_exit(icon, item):
+        try:
+            if sio.connected:
+                sio.disconnect()
+        except Exception:
+            pass
+        icon.stop()
+        os._exit(0)
+
+    menu = pystray.Menu(
+        pystray.MenuItem(lambda item: "🟢 Connected" if sio.connected else "🔴 Offline", None, enabled=False),
+        pystray.MenuItem("Exit", on_exit),
+    )
+    pystray.Icon("RemoteFileAgent", make_icon(), "Remote File Agent", menu).run()
+
+
 def main():
     agent_id = AGENT_ID if AGENT_ID else get_hostname()
 
@@ -662,23 +712,16 @@ def main():
         print()
         sys.exit(1)
 
-    while True:
-        try:
-            logger.info(f"🔗 Connecting to {SERVER_URL}...")
-            sio.connect(SERVER_URL, transports=["websocket", "polling"])
-            sio.wait()
-        except socketio.exceptions.ConnectionError as e:
-            logger.warning(f"Connection failed: {e}")
-            logger.info(f"Retrying in {RECONNECT_DELAY}s...")
-            time.sleep(RECONNECT_DELAY)
-        except KeyboardInterrupt:
-            logger.info("Agent stopped by user")
-            if sio.connected:
-                sio.disconnect()
-            break
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            time.sleep(RECONNECT_DELAY)
+    # ถ้ามี pystray/Pillow → แสดงไอคอนใน tray (รันเบื้องหลังได้ด้วย pythonw ไม่มีหน้าต่าง)
+    # ถ้าไม่มี → รันปกติแบบเดิม
+    try:
+        import pystray  # noqa: F401
+        from PIL import Image  # noqa: F401
+        threading.Thread(target=agent_loop, daemon=True).start()
+        run_tray()
+    except ImportError:
+        logger.info("(no pystray/Pillow - running without tray icon)")
+        agent_loop()
 
 
 if __name__ == "__main__":

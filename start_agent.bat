@@ -1,5 +1,6 @@
 @echo off
 title Remote File Manager - Agent
+cd /d "%~dp0"
 
 echo ===============================================
 echo   Remote File Manager - Agent Setup
@@ -35,10 +36,10 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: Install dependencies
+:: Install dependencies (agent needs: python-socketio[client], websocket-client, requests)
 echo Installing dependencies...
-pip install "python-socketio[client]" websocket-client >nul 2>&1
-echo Done.
+python -m pip install --upgrade pip >nul 2>&1
+python -m pip install "python-socketio[client]" websocket-client requests pystray Pillow
 echo.
 
 :: Run agent
