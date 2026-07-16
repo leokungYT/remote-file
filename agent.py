@@ -83,6 +83,8 @@ sio = socketio.Client(
 # เก็บสถานะการอัปโหลดแบบแบ่ง chunk (req_id -> {file, path, received})
 upload_sessions = {}
 
+_single_instance_handle = None  # เก็บ handle ของ mutex กัน agent เปิดซ้ำ
+
 
 # ═══════════════════════════════════════════════════════════
 #  HELPER FUNCTIONS
@@ -688,7 +690,25 @@ def run_tray():
     pystray.Icon("RemoteFileAgent", make_icon(), "Remote File Agent", menu).run()
 
 
+def is_already_running():
+    """True = มี agent อีกตัวรันอยู่แล้ว (บังคับให้เปิดได้ตัวเดียว)"""
+    global _single_instance_handle
+    if platform.system() != "Windows":
+        return False
+    try:
+        import ctypes
+        _single_instance_handle = ctypes.windll.kernel32.CreateMutexW(
+            None, False, "RemoteFileManagerAgent_SingleInstance")
+        return ctypes.windll.kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+    except Exception:
+        return False
+
+
 def main():
+    if is_already_running():
+        print("Agent already running - exiting this duplicate.")
+        sys.exit(0)
+
     agent_id = AGENT_ID if AGENT_ID else get_hostname()
 
     print("=" * 55)
