@@ -607,25 +607,29 @@ def handle_count_heroes(req_id, data):
         base = os.path.join(os.path.expanduser("~"), "Desktop", "pes")
     folder = os.path.join(base, subpath)
 
-    counts = {n: 0 for n in names}
+    # map ชื่อฮีโร่ (ตัวเล็ก) -> ชื่อจริง เพื่อใช้ระบุ segment ที่เป็นฮีโร่ (ตัดโค้ดท้ายไฟล์ทิ้ง)
+    names_map = {n.strip().lower(): n.strip() for n in names if n and n.strip()}
+    combos = {}        # "hero1+hero2+hero3" -> จำนวนไฟล์ (1 ไฟล์ = 1 id)
     total_files = 0
     exists = os.path.isdir(folder)
     if exists:
         try:
-            # เดินทุกโฟลเดอร์ย่อย (hero1, hero2, ...) แล้วนับไฟล์ทั้งหมด
+            # เดินทุกโฟลเดอร์ย่อย (hero1, hero2, ...) แล้วจัดกลุ่มตาม combo ของฮีโร่
             for root, dirs, filenames in os.walk(folder):
                 for fn in filenames:
                     total_files += 1
-                    low = fn.lower()
-                    for n in names:
-                        if n and n.lower() in low:
-                            counts[n] += 1
+                    stem = os.path.splitext(fn)[0]                       # ตัด .dat
+                    parts = [p.strip() for p in stem.split("+") if p.strip()]
+                    heroes = [names_map[p.lower()] for p in parts if p.lower() in names_map]
+                    if heroes:
+                        combo = "+".join(heroes)                         # เก็บเป็นชุดเดียว ไม่แยก
+                        combos[combo] = combos.get(combo, 0) + 1
         except Exception as e:
             send_response(req_id, {"error": str(e)})
             return
 
-    logger.info(f"  count_heroes: {total_files} files in {folder} (exists={exists})")
-    send_response(req_id, {"success": True, "counts": counts,
+    logger.info(f"  count_heroes: {total_files} files, {len(combos)} combos in {folder} (exists={exists})")
+    send_response(req_id, {"success": True, "combos": combos,
                            "total_files": total_files, "folder": folder, "exists": exists})
 
 

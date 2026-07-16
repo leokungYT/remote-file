@@ -912,7 +912,7 @@ async function openDashboard() {
     return;
   }
 
-  const totals = {}; HERO_LIST.forEach(n => totals[n] = 0);
+  const comboTotals = {};
   let grandTotal = 0, onlineCount = 0;
   const perAgent = [];
 
@@ -922,22 +922,26 @@ async function openDashboard() {
       onlineCount++;
       grandTotal += res.total_files || 0;
       perAgent.push({ name: a.hostname || a.agent_id, total: res.total_files || 0, exists: res.exists });
-      HERO_LIST.forEach(n => { totals[n] += (res.counts && res.counts[n]) || 0; });
+      const combos = res.combos || {};
+      for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
     } catch (e) {
       perAgent.push({ name: a.hostname || a.agent_id, error: String(e.message || e) });
     }
   }
-  renderDashboard(totals, grandTotal, perAgent, agents.length, onlineCount);
+  renderDashboard(comboTotals, grandTotal, perAgent, agents.length, onlineCount);
 }
 
-function renderDashboard(totals, grandTotal, perAgent, totalMachines, onlineCount) {
+function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlineCount) {
   const content = document.getElementById('contentArea');
-  const sorted = HERO_LIST.map(n => ({ name: n, count: totals[n] })).sort((a, b) => b.count - a.count);
-  const cards = sorted.map(h => `
-    <div class="hero-card ${h.count > 0 ? 'has' : ''}">
+  const sorted = Object.keys(comboTotals)
+    .map(k => ({ name: k, count: comboTotals[k] }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  const matchedTotal = sorted.reduce((s, h) => s + h.count, 0);
+  const cards = sorted.length ? sorted.map(h => `
+    <div class="hero-card has">
       <div class="hero-name" title="${escHtml(h.name)}">${escHtml(h.name)}</div>
       <div class="hero-count">${h.count}</div>
-    </div>`).join('');
+    </div>`).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ที่ตรงกับชื่อฮีโร่</h3></div>';
   const agentRows = perAgent.map(p => `
     <div class="agent-stat">
       <span>🖥️ ${escHtml(p.name)}</span>
@@ -952,8 +956,9 @@ function renderDashboard(totals, grandTotal, perAgent, totalMachines, onlineCoun
     <div class="stat-row">
       <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
       <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
-      <div class="stat-tile"><div class="stat-label">ไฟล์ found-hero รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal}</div></div>
-      <div class="stat-tile"><div class="stat-label">จำนวนชื่อฮีโร่</div><div class="stat-val">${HERO_LIST.length}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ทั้งหมด (ทุกไฟล์)</div><div class="stat-val" style="color:var(--accent)">${grandTotal}</div></div>
+      <div class="stat-tile"><div class="stat-label">id ที่ตรงชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal}</div></div>
+      <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
     </div>
     <div class="hero-grid">${cards}</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง</h3>
