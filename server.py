@@ -327,6 +327,7 @@ WEB_UI_HTML = r"""
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Remote File Manager</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
@@ -559,6 +560,11 @@ WEB_UI_HTML = r"""
   }
   tr:hover .file-actions { opacity: 1; }
   .file-actions .btn { padding: 4px 10px; font-size: 11px; }
+  .file-check, #selectAll {
+    width: 16px; height: 16px;
+    cursor: pointer;
+    accent-color: var(--accent);
+  }
 
   /* ── MODALS ── */
   .modal-overlay {
@@ -885,6 +891,8 @@ function renderFiles(files, path) {
   content.innerHTML = `
     <div class="toolbar">
       <div class="breadcrumb">${breadcrumb}</div>
+      <button class="btn" onclick="downloadSelected()">💾 โหลดที่เลือก</button>
+      <button class="btn btn-danger" onclick="deleteSelected()">🗑️ ลบที่เลือก</button>
       <button class="btn" onclick="loadDir(currentPath)">🔄 รีเฟรช</button>
       <button class="btn btn-primary" onclick="openUpload()">📤 อัปโหลด</button>
     </div>
@@ -892,7 +900,8 @@ function renderFiles(files, path) {
     <table class="file-table">
       <thead>
         <tr>
-          <th style="width:50%">ชื่อ</th>
+          <th style="width:36px; text-align:center"><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this)" title="เลือกทั้งหมด"></th>
+          <th style="width:46%">ชื่อ</th>
           <th>ขนาด</th>
           <th>แก้ไขล่าสุด</th>
           <th style="width:140px"></th>
@@ -901,6 +910,9 @@ function renderFiles(files, path) {
       <tbody>
         ${files.map((f, i) => `
           <tr ondblclick="${f.is_dir ? `loadDir('${escAttr(f.full_path)}')` : `downloadFile('${escAttr(f.full_path)}', '${escAttr(f.name)}')`}">
+            <td style="text-align:center" onclick="event.stopPropagation()" ondblclick="event.stopPropagation()">
+              ${f.name === '..' ? '' : `<input type="checkbox" class="file-check" data-index="${i}">`}
+            </td>
             <td>
               <div class="file-name">
                 <span class="file-icon">${f.is_dir ? '📂' : getFileIcon(f.name)}</span>
@@ -992,6 +1004,110 @@ function downloadFile(filePath, fileName) {
   });
 
   socket.emit('request_download', { agent_id: currentAgent, path: filePath });
+}
+
+// ── Bulk select / delete / download ──
+function toggleSelectAll(cb) {
+  document.querySelectorAll('.file-check').forEach(x => x.checked = cb.checked);
+}
+
+function getSelectedFiles() {
+  const sel = [];
+  document.querySelectorAll('.file-check:checked').forEach(cb => {
+    const f = currentFiles[parseInt(cb.dataset.index)];
+    if (f) sel.push(f);
+  });
+  return sel;
+}
+
+function deleteSelected() {
+  const sel = getSelectedFiles();
+  if (!sel.length) { toast('ยังไม่ได้เลือกไฟล์', 'info'); return; }
+  if (!confirm(`ต้องการลบ ${sel.length} รายการที่เลือกจริงหรือไม่?\n\n⚠️ การลบไม่สามารถกู้คืนได้`)) return;
+
+  let i = 0, ok = 0, fail = 0;
+  const next = () => {
+    if (i >= sel.length) {
+      toast(`ลบแล้ว ${ok} รายการ` + (fail ? `, ล้มเหลว ${fail}` : ''), fail ? 'error' : 'success');
+      loadDir(currentPath);
+      return;
+    }
+    const f = sel[i++];
+    socket.once('request_sent', (data) => {
+      socket.on('response_' + data.request_id, (resp) => {
+        socket.off('response_' + data.request_id);
+        if (resp.error) fail++; else ok++;
+        next();
+      });
+    });
+    socket.emit('request_delete', { agent_id: currentAgent, path: f.full_path });
+  };
+  next();
+}
+
+// ดึง bytes ของไฟล์เดียว (ใช้สำหรับรวมเป็น zip) - เรียกทีละไฟล์เท่านั้น
+function fetchFileBytes(filePath) {
+  return new Promise((resolve, reject) => {
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      let chunks = [];
+      const onChunk = (chunk) => {
+        if (chunk.error) { socket.off('file_chunk_' + rid, onChunk); reject(new Error(chunk.error)); return; }
+        chunks.push(chunk.data);
+        if (chunk.is_last) {
+          socket.off('file_chunk_' + rid, onChunk);
+          const bin = atob(chunks.join(''));
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          resolve(arr);
+        }
+      };
+      socket.on('file_chunk_' + rid, onChunk);
+      socket.once('response_' + rid, (resp) => {
+        if (resp.error) { socket.off('file_chunk_' + rid, onChunk); reject(new Error(resp.error)); }
+      });
+    });
+    socket.emit('request_download', { agent_id: currentAgent, path: filePath });
+  });
+}
+
+async function downloadSelected() {
+  const all = getSelectedFiles();
+  const files = all.filter(f => !f.is_dir);
+  const skippedDirs = all.length - files.length;
+  if (!files.length) { toast('เลือกไฟล์ (ไม่ใช่โฟลเดอร์) ที่จะดาวน์โหลดก่อน', 'info'); return; }
+
+  // ถ้ามีไฟล์เดียว → โหลดไฟล์นั้นตรงๆ ไม่ต้องห่อ zip
+  if (files.length === 1) { downloadFile(files[0].full_path, files[0].name); return; }
+
+  if (typeof JSZip === 'undefined') {
+    toast('โหลดตัวบีบอัด (JSZip) ไม่ได้ - ดาวน์โหลดแยกไฟล์แทน', 'error');
+    files.forEach(f => downloadFile(f.full_path, f.name));
+    return;
+  }
+
+  toast(`กำลังรวม ${files.length} ไฟล์เป็น zip...`, 'info');
+  const zip = new JSZip();
+  let ok = 0, fail = 0;
+  for (const f of files) {
+    try {
+      zip.file(f.name, await fetchFileBytes(f.full_path));
+      ok++;
+    } catch (e) {
+      fail++;
+    }
+  }
+  if (!ok) { toast('ดึงไฟล์ไม่สำเร็จ', 'error'); return; }
+
+  const folderName = (currentPath.split(/[\\\/]/).filter(Boolean).pop() || 'download').replace(/[:*?"<>|]/g, '_');
+  const blob = await zip.generateAsync({ type: 'blob' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = folderName + '.zip';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast(`ดาวน์โหลด ${folderName}.zip สำเร็จ (${ok} ไฟล์` + (fail ? `, พลาด ${fail}` : '') + (skippedDirs ? `, ข้ามโฟลเดอร์ ${skippedDirs}` : '') + ')', fail ? 'error' : 'success');
 }
 
 // Delete

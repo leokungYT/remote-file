@@ -410,14 +410,34 @@ def handle_upload_chunk(req_id, data):
             upload_sessions.pop(req_id, None)
             logger.info(f"  Upload complete: {path} ({received} bytes)")
 
-            # ── แตกไฟล์ zip อัตโนมัติ ──
+            # ── แตกไฟล์ zip ลงโฟลเดอร์เดียวกับ zip ตรงๆ (ตัดโฟลเดอร์ครอบชั้นเดียวออก) ──
             if path.lower().endswith(".zip"):
                 import zipfile
-                extract_dir = path[:-4]  # ตัด .zip ออก → โฟลเดอร์ปลายทาง
                 try:
+                    extract_dir = os.path.dirname(path)  # เช่น backup-id
+                    dest_abs = os.path.abspath(extract_dir)
                     with zipfile.ZipFile(path, "r") as zf:
-                        zf.extractall(extract_dir)
-                    logger.info(f"  Auto-extracted zip -> {extract_dir}")
+                        norm = [n.replace("\\", "/").lstrip("/") for n in zf.namelist() if n.strip()]
+                        tops = set(n.split("/")[0] for n in norm)
+                        # ถ้ามีโฟลเดอร์ครอบชั้นเดียว → ตัดชื่อโฟลเดอร์นั้นออก ให้ไฟล์ลง extract_dir ตรงๆ
+                        strip = (list(tops)[0] + "/") if (len(tops) == 1 and all("/" in n for n in norm)) else ""
+                        for info in zf.infolist():
+                            name = info.filename.replace("\\", "/").lstrip("/")
+                            if strip and name.startswith(strip):
+                                name = name[len(strip):]
+                            if not name:
+                                continue
+                            target = os.path.join(extract_dir, *name.split("/"))
+                            target_abs = os.path.abspath(target)
+                            if not (target_abs == dest_abs or target_abs.startswith(dest_abs + os.sep)):
+                                continue  # กัน zip-slip
+                            if name.endswith("/"):
+                                os.makedirs(target, exist_ok=True)
+                            else:
+                                os.makedirs(os.path.dirname(target), exist_ok=True)
+                                with zf.open(info) as src, open(target, "wb") as dst:
+                                    shutil.copyfileobj(src, dst)
+                    logger.info(f"  Auto-extracted zip (flat) -> {extract_dir}")
                     send_response(req_id, {"success": True, "path": path,
                                            "extracted": True, "extract_dir": extract_dir})
                 except Exception as ze:
