@@ -4,8 +4,8 @@
   "agent_secret": "2ec990f60382a004d664f06f99a3e7f5",
   "agent_id": "",
   "allowed_paths": [
-    "C:/Users/Administrator/Desktop/pes",
-    "C:/Users/Administrator/Desktop/cookie-run"
+    "Desktop/pes",
+    "Desktop/cookie-run"
   ],
-  "cookie_id_path": ""
+  "cookie_id_path": "Desktop/cookie-run/id-found"
 }

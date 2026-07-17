@@ -47,24 +47,39 @@ AGENT_ID = os.environ.get("AGENT_ID") or _cfg.get("agent_id") or ""  # ปล่
 AGENT_NAME = os.environ.get("AGENT_NAME") or _cfg.get("name") or ""  # ชื่อที่แสดงในเว็บ (ปล่อยว่าง = ใช้ hostname)
 
 # โฟลเดอร์ที่อนุญาต: env ALLOWED_PATHS (คั่น ;) > config.json "allowed_paths" (list หรือ string) > ค่าเริ่มต้น
+# เขียนแบบสั้นได้ เช่น "Desktop/cookie-run" → agent จะเติมโฟลเดอร์ home (C:\Users\<user>\) ให้เอง
+# ทำให้ config ก้อนเดียวใช้ได้ทุกเครื่อง ไม่ต้องแก้ username
+
+def _norm_path(p):
+    """แปลงเป็น absolute path: ถ้าเป็น relative จะอิงจาก home ของ user เครื่องนั้น
+       เช่น 'Desktop/cookie-run' -> C:\\Users\\<user>\\Desktop\\cookie-run"""
+    p = os.path.expanduser(str(p).strip())
+    if not os.path.isabs(p):
+        p = os.path.join(os.path.expanduser("~"), p)
+    return os.path.abspath(p)
+
 DEFAULT_ALLOWED_PATHS = [
-    r"C:\Users\Administrator\Desktop\pes",
-    r"C:\Users\Administrator\Desktop\cookie-run",
+    "Desktop/pes",
+    "Desktop/cookie-run",
 ]
 _env_allowed = os.environ.get("ALLOWED_PATHS", "").strip()
 _cfg_allowed = _cfg.get("allowed_paths")
 if _env_allowed:
-    ALLOWED_PATHS = [p.strip() for p in _env_allowed.split(";") if p.strip()]
+    _raw_allowed = [p for p in _env_allowed.split(";") if p.strip()]
 elif isinstance(_cfg_allowed, list) and _cfg_allowed:
-    ALLOWED_PATHS = [str(p).strip() for p in _cfg_allowed if str(p).strip()]
+    _raw_allowed = [str(p) for p in _cfg_allowed if str(p).strip()]
 elif isinstance(_cfg_allowed, str) and _cfg_allowed.strip():
-    ALLOWED_PATHS = [p.strip() for p in _cfg_allowed.split(";") if p.strip()]
+    _raw_allowed = [p for p in _cfg_allowed.split(";") if p.strip()]
 else:
-    ALLOWED_PATHS = list(DEFAULT_ALLOWED_PATHS)
+    _raw_allowed = list(DEFAULT_ALLOWED_PATHS)
+ALLOWED_PATHS = [_norm_path(p) for p in _raw_allowed]
 
 # โฟลเดอร์ id ของ dashboard cookie-run (กำหนดเองได้)
 # ลำดับ: env COOKIE_ID_PATH > config.json "cookie_id_path" > ปล่อยว่าง (ใช้วิธีเดาจาก allowed_paths + base_match)
 COOKIE_ID_PATH = (os.environ.get("COOKIE_ID_PATH") or _cfg.get("cookie_id_path") or "").strip()
+
+# โฟลเดอร์ input-id (ที่รับไฟล์จากปุ่ม broadcast + ปุ่ม clear) กำหนดเองได้ ปล่อยว่าง = ใช้ base_match + subpath
+COOKIE_INPUT_PATH = (os.environ.get("COOKIE_INPUT_PATH") or _cfg.get("cookie_input_path") or "").strip()
 
 CHUNK_SIZE = 512 * 1024  # 512KB per chunk
 RECONNECT_DELAY = 5  # seconds
@@ -240,6 +255,8 @@ def on_command(data):
             handle_move(req_id, payload)
         elif action == "shutdown":
             handle_shutdown(req_id, payload)
+        elif action == "clear_input":
+            handle_clear_input(req_id, payload)
         else:
             send_response(req_id, {"error": f"Unknown action: {action}"})
     except Exception as e:
@@ -410,6 +427,17 @@ def handle_upload_start(req_id, data):
     """เริ่มรับไฟล์แบบแบ่ง chunk (เปิดไฟล์รอเขียน)"""
     dest_path = data.get("path", "")
     filename = data.get("filename", "uploaded_file")
+    match = (data.get("base_match") or "").strip().lower()
+    subpath = data.get("subpath")
+
+    # โหมด broadcast: ระบุ base_match/subpath → วางไฟล์ในโฟลเดอร์ input-id ที่ resolve เอง
+    if match or subpath:
+        folder = _resolve_input_folder(match, subpath or "input-id")
+        if not folder:
+            send_response(req_id, {"error": "หาโฟลเดอร์ input-id ไม่เจอ (base_match)"})
+            return
+        os.makedirs(folder, exist_ok=True)
+        dest_path = os.path.join(folder, filename)
 
     # ถ้า dest_path เป็นแค่ชื่อไฟล์ ให้วางที่ Desktop
     if not os.path.dirname(dest_path):
@@ -667,6 +695,40 @@ def _reply_ids(req_id, folder):
                            "folder": folder, "exists": exists})
 
 
+def _resolve_game_base(match):
+    """หา base folder ของเกม (เช่น pes / ro / cookie-run) จาก allowed_paths ตาม base_match
+       - เทียบชื่อโฟลเดอร์ (basename) ตรงเป๊ะก่อน แล้วค่อย fallback เป็น substring
+       คืน None ถ้าระบุ match แต่หาไม่เจอ"""
+    if ALLOWED_PATHS:
+        if match:
+            for p in ALLOWED_PATHS:  # 1) ชื่อโฟลเดอร์ตรงเป๊ะ
+                ap = os.path.abspath(p.strip())
+                if os.path.basename(ap).lower() == match:
+                    return ap
+            for p in ALLOWED_PATHS:  # 2) fallback: มีคำนั้นอยู่ในพาธ
+                ap = os.path.abspath(p.strip())
+                if match in ap.lower():
+                    return ap
+            return None
+        return os.path.abspath(ALLOWED_PATHS[0].strip())
+    if not match:
+        return os.path.join(os.path.expanduser("~"), "Desktop", "cookie-run")
+    return None
+
+
+# ชื่อเดิม (คงไว้ให้ handle_list_ids ใช้)
+_resolve_cookie_base = _resolve_game_base
+
+
+def _resolve_input_folder(match, subpath="input-id"):
+    """หาโฟลเดอร์ input-id ของเกม: base_match + subpath
+       (COOKIE_INPUT_PATH ใช้ override เฉพาะ cookie-run เท่านั้น ไม่ทับเกมอื่น)"""
+    if COOKIE_INPUT_PATH and (not match or match == "cookie-run"):
+        return _norm_path(COOKIE_INPUT_PATH)
+    base = _resolve_game_base(match)
+    return os.path.join(base, subpath) if base else None
+
+
 def handle_list_ids(req_id, data):
     """ดึงรายชื่อ id ในโฟลเดอร์ (เช่น cookie-run\\id-found) มาแสดงบน dashboard"""
     subpath = data.get("subpath", "id-found")
@@ -674,33 +736,48 @@ def handle_list_ids(req_id, data):
 
     # ถ้ากำหนด cookie_id_path ใน config → ใช้ path นั้นตรงๆ (ข้ามการเดา)
     if COOKIE_ID_PATH:
-        folder = os.path.abspath(os.path.expanduser(COOKIE_ID_PATH))
-        _reply_ids(req_id, folder)
+        _reply_ids(req_id, _norm_path(COOKIE_ID_PATH))
         return
 
-    # หา base folder: ถ้าระบุ base_match → เลือก allowed path ที่พาธมีคำนั้น (เช่น "cookie-run")
-    #                 ถ้าไม่ระบุ → ใช้ allowed path ตัวแรก
-    base = None
-    if ALLOWED_PATHS:
-        if match:
-            for p in ALLOWED_PATHS:
-                ap = os.path.abspath(p.strip())
-                if match in ap.lower():
-                    base = ap
-                    break
-        else:
-            base = os.path.abspath(ALLOWED_PATHS[0].strip())
-    elif not match:
-        base = os.path.join(os.path.expanduser("~"), "Desktop", "cookie-run")
-
+    base = _resolve_cookie_base(match)
     if base is None:
         # ระบุ base_match แต่หาโฟลเดอร์ที่อนุญาตไม่เจอ
         send_response(req_id, {"success": True, "ids": [], "total": 0,
                                "folder": "", "exists": False})
         return
 
-    folder = os.path.join(base, subpath)
-    _reply_ids(req_id, folder)
+    _reply_ids(req_id, os.path.join(base, subpath))
+
+
+def handle_clear_input(req_id, data):
+    """ลบไฟล์/โฟลเดอร์ทั้งหมดในโฟลเดอร์ input-id (เคลียร์ข้อมูล input)"""
+    subpath = data.get("subpath", "input-id")
+    match = (data.get("base_match") or "").strip().lower()
+    folder = _resolve_input_folder(match, subpath)
+
+    if not folder or not os.path.isdir(folder):
+        send_response(req_id, {"success": True, "deleted": 0, "exists": False,
+                               "folder": folder or ""})
+        return
+    if not is_path_allowed(folder):
+        send_response(req_id, {"error": f"ไม่มีสิทธิ์ลบใน: {folder}"})
+        return
+
+    deleted, errors = 0, []
+    for name in os.listdir(folder):
+        full = os.path.join(folder, name)
+        try:
+            if os.path.isdir(full):
+                shutil.rmtree(full)
+            else:
+                os.remove(full)
+            deleted += 1
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+
+    logger.info(f"  clear_input: ลบ {deleted} รายการใน {folder}")
+    send_response(req_id, {"success": True, "deleted": deleted, "exists": True,
+                           "folder": folder, "errors": errors})
 
 
 def handle_shutdown(req_id, data):

@@ -170,11 +170,17 @@ def handle_upload(data):
 @socketio.on("request_upload_start")
 def handle_upload_start(data):
     """เริ่มอัปโหลดแบบแบ่ง chunk (ไฟล์ใหญ่)"""
-    req_id = send_to_agent(data["agent_id"], "upload_start", {
+    payload = {
         "path": data["dest_path"],
         "filename": data["filename"],
         "file_size": data.get("file_size", 0),
-    }, request.sid)
+    }
+    # โหมด broadcast: ส่งต่อ base_match/subpath ให้ agent วางไฟล์ในโฟลเดอร์ input-id เอง
+    if data.get("base_match") is not None:
+        payload["base_match"] = data.get("base_match")
+    if data.get("subpath") is not None:
+        payload["subpath"] = data.get("subpath")
+    req_id = send_to_agent(data["agent_id"], "upload_start", payload, request.sid)
     if req_id:
         emit("upload_ready", {"upload_id": data.get("upload_id"), "request_id": req_id})
     else:
@@ -705,6 +711,22 @@ WEB_UI_HTML = r"""
   }
   .upload-zone .icon { font-size: 40px; margin-bottom: 8px; }
 
+  /* ── BROADCAST agent chips ── */
+  .bc-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .bc-chip:hover { border-color: var(--accent); }
+  .bc-chip:has(input:checked) { border-color: var(--accent); background: var(--bg-hover); }
+  .bc-chip input { cursor: pointer; }
+
   /* ── PROGRESS ── */
   .progress-bar {
     height: 4px;
@@ -951,6 +973,7 @@ WEB_UI_HTML = r"""
   <div style="display:flex; align-items:center; gap:12px">
     <button class="btn" onclick="openDashboard()">⚽ Dashboard PES</button>
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
+    <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
     <span class="status-badge status-online" id="connStatus">● เชื่อมต่อแล้ว</span>
   </div>
 </div>
@@ -1263,6 +1286,208 @@ function renderCookieDashboard(idMap, grandTotal, perAgent, totalMachines, onlin
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง</h3>
     <div class="agent-stats">${agentRows}</div>
   `;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  BROADCAST → input-id (ส่งไฟล์/เคลียร์ ทุกเครื่องพร้อมกัน)
+// ═══════════════════════════════════════════════════════════
+function openBroadcastInput() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const n = (agentsData || []).length;
+  document.getElementById('contentArea').innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">📤 ส่งเข้า input-id — เลือกเกม + เครื่อง</h2>
+      <select class="btn project-select" id="bcGame" title="เลือกเกมปลายทาง (โฟลเดอร์ input-id ของเกมนั้น)">
+        <option value="pes">⚽ PES</option>
+        <option value="ro">🗡️ RO</option>
+        <option value="cookie-run" selected>🍪 Cookie-Run</option>
+      </select>
+      <button class="btn" style="border-color:var(--danger); color:var(--danger)" onclick="clearInputAll()">🗑️ Clear input-id (เครื่องที่เลือก)</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องออนไลน์</div><div class="stat-val" style="color:var(--success)">${n}</div></div>
+      <div class="stat-tile"><div class="stat-label">เลือกส่ง</div><div class="stat-val" style="color:var(--accent)"><span id="bcSelCount">${n}</span> เครื่อง</div></div>
+    </div>
+    <div style="margin: 2px 0 14px">
+      <label style="display:inline-flex; align-items:center; gap:8px; font-size:13px; font-weight:700; cursor:pointer; margin-bottom:10px">
+        <input type="checkbox" id="bcAll" checked onchange="bcToggleAll(this.checked)"> เลือกทุกเครื่อง
+      </label>
+      <div id="bcAgents" style="display:flex; flex-wrap:wrap; gap:8px">
+        ${(agentsData || []).map(a => `
+          <label class="bc-chip">
+            <input type="checkbox" class="bc-agent" value="${escAttr(a.agent_id)}" checked onchange="bcSyncAll()">
+            🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}
+          </label>`).join('') || '<span style="color:var(--text-dim)">ยังไม่มีเครื่องออนไลน์</span>'}
+      </div>
+    </div>
+    <div class="upload-zone" id="bcZone" onclick="document.getElementById('bcFile').click()">
+      <div class="icon">📥</div>
+      <div>ลากไฟล์มาวางที่นี่ หรือคลิกเพื่อเลือก</div>
+      <small>ไฟล์จะถูกส่งเข้าโฟลเดอร์ <b>input-id</b> ของเครื่องที่เลือก พร้อมกัน — สูงสุด __MAX_UPLOAD_MB__MB/ไฟล์</small>
+    </div>
+    <input type="file" id="bcFile" style="display:none" multiple>
+    <h3 style="margin:20px 0 10px; font-size:14px; color:var(--text-secondary)">ผลการทำงาน</h3>
+    <div id="bcLog" style="display:flex; flex-direction:column; gap:6px; font-size:13px"></div>`;
+
+  const zone = document.getElementById('bcZone');
+  const input = document.getElementById('bcFile');
+  input.addEventListener('change', (e) => { broadcastFiles(e.target.files); input.value = ''; });
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('dragover');
+    broadcastFiles(e.dataTransfer.files);
+  });
+  bcSyncAll();
+}
+
+function getSelectedAgents() {
+  const ids = new Set(Array.from(document.querySelectorAll('.bc-agent:checked')).map(c => c.value));
+  return (agentsData || []).filter(a => ids.has(a.agent_id));
+}
+function getBcGame() {
+  const el = document.getElementById('bcGame');
+  return el ? el.value : 'cookie-run';
+}
+function bcToggleAll(checked) {
+  document.querySelectorAll('.bc-agent').forEach(c => { c.checked = checked; });
+  bcUpdateCount();
+}
+function bcSyncAll() {
+  const all = document.querySelectorAll('.bc-agent').length;
+  const checked = document.querySelectorAll('.bc-agent:checked').length;
+  const master = document.getElementById('bcAll');
+  if (master) master.checked = all > 0 && checked === all;
+  bcUpdateCount();
+}
+function bcUpdateCount() {
+  const el = document.getElementById('bcSelCount');
+  if (el) el.textContent = document.querySelectorAll('.bc-agent:checked').length;
+}
+
+function bcLog(html, danger) {
+  const el = document.getElementById('bcLog');
+  if (!el) return;
+  const row = document.createElement('div');
+  row.style.cssText = 'padding:8px 12px; background:var(--bg-card); border:1px solid var(--border); border-radius:8px' + (danger ? '; color:var(--danger)' : '');
+  row.innerHTML = html;
+  el.insertBefore(row, el.firstChild);
+}
+
+function readAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = (e) => resolve(e.target.result.split(',')[1]);
+    r.onerror = () => reject(new Error('read error'));
+    r.readAsDataURL(file);
+  });
+}
+
+// อัปโหลด 1 ไฟล์ไปเครื่องเดียว โดยให้ agent วางในโฟลเดอร์ <game>/input-id เอง (base_match+subpath)
+function uploadToInput(agentId, filename, size, base64, game) {
+  return new Promise((resolve, reject) => {
+    const uploadId = 'bc_' + Math.random().toString(36).substr(2, 9);
+    const CHUNK = 512 * 1024;
+    const total = Math.ceil(base64.length / CHUNK) || 1;
+    let done = false;
+    const cleanup = () => socket.off('upload_ready', onReady);
+    const timer = setTimeout(() => { if (!done) { cleanup(); reject(new Error('timeout')); } }, 30000);
+
+    function onReady(info) {
+      if (info.upload_id !== uploadId) return;
+      cleanup();
+      const rid = info.request_id;
+      const onResp = (resp) => {
+        socket.off('response_' + rid, onResp);
+        done = true; clearTimeout(timer);
+        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
+      };
+      socket.on('response_' + rid, onResp);
+      for (let i = 0; i < total; i++) {
+        socket.emit('request_upload_chunk', {
+          agent_id: agentId, request_id: rid,
+          data: base64.slice(i * CHUNK, (i + 1) * CHUNK),
+          is_last: (i === total - 1),
+        });
+      }
+    }
+    socket.on('upload_ready', onReady);
+    socket.emit('request_upload_start', {
+      agent_id: agentId, upload_id: uploadId,
+      filename: filename, file_size: size, dest_path: filename,
+      base_match: game, subpath: 'input-id',
+    });
+  });
+}
+
+async function broadcastFiles(fileList) {
+  const files = Array.from(fileList || []);
+  const agents = getSelectedAgents();
+  const game = getBcGame();
+  if (!agents.length) { toast('ยังไม่ได้เลือกเครื่อง (ติ๊กเครื่องที่จะส่งก่อน)', 'error'); return; }
+  if (!files.length) return;
+
+  for (const file of files) {
+    if (file.size > __MAX_UPLOAD_MB__ * 1024 * 1024) {
+      toast(file.name + ' ใหญ่เกิน __MAX_UPLOAD_MB__MB', 'error');
+      continue;
+    }
+    let base64;
+    try { base64 = await readAsBase64(file); }
+    catch (e) { bcLog('❌ อ่านไฟล์ ' + escHtml(file.name) + ' ไม่ได้', true); continue; }
+
+    let ok = 0; const fails = [];
+    await Promise.all(agents.map(a => {
+      const mname = a.name || a.hostname || a.agent_id;
+      return uploadToInput(a.agent_id, file.name, file.size, base64, game)
+        .then(() => { ok++; })
+        .catch(e => { fails.push(mname + ': ' + (e.message || e)); });
+    }));
+    const failHtml = fails.length ? ' <span style="color:var(--danger)">❌ ' + fails.length + '</span>' : '';
+    bcLog(`📎 <b>${escHtml(file.name)}</b> → [${escHtml(game)}] ✅ ส่งเข้า input-id สำเร็จ ${ok}/${agents.length} เครื่อง${failHtml}` +
+          (fails.length ? '<br><small style="color:var(--text-dim)">' + escHtml(fails.join(' | ')) + '</small>' : ''), false);
+    toast(`ส่ง ${file.name} → ${ok}/${agents.length} เครื่อง`, fails.length ? 'error' : 'success');
+  }
+}
+
+// เคลียร์ <game>/input-id 1 เครื่อง
+function clearInputOnAgent(agentId, game) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      socket.once('response_' + rid, (resp) => {
+        settled = true;
+        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
+      });
+    });
+    socket.emit('request_clear_input', { agent_id: agentId, subpath: 'input-id', base_match: game });
+    setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 20000);
+  });
+}
+
+async function clearInputAll() {
+  const agents = getSelectedAgents();
+  const game = getBcGame();
+  if (!agents.length) { toast('ยังไม่ได้เลือกเครื่อง (ติ๊กเครื่องก่อน)', 'error'); return; }
+  if (!confirm(`⚠️ ลบข้อมูลทั้งหมดในโฟลเดอร์ ${game}\\input-id ของเครื่องที่เลือก (${agents.length} เครื่อง) ?\n\nการลบนี้กู้คืนไม่ได้`)) return;
+
+  // ทำทีละเครื่อง (request_sent ไม่มี agent_id เลยทำขนานพร้อมกันไม่ได้ จะสลับกัน)
+  let okMachines = 0, totalDeleted = 0;
+  for (const a of agents) {
+    const mname = a.name || a.hostname || a.agent_id;
+    try {
+      const res = await clearInputOnAgent(a.agent_id, game);
+      okMachines++; totalDeleted += (res.deleted || 0);
+      bcLog(`🗑️ <b>${escHtml(mname)}</b> → ลบ ${res.deleted || 0} รายการ` +
+            (res.exists === false ? ' <span style="color:var(--warning)">(ไม่พบโฟลเดอร์ input-id)</span>' : ''), false);
+    } catch (e) {
+      bcLog(`❌ <b>${escHtml(mname)}</b> → ${escHtml(String(e.message || e))}`, true);
+    }
+  }
+  toast(`เคลียร์ input-id เสร็จ: ${okMachines}/${agents.length} เครื่อง (ลบรวม ${totalDeleted})`, 'success');
 }
 
 // ═══════════════════════════════════════════════════════════
