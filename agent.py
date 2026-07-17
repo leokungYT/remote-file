@@ -62,6 +62,10 @@ elif isinstance(_cfg_allowed, str) and _cfg_allowed.strip():
 else:
     ALLOWED_PATHS = list(DEFAULT_ALLOWED_PATHS)
 
+# โฟลเดอร์ id ของ dashboard cookie-run (กำหนดเองได้)
+# ลำดับ: env COOKIE_ID_PATH > config.json "cookie_id_path" > ปล่อยว่าง (ใช้วิธีเดาจาก allowed_paths + base_match)
+COOKIE_ID_PATH = (os.environ.get("COOKIE_ID_PATH") or _cfg.get("cookie_id_path") or "").strip()
+
 CHUNK_SIZE = 512 * 1024  # 512KB per chunk
 RECONNECT_DELAY = 5  # seconds
 
@@ -228,6 +232,8 @@ def on_command(data):
             handle_delete_many(req_id, payload)
         elif action == "count_heroes":
             handle_count_heroes(req_id, payload)
+        elif action == "list_ids":
+            handle_list_ids(req_id, payload)
         elif action == "rename_file":
             handle_rename(req_id, payload)
         elif action == "move_file":
@@ -636,6 +642,63 @@ def handle_count_heroes(req_id, data):
     logger.info(f"  count_heroes: {total_files} files, {len(combos)} combos in {folder} (exists={exists})")
     send_response(req_id, {"success": True, "combos": combos,
                            "total_files": total_files, "folder": folder, "exists": exists})
+
+
+def _reply_ids(req_id, folder):
+    """สแกนโฟลเดอร์ folder แล้วส่งรายชื่อ id กลับ (โฟลเดอร์=ชื่อตรง, ไฟล์=ตัดนามสกุล)"""
+    exists = os.path.isdir(folder)
+    ids = []
+    if exists:
+        try:
+            for name in sorted(os.listdir(folder)):
+                if name.startswith("."):
+                    continue
+                full = os.path.join(folder, name)
+                stem = name if os.path.isdir(full) else os.path.splitext(name)[0]
+                if stem:
+                    ids.append(stem)
+        except Exception as e:
+            send_response(req_id, {"error": str(e)})
+            return
+    logger.info(f"  list_ids: {len(ids)} ids in {folder} (exists={exists})")
+    send_response(req_id, {"success": True, "ids": ids, "total": len(ids),
+                           "folder": folder, "exists": exists})
+
+
+def handle_list_ids(req_id, data):
+    """ดึงรายชื่อ id ในโฟลเดอร์ (เช่น cookie-run\\id-found) มาแสดงบน dashboard"""
+    subpath = data.get("subpath", "id-found")
+    match = (data.get("base_match") or "").strip().lower()
+
+    # ถ้ากำหนด cookie_id_path ใน config → ใช้ path นั้นตรงๆ (ข้ามการเดา)
+    if COOKIE_ID_PATH:
+        folder = os.path.abspath(os.path.expanduser(COOKIE_ID_PATH))
+        _reply_ids(req_id, folder)
+        return
+
+    # หา base folder: ถ้าระบุ base_match → เลือก allowed path ที่พาธมีคำนั้น (เช่น "cookie-run")
+    #                 ถ้าไม่ระบุ → ใช้ allowed path ตัวแรก
+    base = None
+    if ALLOWED_PATHS:
+        if match:
+            for p in ALLOWED_PATHS:
+                ap = os.path.abspath(p.strip())
+                if match in ap.lower():
+                    base = ap
+                    break
+        else:
+            base = os.path.abspath(ALLOWED_PATHS[0].strip())
+    elif not match:
+        base = os.path.join(os.path.expanduser("~"), "Desktop", "cookie-run")
+
+    if base is None:
+        # ระบุ base_match แต่หาโฟลเดอร์ที่อนุญาตไม่เจอ
+        send_response(req_id, {"success": True, "ids": [], "total": 0,
+                               "folder": "", "exists": False})
+        return
+
+    folder = os.path.join(base, subpath)
+    _reply_ids(req_id, folder)
 
 
 # ═══════════════════════════════════════════════════════════

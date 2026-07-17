@@ -236,6 +236,19 @@ def handle_count_heroes(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_list_ids")
+def handle_list_ids(data):
+    """ขอให้เครื่องลูกดึงรายชื่อ id ในโฟลเดอร์ (เช่น cookie-run\\id-found)"""
+    req_id = send_to_agent(data["agent_id"], "list_ids", {
+        "subpath": data.get("subpath", "id-found"),
+        "base_match": data.get("base_match", "cookie-run"),
+    }, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 @socketio.on("request_rename")
 def handle_rename(data):
     """เปลี่ยนชื่อไฟล์ในเครื่องลูก"""
@@ -820,6 +833,56 @@ WEB_UI_HTML = r"""
   .hero-card.combo { border-color: rgba(245,158,11,0.35); background: linear-gradient(140deg, var(--bg-card), rgba(245,158,11,0.05)); }
   .hero-card.combo .hero-count { color: var(--warning); }
 
+  /* ── COOKIE-RUN id cards (แสดงชื่อ id) ── */
+  .id-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 9px;
+  }
+  .id-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 11px 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 58px;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .id-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.3);
+  }
+  .id-name-big {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.35;
+    word-break: break-all;
+  }
+  .id-machine {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    margin-top: auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .id-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--warning);
+    background: rgba(245,158,11,0.12);
+    border-radius: 6px;
+    padding: 1px 6px;
+    margin-left: 4px;
+    vertical-align: middle;
+  }
+
   .agent-stats { display: flex; flex-direction: column; gap: 8px; }
   .agent-stat {
     display: flex;
@@ -857,7 +920,8 @@ WEB_UI_HTML = r"""
     Remote File Manager
   </h1>
   <div style="display:flex; align-items:center; gap:12px">
-    <button class="btn" onclick="openDashboard()">📊 Dashboard</button>
+    <button class="btn" onclick="openDashboard()">⚽ Dashboard PES</button>
+    <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <span class="status-badge status-online" id="connStatus">● เชื่อมต่อแล้ว</span>
   </div>
 </div>
@@ -934,12 +998,13 @@ let agentsData = [];
 const HERO_LIST = ["Fabio Cannavaro","Paolo Maldini","Daniele De Rossi","Didier Drogba","Mohamed Salah","Nico Paz","Federico Dimarco","Luka","rgson","Arribas","Aubameyang","Ramedhan Saifullah","Chrigor","Lamine=x2","Mbappe","Joan Garcia","Martin Odegaard","Atep","Gareth Bale","Marcelo","Peter Schmeichel","Leonardo Bonucci","Ronald Koeman","Casemiro","Erling Haaland","Hugo Ekitike","Declan Rice","Hidetoshi Nakata","Seigo Narazaki","Shunsuke Nakamura","Vitinha","David Raya","Kvaratskhelia","Johan Cruyff","Filippo Inzaghi","Jordi Alba","Oliver Kahn","David Beckham","Rivaldo","Gianluigi Buffon","Andrea Pirlo","Gialuca Zambrotta","Lilian Thuram","Patrick Vieira","Marcel Desailly","Luis Suarez","Schweinsteiger","Bronckhorst"];
 
 let dashboardScope = 'ALL';  // 'ALL' = รวมทุกเครื่อง, หรือ agent_id ของเครื่องที่เลือก
+let cookieScope = 'ALL';     // scope แยกของ dashboard cookie-run
 
-function pcSelectHtml() {
+function pcSelectHtml(scopeVal, onchangeExpr) {
   const agents = agentsData || [];
-  let opts = `<option value="ALL"${dashboardScope === 'ALL' ? ' selected' : ''}>🖥️ รวมทุกเครื่อง</option>`;
-  opts += agents.map(a => `<option value="${escHtml(a.agent_id)}"${dashboardScope === a.agent_id ? ' selected' : ''}>🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}</option>`).join('');
-  return `<select class="btn project-select" onchange="dashboardScope=this.value; openDashboard()" title="เลือกเครื่องที่จะแสดง">${opts}</select>`;
+  let opts = `<option value="ALL"${scopeVal === 'ALL' ? ' selected' : ''}>🖥️ รวมทุกเครื่อง</option>`;
+  opts += agents.map(a => `<option value="${escHtml(a.agent_id)}"${scopeVal === a.agent_id ? ' selected' : ''}>🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}</option>`).join('');
+  return `<select class="btn project-select" onchange="${onchangeExpr}" title="เลือกเครื่องที่จะแสดง">${opts}</select>`;
 }
 
 function countHeroesOnAgent(agentId) {
@@ -967,8 +1032,8 @@ async function openDashboard() {
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">📊 Dashboard — found-hero</h2>
-      ${pcSelectHtml()}
+      <h2 style="flex:1; font-size:18px">⚽ Dashboard PES — found-hero</h2>
+      ${pcSelectHtml(dashboardScope, 'dashboardScope=this.value; openDashboard()')}
       <button class="btn btn-primary" onclick="openDashboard()">🔄 รีเฟรช</button>
     </div>
     <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
@@ -1000,7 +1065,7 @@ async function openDashboard() {
 function filterHeroCards(q) {
   q = (q || '').trim().toLowerCase();
   let shown = 0;
-  document.querySelectorAll('.hero-card').forEach(card => {
+  document.querySelectorAll('.hero-card, .id-card').forEach(card => {
     const match = !q || (card.dataset.name || '').toLowerCase().includes(q);
     card.style.display = match ? '' : 'none';
     if (match) shown++;
@@ -1028,8 +1093,8 @@ function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlin
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">📊 Dashboard — found-hero</h2>
-      ${pcSelectHtml()}
+      <h2 style="flex:1; font-size:18px">⚽ Dashboard PES — found-hero</h2>
+      ${pcSelectHtml(dashboardScope, 'dashboardScope=this.value; openDashboard()')}
       <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อฮีโร่ / combo..." oninput="filterHeroCards(this.value)">
       <button class="btn btn-primary" onclick="openDashboard()">🔄 รีเฟรช</button>
     </div>
@@ -1041,6 +1106,109 @@ function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlin
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
     </div>
     <div class="hero-grid">${cards}</div>
+    <div id="dashNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง</h3>
+    <div class="agent-stats">${agentRows}</div>
+  `;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  DASHBOARD COOKIE-RUN (ดึงชื่อ id จากโฟลเดอร์ id-found)
+// ═══════════════════════════════════════════════════════════
+function listIdsOnAgent(agentId) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      socket.once('response_' + rid, (resp) => {
+        settled = true;
+        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
+      });
+    });
+    socket.emit('request_list_ids', { agent_id: agentId, subpath: 'id-found', base_match: 'cookie-run' });
+    setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 20000);
+  });
+}
+
+async function openCookieDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const allAgents = agentsData || [];
+  if (cookieScope !== 'ALL' && !allAgents.some(a => a.agent_id === cookieScope)) cookieScope = 'ALL';
+  const agents = cookieScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === cookieScope);
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🍪 Dashboard Cookie-Run — id-found</h2>
+      ${pcSelectHtml(cookieScope, 'cookieScope=this.value; openCookieDashboard()')}
+      <button class="btn btn-primary" onclick="openCookieDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+
+  if (!allAgents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+
+  const idMap = {};   // idName -> [machine, ...]
+  let grandTotal = 0, onlineCount = 0;
+  const perAgent = [];
+
+  for (const a of agents) {
+    const mname = a.name || a.hostname || a.agent_id;
+    try {
+      const res = await listIdsOnAgent(a.agent_id);
+      onlineCount++;
+      grandTotal += res.total || 0;
+      perAgent.push({ name: mname, total: res.total || 0, exists: res.exists });
+      (res.ids || []).forEach(id => {
+        if (!idMap[id]) idMap[id] = [];
+        idMap[id].push(mname);
+      });
+    } catch (e) {
+      perAgent.push({ name: mname, error: String(e.message || e) });
+    }
+  }
+  renderCookieDashboard(idMap, grandTotal, perAgent, agents.length, onlineCount);
+}
+
+function renderCookieDashboard(idMap, grandTotal, perAgent, totalMachines, onlineCount) {
+  const content = document.getElementById('contentArea');
+  const ids = Object.keys(idMap).sort((a, b) => a.localeCompare(b));
+  const uniqueCount = ids.length;
+  const cards = ids.length ? ids.map(id => {
+    const machines = idMap[id];
+    const uniqMachines = [...new Set(machines)];
+    const machineLabel = uniqMachines.join(', ');
+    const dup = machines.length > 1;
+    return `
+    <div class="id-card" data-name="${escHtml(id)}">
+      <div class="id-name-big" title="${escHtml(id)}">🍪 ${escHtml(id)}${dup ? `<span class="id-badge">×${machines.length}</span>` : ''}</div>
+      <div class="id-machine" title="${escHtml(machineLabel)}">🖥️ ${escHtml(machineLabel)}</div>
+    </div>`;
+  }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบ id ในโฟลเดอร์ id-found</h3></div>';
+
+  const agentRows = perAgent.map(p => `
+    <div class="agent-stat">
+      <span>🖥️ ${escHtml(p.name)}</span>
+      <span>${p.error ? '<span style="color:var(--danger)">' + escHtml(p.error) + '</span>' : (p.exists === false ? '<span style="color:var(--warning)">ไม่พบโฟลเดอร์ id-found</span>' : p.total + ' id')}</span>
+    </div>`).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🍪 Dashboard Cookie-Run — id-found</h2>
+      ${pcSelectHtml(cookieScope, 'cookieScope=this.value; openCookieDashboard()')}
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อ id..." oninput="filterHeroCards(this.value)">
+      <button class="btn btn-primary" onclick="openCookieDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
+      <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
+      <div class="stat-tile"><div class="stat-label">id ทั้งหมด</div><div class="stat-val" style="color:var(--accent)">${grandTotal}</div></div>
+      <div class="stat-tile"><div class="stat-label">id ไม่ซ้ำ</div><div class="stat-val" style="color:var(--success)">${uniqueCount}</div></div>
+    </div>
+    <div class="id-grid">${cards}</div>
     <div id="dashNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง</h3>
     <div class="agent-stats">${agentRows}</div>
