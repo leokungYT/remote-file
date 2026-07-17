@@ -1615,16 +1615,20 @@ async function updateSelectedAgents() {
   for (const a of agents) {
     const mname = a.name || a.hostname || a.agent_id;
     try {
-      await updateOneAgent(a.agent_id);
+      const res = await updateOneAgent(a.agent_id);
       ok++;
-      bcLog(`⬆️ <b>${escHtml(mname)}</b> → สั่งอัปเดตแล้ว กำลังดึงโค้ด + รีสตาร์ท...`, false);
+      if (res && res.updated === false) {
+        bcLog(`✅ <b>${escHtml(mname)}</b> → เป็นเวอร์ชันล่าสุดอยู่แล้ว (ไม่ต้องอัปเดต)`, false);
+      } else {
+        bcLog(`⬆️ <b>${escHtml(mname)}</b> → มีของใหม่! กำลังอัปเดต + รีสตาร์ท...`, false);
+      }
     } catch (e) {
       const msg = String(e.message || e);
       const isOld = /unknown action/i.test(msg);
       bcLog(`❌ <b>${escHtml(mname)}</b> → ${isOld ? 'agent เก่ายังไม่รองรับ (ต้องอัปเดตด้วยมือครั้งแรกก่อน)' : escHtml(msg)}`, true);
     }
   }
-  toast(`ส่งคำสั่งอัปเดต ${ok}/${agents.length} เครื่อง — รอเครื่องรีสตาร์ทและกลับมาเชื่อมต่อ`, 'success');
+  toast(`เช็กอัปเดต ${ok}/${agents.length} เครื่องเสร็จ`, 'success');
 }
 
 // ═══════════════════════════════════════════════════════════

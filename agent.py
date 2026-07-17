@@ -866,22 +866,28 @@ def _release_single_instance():
 
 
 def _download_new_agent():
-    """โหลด agent.py ตัวล่าสุดจาก server (/agent.py) มาเขียนทับ
-       - ใช้ server เป็นแหล่ง เชื่อถือได้กว่า GitHub และไม่ต้อง push ก่อน
+    """โหลด agent.py ตัวล่าสุดจาก server (/agent.py) มาเขียนทับ ถ้าต่างจากเดิม
+       คืน True = มีของใหม่เขียนทับแล้ว, False = เหมือนเดิม (ไม่ต้องรีสตาร์ท)
        - ตรวจไฟล์ก่อนเขียนทับ กันโหลดหน้า error / ไฟล์เพี้ยนมาทำ agent พัง"""
     import requests
     here = os.path.dirname(os.path.abspath(__file__))
-    url = SERVER_URL.rstrip("/") + "/agent.py"
-    r = requests.get(url, timeout=30)
+    dest = os.path.join(here, "agent.py")
+    r = requests.get(SERVER_URL.rstrip("/") + "/agent.py", timeout=30)
     r.raise_for_status()
     code = r.content
     text = code.decode("utf-8", "ignore")
-    # sanity check: ต้องดูเป็น agent.py จริง ไม่งั้นไม่เขียนทับ
     if len(code) < 3000 or "RemoteFileManagerAgent_SingleInstance" not in text or "def main()" not in text:
         raise RuntimeError("agent.py ที่โหลดมาไม่ถูกต้อง (ยกเลิกการอัปเดต)")
-    with open(os.path.join(here, "agent.py"), "wb") as f:
+    try:
+        with open(dest, "rb") as f:
+            if f.read() == code:
+                return False   # เหมือนเดิม
+    except Exception:
+        pass
+    with open(dest, "wb") as f:
         f.write(code)
     logger.info(f"⬆️ อัปเดต agent.py จาก server สำเร็จ ({len(code)} bytes)")
+    return True
 
 
 def _relaunch_and_exit():
@@ -914,12 +920,18 @@ def handle_self_update(req_id, data):
 
     def _go():
         try:
-            _download_new_agent()
+            changed = _download_new_agent()
         except Exception as e:
             logger.error(f"update failed: {e}")
             send_response(req_id, {"error": f"อัปเดตไม่สำเร็จ: {e}"})
             return  # ไม่รีสตาร์ท agent เดิมยังทำงานต่อ
-        send_response(req_id, {"success": True, "message": "updated, restarting"})
+        if not changed:
+            logger.info("✅ agent เป็นเวอร์ชันล่าสุดอยู่แล้ว (ไม่ต้องรีสตาร์ท)")
+            send_response(req_id, {"success": True, "updated": False,
+                                   "message": "already up to date"})
+            return
+        send_response(req_id, {"success": True, "updated": True,
+                               "message": "updated, restarting"})
         time.sleep(0.4)  # ให้ response ส่งถึงก่อนรีสตาร์ท
         _relaunch_and_exit()
 
