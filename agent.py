@@ -282,6 +282,8 @@ def on_command(data):
             handle_clear_input(req_id, payload)
         elif action == "self_update":
             handle_self_update(req_id, payload)
+        elif action == "screenshot":
+            handle_screenshot(req_id, payload)
         else:
             send_response(req_id, {"error": f"Unknown action: {action}"})
     except Exception as e:
@@ -700,15 +702,18 @@ def handle_count_heroes(req_id, data):
 
 
 def _reply_ids(req_id, folder):
-    """สแกนโฟลเดอร์ folder แล้วส่งรายชื่อ id กลับ (โฟลเดอร์=ชื่อตรง, ไฟล์=ตัดนามสกุล)"""
+    """สแกนโฟลเดอร์ folder แล้วส่งรายชื่อ id + full path จริงกลับ
+       (ids = ชื่อโชว์บน dashboard, entries = path จริงไว้ใช้ลบแบบปกติ)"""
     exists = os.path.isdir(folder)
     ids = []
+    entries = []
     if exists:
         try:
             for name in sorted(os.listdir(folder)):
+                full = os.path.join(folder, name)
+                entries.append(full)                       # path จริงทุกไฟล์/โฟลเดอร์ (ไว้ลบ)
                 if name.startswith("."):
                     continue
-                full = os.path.join(folder, name)
                 stem = name if os.path.isdir(full) else os.path.splitext(name)[0]
                 if stem:
                     ids.append(stem)
@@ -717,7 +722,7 @@ def _reply_ids(req_id, folder):
             return
     logger.info(f"  list_ids: {len(ids)} ids in {folder} (exists={exists})")
     send_response(req_id, {"success": True, "ids": ids, "total": len(ids),
-                           "folder": folder, "exists": exists})
+                           "entries": entries, "folder": folder, "exists": exists})
 
 
 def _resolve_game_base(match):
@@ -803,6 +808,28 @@ def handle_clear_input(req_id, data):
     logger.info(f"  clear_input: ลบ {deleted} รายการใน {folder}")
     send_response(req_id, {"success": True, "deleted": deleted, "exists": True,
                            "folder": folder, "errors": errors})
+
+
+def handle_screenshot(req_id, data):
+    """จับภาพหน้าจอเครื่องนี้ ส่งกลับเป็น JPEG base64 (สำหรับ live view / PC monitor)"""
+    try:
+        import io
+        from PIL import ImageGrab
+        max_w = int(data.get("width") or 640)
+        quality = int(data.get("quality") or 55)
+        img = ImageGrab.grab()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        w, h = img.size
+        if w > max_w:
+            img = img.resize((max_w, max(1, int(h * max_w / w))))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        send_response(req_id, {"success": True, "image": b64,
+                               "w": img.size[0], "h": img.size[1]})
+    except Exception as e:
+        send_response(req_id, {"error": f"จับภาพหน้าจอไม่ได้: {e}"})
 
 
 def handle_shutdown(req_id, data):

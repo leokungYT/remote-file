@@ -67,6 +67,14 @@ def handle_agent_register(data):
         return
 
     agent_id = data.get("agent_id", f"agent-{len(agents)+1}")
+
+    # ลบ connection เก่าของ agent_id เดียวกัน (กัน zombie ค้าง ทำให้คำสั่งวิ่งเข้าตัวที่ตายแล้ว → timeout)
+    stale_sids = [sid for sid, info in agents.items()
+                  if info.get("agent_id") == agent_id and sid != request.sid]
+    for sid in stale_sids:
+        agents.pop(sid, None)
+        logger.info(f"🧹 แทนที่ connection เก่าของ {agent_id} (sid {sid[:6]}…)")
+
     agents[request.sid] = {
         "agent_id": agent_id,
         "name": data.get("name", ""),
@@ -301,6 +309,19 @@ def handle_self_update_req(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_screenshot")
+def handle_screenshot_req(data):
+    """สั่งให้ agent จับภาพหน้าจอส่งกลับ (live view / PC monitor)"""
+    req_id = send_to_agent(data["agent_id"], "screenshot", {
+        "width": data.get("width", 640),
+        "quality": data.get("quality", 55),
+    }, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 # ═══════════════════════════════════════════════════════════
 #  UTILITY FUNCTIONS
 # ═══════════════════════════════════════════════════════════
@@ -321,15 +342,13 @@ def get_agents_list():
 
 
 def send_to_agent(agent_id, action, data, web_sid):
-    """ส่งคำสั่งไปยังเครื่องลูก"""
-    target_sid = None
-    for sid, info in agents.items():
-        if info["agent_id"] == agent_id:
-            target_sid = sid
-            break
-
-    if not target_sid:
+    """ส่งคำสั่งไปยังเครื่องลูก (เลือก connection ล่าสุดของ agent_id กันตัวค้างเก่า)"""
+    matches = [(info.get("connected_at", ""), sid)
+               for sid, info in agents.items() if info.get("agent_id") == agent_id]
+    if not matches:
         return None
+    matches.sort()
+    target_sid = matches[-1][1]
 
     req_id = str(uuid.uuid4())[:8]
     pending_requests[req_id] = {
@@ -737,6 +756,43 @@ WEB_UI_HTML = r"""
   .bc-chip:has(input:checked) { border-color: var(--accent); background: var(--bg-hover); }
   .bc-chip input { cursor: pointer; }
 
+  /* ── LIVE VIEW / PC MONITOR ── */
+  .pc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px;
+  }
+  .pc-grid.single { grid-template-columns: 1fr; }
+  .pc-tile {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: border-color .15s, transform .15s;
+  }
+  .pc-tile:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .pc-shot {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .pc-shot img { width: 100%; height: 100%; object-fit: contain; display: none; }
+  .pc-noimg { position: absolute; color: var(--text-dim); font-size: 13px; }
+  .pc-tile-bar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 9px 12px; font-size: 13px; font-weight: 600;
+  }
+  .pc-live-dot { font-size: 11px; font-weight: 500; color: var(--text-dim); }
+  .pc-pager {
+    display: flex; justify-content: center; align-items: center; gap: 14px;
+    margin-top: 22px; color: var(--text-secondary); font-size: 13px;
+  }
+  .pc-pager .btn { padding: 6px 13px; }
+  .pc-pager .btn:disabled { opacity: .4; cursor: default; }
+
   /* ── PROGRESS ── */
   .progress-bar {
     height: 4px;
@@ -984,6 +1040,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openDashboard()">⚽ Dashboard PES</button>
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
+    <button class="btn" onclick="openLiveView()">🖥️ Live View</button>
     <span class="status-badge status-online" id="connStatus">● เชื่อมต่อแล้ว</span>
   </div>
 </div>
@@ -1463,8 +1520,8 @@ async function broadcastFiles(fileList) {
   }
 }
 
-// เคลียร์ <game>/input-id 1 เครื่อง
-function clearInputOnAgent(agentId, game) {
+// ถาม path จริงของไฟล์ใน <game>/input-id (ใช้ list_ids ที่คืน entries = full path)
+function listInputEntries(agentId, game) {
   return new Promise((resolve, reject) => {
     let settled = false;
     socket.once('request_sent', (data) => {
@@ -1474,8 +1531,24 @@ function clearInputOnAgent(agentId, game) {
         if (resp.error) reject(new Error(resp.error)); else resolve(resp);
       });
     });
-    socket.emit('request_clear_input', { agent_id: agentId, subpath: 'input-id', base_match: game });
+    socket.emit('request_list_ids', { agent_id: agentId, subpath: 'input-id', base_match: game });
     setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 20000);
+  });
+}
+
+// ลบหลายไฟล์ด้วยกลไก "ลบปกติ" เดียวกับ file browser (request_delete_many)
+function deleteManyOnAgent(agentId, paths) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      socket.once('response_' + rid, (resp) => {
+        settled = true;
+        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
+      });
+    });
+    socket.emit('request_delete_many', { agent_id: agentId, paths: paths });
+    setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 30000);
   });
 }
 
@@ -1485,15 +1558,26 @@ async function clearInputAll() {
   if (!agents.length) { toast('ยังไม่ได้เลือกเครื่อง (ติ๊กเครื่องก่อน)', 'error'); return; }
   if (!confirm(`⚠️ ลบข้อมูลทั้งหมดในโฟลเดอร์ ${game}\\input-id ของเครื่องที่เลือก (${agents.length} เครื่อง) ?\n\nการลบนี้กู้คืนไม่ได้`)) return;
 
-  // ทำทีละเครื่อง (request_sent ไม่มี agent_id เลยทำขนานพร้อมกันไม่ได้ จะสลับกัน)
+  // ทำทีละเครื่อง: ถาม path จริง → ลบด้วย request_delete_many (ตัวลบปกติ)
   let okMachines = 0, totalDeleted = 0;
   for (const a of agents) {
     const mname = a.name || a.hostname || a.agent_id;
     try {
-      const res = await clearInputOnAgent(a.agent_id, game);
+      const info = await listInputEntries(a.agent_id, game);
+      if (info.exists === false) {
+        bcLog(`🗑️ <b>${escHtml(mname)}</b> → <span style="color:var(--warning)">ไม่พบโฟลเดอร์ input-id</span>`, false);
+        continue;
+      }
+      const paths = info.entries || [];
+      if (!paths.length) {
+        okMachines++;
+        bcLog(`🗑️ <b>${escHtml(mname)}</b> → ว่างอยู่แล้ว (0 รายการ)`, false);
+        continue;
+      }
+      const res = await deleteManyOnAgent(a.agent_id, paths);
       okMachines++; totalDeleted += (res.deleted || 0);
       bcLog(`🗑️ <b>${escHtml(mname)}</b> → ลบ ${res.deleted || 0} รายการ` +
-            (res.exists === false ? ' <span style="color:var(--warning)">(ไม่พบโฟลเดอร์ input-id)</span>' : ''), false);
+            (res.failed ? ` <span style="color:var(--warning)">(พลาด ${res.failed})</span>` : ''), false);
     } catch (e) {
       bcLog(`❌ <b>${escHtml(mname)}</b> → ${escHtml(String(e.message || e))}`, true);
     }
@@ -1537,6 +1621,128 @@ async function updateSelectedAgents() {
   }
   toast(`ส่งคำสั่งอัปเดต ${ok}/${agents.length} เครื่อง — รอเครื่องรีสตาร์ทและกลับมาเชื่อมต่อ`, 'success');
 }
+
+// ═══════════════════════════════════════════════════════════
+//  LIVE VIEW / PC MONITOR (ดูหน้าจอเครื่องลูกแบบสด)
+// ═══════════════════════════════════════════════════════════
+let liveScope = 'ALL';
+let livePage = 0;
+let liveGen = 0;              // generation กันมี loop ซ้อนกัน
+const LIVE_PAGE_SIZE = 6;
+
+function liveFilteredAgents() {
+  const all = agentsData || [];
+  return liveScope === 'ALL' ? all : all.filter(a => a.agent_id === liveScope);
+}
+function liveCurrentPageAgents() {
+  const agents = liveFilteredAgents();
+  const totalPages = Math.max(1, Math.ceil(agents.length / LIVE_PAGE_SIZE));
+  if (livePage >= totalPages) livePage = totalPages - 1;
+  if (livePage < 0) livePage = 0;
+  return agents.slice(livePage * LIVE_PAGE_SIZE, (livePage + 1) * LIVE_PAGE_SIZE);
+}
+
+function openLiveView() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  livePage = 0;
+  renderLiveView();
+  const gen = ++liveGen;
+  liveLoop(gen);
+}
+
+function renderLiveView() {
+  const content = document.getElementById('contentArea');
+  const all = liveFilteredAgents();
+  const totalPages = Math.max(1, Math.ceil(all.length / LIVE_PAGE_SIZE));
+  if (livePage >= totalPages) livePage = totalPages - 1;
+  const pageAgents = liveCurrentPageAgents();
+
+  const options = `<option value="ALL"${liveScope === 'ALL' ? ' selected' : ''}>🖥️ All PCs</option>` +
+    (agentsData || []).map(a => `<option value="${escAttr(a.agent_id)}"${liveScope === a.agent_id ? ' selected' : ''}>🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}</option>`).join('');
+
+  const cards = pageAgents.length ? pageAgents.map(a => {
+    const mname = a.name || a.hostname || a.agent_id;
+    const aid = escAttr(a.agent_id);
+    return `
+    <div class="pc-tile" onclick="liveToggleZoom('${aid}')" title="คลิกเพื่อซูม/ยกเลิกซูม">
+      <div class="pc-shot">
+        <img data-aid="${aid}" alt="${escHtml(mname)}">
+        <div class="pc-noimg" data-noimg="${aid}">⏳ กำลังโหลดภาพ...</div>
+      </div>
+      <div class="pc-tile-bar">
+        <span>🖥️ ${escHtml(mname)}</span>
+        <span class="pc-live-dot" data-st="${aid}">●</span>
+      </div>
+    </div>`;
+  }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">🖥️</div><h3>No PCs found</h3><p>ยังไม่มีเครื่องลูกออนไลน์</p></div>';
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🖥️ PC Monitor — Live View
+        <span style="color:var(--text-dim); font-weight:400; font-size:13px">(${all.length} PCs)</span></h2>
+      <select class="btn project-select" onchange="liveScope=this.value; livePage=0; renderLiveView()">${options}</select>
+    </div>
+    <div class="pc-grid${liveScope !== 'ALL' ? ' single' : ''}" id="pcGrid">${cards}</div>
+    <div class="pc-pager">
+      <button class="btn" onclick="livePage=Math.max(0,livePage-1); renderLiveView()" ${livePage === 0 ? 'disabled' : ''}>‹</button>
+      <span>Page ${livePage + 1} of ${totalPages}</span>
+      <button class="btn" onclick="livePage=Math.min(${totalPages - 1},livePage+1); renderLiveView()" ${livePage >= totalPages - 1 ? 'disabled' : ''}>›</button>
+    </div>`;
+}
+
+function liveToggleZoom(aid) {
+  liveScope = (liveScope === aid) ? 'ALL' : aid;
+  livePage = 0;
+  renderLiveView();
+}
+
+function screenshotOnAgent(agentId) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      socket.once('response_' + rid, (resp) => {
+        settled = true;
+        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
+      });
+    });
+    socket.emit('request_screenshot', { agent_id: agentId, width: 720, quality: 55 });
+    setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 12000);
+  });
+}
+
+// ลูปรีเฟรชภาพ: ทำทีละเครื่อง (กัน request_sent ชนกัน) แล้ววนใหม่ หยุดเองเมื่อออกจากหน้า
+async function liveLoop(gen) {
+  while (gen === liveGen && document.getElementById('pcGrid')) {
+    const agents = liveCurrentPageAgents();
+    if (!agents.length) { await _sleep(1000); continue; }
+    for (const a of agents) {
+      if (gen !== liveGen || !document.getElementById('pcGrid')) return;
+      const st = document.querySelector('#pcGrid [data-st="' + cssEsc(a.agent_id) + '"]');
+      try {
+        const res = await screenshotOnAgent(a.agent_id);
+        if (gen !== liveGen) return;
+        const img = document.querySelector('#pcGrid img[data-aid="' + cssEsc(a.agent_id) + '"]');
+        const no = document.querySelector('#pcGrid [data-noimg="' + cssEsc(a.agent_id) + '"]');
+        if (img && res.image) {
+          img.src = 'data:image/jpeg;base64,' + res.image;
+          img.style.display = 'block';
+          if (no) no.style.display = 'none';
+          if (st) { st.textContent = '🟢 live'; st.style.color = 'var(--success)'; }
+        }
+      } catch (e) {
+        if (st) { st.textContent = '⚠️ ' + String(e.message || e).slice(0, 24); st.style.color = 'var(--warning)'; }
+        const no = document.querySelector('#pcGrid [data-noimg="' + cssEsc(a.agent_id) + '"]');
+        if (no) no.textContent = '⚠️ ดูภาพไม่ได้';
+      }
+    }
+    await _sleep(500);   // เว้นจังหวะก่อนรอบใหม่
+  }
+}
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function cssEsc(s) { return String(s).replace(/["\\]/g, '\\$&'); }
 
 // ═══════════════════════════════════════════════════════════
 //  SOCKET CONNECTION
