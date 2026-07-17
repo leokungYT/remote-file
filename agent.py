@@ -760,12 +760,13 @@ def _resolve_input_folder(match, subpath="input-id"):
 
 
 def handle_list_ids(req_id, data):
-    """ดึงรายชื่อ id ในโฟลเดอร์ (เช่น cookie-run\\id-found) มาแสดงบน dashboard"""
+    """ดึงรายชื่อ id + path จริงในโฟลเดอร์ (dashboard=id-found, clear=input-id)"""
     subpath = data.get("subpath", "id-found")
     match = (data.get("base_match") or "").strip().lower()
 
-    # ถ้ากำหนด cookie_id_path ใน config → ใช้ path นั้นตรงๆ (ข้ามการเดา)
-    if COOKIE_ID_PATH:
+    # cookie_id_path override ใช้เฉพาะ dashboard cookie-run (id-found) เท่านั้น
+    # ห้ามไปทับตอนถาม input-id (clear) หรือเกมอื่น ไม่งั้น clear จะลบผิดโฟลเดอร์
+    if COOKIE_ID_PATH and subpath == "id-found" and (not match or match == "cookie-run"):
         _reply_ids(req_id, _norm_path(COOKIE_ID_PATH))
         return
 
@@ -773,7 +774,7 @@ def handle_list_ids(req_id, data):
     if base is None:
         # ระบุ base_match แต่หาโฟลเดอร์ที่อนุญาตไม่เจอ
         send_response(req_id, {"success": True, "ids": [], "total": 0,
-                               "folder": "", "exists": False})
+                               "entries": [], "folder": "", "exists": False})
         return
 
     _reply_ids(req_id, os.path.join(base, subpath))
