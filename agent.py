@@ -925,6 +925,34 @@ def handle_self_update(req_id, data):
     threading.Thread(target=_go, daemon=True).start()
 
 
+def _startup_autoupdate():
+    """ตอนเปิด agent: เช็ก agent.py ใหม่จาก server ถ้ามีของใหม่กว่า → เขียนทับ + รีสตาร์ท
+       ครอบคลุมทุกวิธีเปิด (bat / vbs / scheduled task) — ปิดได้ด้วย env AGENT_NO_AUTOUPDATE=1"""
+    if os.environ.get("AGENT_NO_AUTOUPDATE"):
+        return
+    try:
+        import requests
+        here = os.path.dirname(os.path.abspath(__file__))
+        r = requests.get(SERVER_URL.rstrip("/") + "/agent.py", timeout=8)
+        if r.status_code != 200 or not r.content:
+            return
+        new = r.content
+        text = new.decode("utf-8", "ignore")
+        # ตรวจว่าเป็น agent.py จริง กันโหลดหน้า error/ไฟล์เพี้ยนมาทับ
+        if len(new) < 3000 or "RemoteFileManagerAgent_SingleInstance" not in text or "def main()" not in text:
+            return
+        with open(os.path.join(here, "agent.py"), "rb") as f:
+            if f.read() == new:
+                return   # เหมือนเดิม ไม่ต้องทำอะไร
+        with open(os.path.join(here, "agent.py"), "wb") as f:
+            f.write(new)
+        logger.info("⬆️ พบ agent.py เวอร์ชันใหม่จาก server — อัปเดตแล้ว กำลังรีสตาร์ท")
+    except Exception as e:
+        logger.info(f"(ข้ามการเช็กอัปเดตตอนเปิด: {e})")
+        return
+    _relaunch_and_exit()
+
+
 # ═══════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════
@@ -1091,6 +1119,7 @@ def main():
         print()
         sys.exit(1)
 
+    _startup_autoupdate()      # เช็ก agent.py ใหม่จาก server ก่อน (ถ้ามี → อัปเดต+รีสตาร์ท)
     _attach_ui_log_handler()   # ให้ log ไหลเข้าหน้าต่างสถานะ
 
     # socket loop ทำงานเบื้องหลังเสมอ

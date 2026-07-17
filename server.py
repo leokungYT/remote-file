@@ -104,11 +104,10 @@ def handle_disconnect():
 def handle_agent_response(data):
     """รับผลลัพธ์จากเครื่องลูก"""
     req_id = data.get("request_id")
-    if req_id in pending_requests:
-        pending_requests[req_id]["response"] = data
-        pending_requests[req_id]["completed"] = True
-        # ส่งผลลัพธ์ไปยัง web client ที่ร้องขอ
-        web_sid = pending_requests[req_id].get("web_sid")
+    # เอา request ออกจากคิวเลยหลังตอบ (กัน pending_requests บวมจาก live view/คำสั่งถี่ๆ)
+    req = pending_requests.pop(req_id, None)
+    if req:
+        web_sid = req.get("web_sid")
         if web_sid:
             socketio.emit("response_" + req_id, data, room=web_sid)
 
@@ -349,6 +348,12 @@ def send_to_agent(agent_id, action, data, web_sid):
         return None
     matches.sort()
     target_sid = matches[-1][1]
+
+    # กันบวม: ลบ request ที่ค้างนานเกิน 60 วิ (เครื่องที่ตาย/ไม่ตอบกลับ)
+    if len(pending_requests) > 40:
+        cutoff = time.time() - 60
+        for k in [k for k, v in pending_requests.items() if v.get("created_at", 0) < cutoff]:
+            pending_requests.pop(k, None)
 
     req_id = str(uuid.uuid4())[:8]
     pending_requests[req_id] = {
@@ -1699,16 +1704,26 @@ function liveToggleZoom(aid) {
 
 function screenshotOnAgent(agentId) {
   return new Promise((resolve, reject) => {
-    let settled = false;
-    socket.once('request_sent', (data) => {
-      const rid = data.request_id;
-      socket.once('response_' + rid, (resp) => {
+    let settled = false, rid = null, onResp = null;
+    const onSent = (data) => {
+      rid = data.request_id;
+      onResp = (resp) => {
+        if (settled) return;
         settled = true;
+        socket.off('response_' + rid, onResp);
         if (resp.error) reject(new Error(resp.error)); else resolve(resp);
-      });
-    });
+      };
+      socket.once('response_' + rid, onResp);
+    };
+    socket.once('request_sent', onSent);
     socket.emit('request_screenshot', { agent_id: agentId, width: 720, quality: 55 });
-    setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 12000);
+    setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.off('request_sent', onSent);                 // เก็บกวาด listener กัน browser บวม
+      if (rid && onResp) socket.off('response_' + rid, onResp);
+      reject(new Error('timeout'));
+    }, 12000);
   });
 }
 
