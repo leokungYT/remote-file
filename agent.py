@@ -238,6 +238,8 @@ def on_command(data):
             handle_rename(req_id, payload)
         elif action == "move_file":
             handle_move(req_id, payload)
+        elif action == "shutdown":
+            handle_shutdown(req_id, payload)
         else:
             send_response(req_id, {"error": f"Unknown action: {action}"})
     except Exception as e:
@@ -699,6 +701,23 @@ def handle_list_ids(req_id, data):
 
     folder = os.path.join(base, subpath)
     _reply_ids(req_id, folder)
+
+
+def handle_shutdown(req_id, data):
+    """สั่งปิดโปรแกรม agent ที่เครื่องนี้จากระยะไกล (จาก dashboard)"""
+    logger.info("🛑 ได้รับคำสั่งปิด agent จาก server — กำลังปิดโปรแกรม...")
+    send_response(req_id, {"success": True, "message": "agent shutting down"})
+
+    def _die():
+        time.sleep(0.6)  # รอให้ response ถูกส่งกลับไปก่อนค่อยปิด
+        try:
+            if sio.connected:
+                sio.disconnect()
+        except Exception:
+            pass
+        os._exit(0)
+
+    threading.Thread(target=_die, daemon=True).start()
 
 
 # ═══════════════════════════════════════════════════════════

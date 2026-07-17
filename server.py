@@ -275,6 +275,16 @@ def handle_move(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_shutdown")
+def handle_shutdown_req(data):
+    """สั่งปิดโปรแกรม agent ที่เครื่องลูกจากระยะไกล"""
+    req_id = send_to_agent(data["agent_id"], "shutdown", {}, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 # ═══════════════════════════════════════════════════════════
 #  UTILITY FUNCTIONS
 # ═══════════════════════════════════════════════════════════
@@ -476,6 +486,24 @@ WEB_UI_HTML = r"""
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }
   }
+  .agent-card .power-btn {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    width: 28px; height: 28px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: rgba(239,68,68,0.10);
+    color: var(--danger);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0.55;
+    transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+  }
+  .agent-card:hover .power-btn { opacity: 1; }
+  .agent-card .power-btn:hover { background: var(--danger); color: #fff; }
   .agent-card h3 {
     font-size: 14px;
     font-weight: 600;
@@ -873,14 +901,15 @@ WEB_UI_HTML = r"""
   }
   .id-badge {
     display: inline-block;
-    font-size: 10px;
-    font-weight: 700;
+    font-size: 18px;
+    font-weight: 800;
     color: var(--warning);
-    background: rgba(245,158,11,0.12);
-    border-radius: 6px;
-    padding: 1px 6px;
-    margin-left: 4px;
+    background: rgba(245,158,11,0.15);
+    border-radius: 8px;
+    padding: 2px 10px;
+    margin-left: 6px;
     vertical-align: middle;
+    line-height: 1.2;
   }
 
   .agent-stats { display: flex; flex-direction: column; gap: 8px; }
@@ -1160,12 +1189,20 @@ async function openCookieDashboard() {
     try {
       const res = await listIdsOnAgent(a.agent_id);
       onlineCount++;
-      grandTotal += res.total || 0;
-      perAgent.push({ name: mname, total: res.total || 0, exists: res.exists });
-      (res.ids || []).forEach(id => {
+      let accepted = 0;
+      (res.ids || []).forEach(rawId => {
+        const id = String(rawId)
+          .replace(/\[[^\]]*\]/g, '')  // ลบส่วน [ ... ] ทั้งก้อน เช่น Trader+[BYSWR6250] -> Trader+
+          .replace(/[\[\]]/g, '')       // เก็บกวาดวงเล็บที่ค้างข้างเดียว (ถ้ามี)
+          .replace(/\d+$/, '')          // ตัดเลขท้ายออก เช่น +CHNVX1752 -> +CHNVX
+          .trim();
+        if (!id) return;
+        accepted++;
         if (!idMap[id]) idMap[id] = [];
         idMap[id].push(mname);
       });
+      grandTotal += accepted;
+      perAgent.push({ name: mname, total: accepted, exists: res.exists });
     } catch (e) {
       perAgent.push({ name: mname, error: String(e.message || e) });
     }
@@ -1189,11 +1226,24 @@ function renderCookieDashboard(idMap, grandTotal, perAgent, totalMachines, onlin
     </div>`;
   }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบ id ในโฟลเดอร์ id-found</h3></div>';
 
-  const agentRows = perAgent.map(p => `
+  const agentRows = perAgent.map(p => {
+    let status;
+    if (p.error) {
+      // agent เวอร์ชันเก่า/ยังไม่รองรับ list_ids → ตอบ "Unknown action"
+      status = /unknown action/i.test(p.error)
+        ? '<span style="color:var(--text-dim)">⚙️ ยังไม่ได้ตั้งค่าเชื่อมโฟลเดอร์</span>'
+        : '<span style="color:var(--danger)">' + escHtml(p.error) + '</span>';
+    } else if (p.exists === false) {
+      status = '<span style="color:var(--warning)">ไม่พบโฟลเดอร์ id-found</span>';
+    } else {
+      status = p.total + ' id';
+    }
+    return `
     <div class="agent-stat">
       <span>🖥️ ${escHtml(p.name)}</span>
-      <span>${p.error ? '<span style="color:var(--danger)">' + escHtml(p.error) + '</span>' : (p.exists === false ? '<span style="color:var(--warning)">ไม่พบโฟลเดอร์ id-found</span>' : p.total + ' id')}</span>
-    </div>`).join('');
+      <span>${status}</span>
+    </div>`;
+  }).join('');
 
   content.innerHTML = `
     <div class="toolbar">
@@ -1259,8 +1309,16 @@ function renderAgents(agents) {
       <div class="meta">${escHtml(a.name ? a.hostname : a.agent_id)}</div>
       <div class="meta">${escHtml(a.ip)}</div>
       <div class="meta" style="margin-top:4px; color: var(--text-dim)">${escHtml(a.os_info)}</div>
+      <button class="power-btn" title="ปิดโปรแกรม agent ที่เครื่องนี้"
+              onclick="event.stopPropagation(); shutdownAgent('${escAttr(a.agent_id)}','${escAttr(a.name || a.hostname)}')">⏻</button>
     </div>
   `).join('');
+}
+
+function shutdownAgent(agentId, name) {
+  if (!confirm(`ปิดโปรแกรม agent ที่เครื่อง "${name}" ?\n\n⚠️ เครื่องนี้จะหลุดการเชื่อมต่อทันที และจะกลับมาก็ต่อเมื่อเปิด agent ใหม่ที่เครื่องนั้นเอง`)) return;
+  socket.emit('request_shutdown', { agent_id: agentId });
+  toast('⏻ ส่งคำสั่งปิด agent: ' + name, 'success');
 }
 
 // ═══════════════════════════════════════════════════════════
