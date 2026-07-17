@@ -20,6 +20,8 @@ import shutil
 import platform
 import logging
 import threading
+import subprocess
+import queue
 from pathlib import Path
 from datetime import datetime
 
@@ -103,6 +105,25 @@ sio = socketio.Client(
 upload_sessions = {}
 
 _single_instance_handle = None  # เก็บ handle ของ mutex กัน agent เปิดซ้ำ
+
+# ── สำหรับหน้าต่างสถานะ (status window) ──
+_log_queue = queue.Queue(maxsize=2000)          # log ที่จะโชว์ในหน้าต่าง
+_ui_state = {"connected": False, "show_request": False}
+
+
+class _QueueLogHandler(logging.Handler):
+    """ส่ง log แต่ละบรรทัดเข้า queue เพื่อให้หน้าต่างสถานะดึงไปแสดง"""
+    def emit(self, record):
+        try:
+            _log_queue.put_nowait(self.format(record))
+        except Exception:
+            pass
+
+
+def _attach_ui_log_handler():
+    h = _QueueLogHandler()
+    h.setFormatter(logging.Formatter("%(asctime)s  %(message)s", "%H:%M:%S"))
+    logging.getLogger().addHandler(h)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -192,6 +213,7 @@ def format_file_info(path, name):
 
 @sio.event
 def connect():
+    _ui_state["connected"] = True
     logger.info("✅ Connected to server!")
     agent_id = AGENT_ID if AGENT_ID else get_hostname()
     sio.emit("agent_register", {
@@ -207,6 +229,7 @@ def connect():
 
 @sio.event
 def disconnect():
+    _ui_state["connected"] = False
     logger.warning("❌ Disconnected from server")
 
 
@@ -257,6 +280,8 @@ def on_command(data):
             handle_shutdown(req_id, payload)
         elif action == "clear_input":
             handle_clear_input(req_id, payload)
+        elif action == "self_update":
+            handle_self_update(req_id, payload)
         else:
             send_response(req_id, {"error": f"Unknown action: {action}"})
     except Exception as e:
@@ -797,6 +822,82 @@ def handle_shutdown(req_id, data):
     threading.Thread(target=_die, daemon=True).start()
 
 
+# ── SELF-UPDATE (ดึง agent.py ตัวล่าสุดจาก server แล้วรีสตาร์ทตัวเอง จากปุ่มบน dashboard) ──
+
+def _release_single_instance():
+    """ปล่อย mutex กันเปิดซ้ำ เพื่อให้ agent ตัวใหม่เปิดได้หลังรีสตาร์ท"""
+    global _single_instance_handle
+    try:
+        if _single_instance_handle:
+            import ctypes
+            ctypes.windll.kernel32.ReleaseMutex(_single_instance_handle)
+            ctypes.windll.kernel32.CloseHandle(_single_instance_handle)
+            _single_instance_handle = None
+    except Exception:
+        pass
+
+
+def _download_new_agent():
+    """โหลด agent.py ตัวล่าสุดจาก server (/agent.py) มาเขียนทับ
+       - ใช้ server เป็นแหล่ง เชื่อถือได้กว่า GitHub และไม่ต้อง push ก่อน
+       - ตรวจไฟล์ก่อนเขียนทับ กันโหลดหน้า error / ไฟล์เพี้ยนมาทำ agent พัง"""
+    import requests
+    here = os.path.dirname(os.path.abspath(__file__))
+    url = SERVER_URL.rstrip("/") + "/agent.py"
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    code = r.content
+    text = code.decode("utf-8", "ignore")
+    # sanity check: ต้องดูเป็น agent.py จริง ไม่งั้นไม่เขียนทับ
+    if len(code) < 3000 or "RemoteFileManagerAgent_SingleInstance" not in text or "def main()" not in text:
+        raise RuntimeError("agent.py ที่โหลดมาไม่ถูกต้อง (ยกเลิกการอัปเดต)")
+    with open(os.path.join(here, "agent.py"), "wb") as f:
+        f.write(code)
+    logger.info(f"⬆️ อัปเดต agent.py จาก server สำเร็จ ({len(code)} bytes)")
+
+
+def _relaunch_and_exit():
+    """เปิด agent ตัวใหม่แบบ detached แล้วปิดตัวเก่า"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    agent_py = os.path.join(here, "agent.py")
+    _release_single_instance()  # ปล่อย mutex ก่อน ไม่งั้นตัวใหม่จะเด้งออก
+    try:
+        pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        exe = pyw if os.path.exists(pyw) else sys.executable
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen([exe, agent_py], cwd=here, close_fds=True, creationflags=flags)
+        logger.info("🔄 เปิด agent ตัวใหม่แล้ว — กำลังปิดตัวเก่า")
+    except Exception as e:
+        logger.error(f"relaunch failed: {e}")
+    try:
+        if sio.connected:
+            sio.disconnect()
+    except Exception:
+        pass
+    time.sleep(0.3)
+    os._exit(0)
+
+
+def handle_self_update(req_id, data):
+    """สั่งอัปเดต agent จากระยะไกล: ดึง agent.py ล่าสุดจาก server แล้วรีสตาร์ทตัวเอง
+       - โหลดสำเร็จ → ตอบ success แล้วรีสตาร์ท
+       - โหลดพัง → ตอบ error และ 'ไม่' รีสตาร์ท (คงตัวเดิมไว้ เครื่องไม่หลุด)"""
+    logger.info("⬆️ ได้รับคำสั่งอัปเดต agent — กำลังดึง agent.py จาก server...")
+
+    def _go():
+        try:
+            _download_new_agent()
+        except Exception as e:
+            logger.error(f"update failed: {e}")
+            send_response(req_id, {"error": f"อัปเดตไม่สำเร็จ: {e}"})
+            return  # ไม่รีสตาร์ท agent เดิมยังทำงานต่อ
+        send_response(req_id, {"success": True, "message": "updated, restarting"})
+        time.sleep(0.4)  # ให้ response ส่งถึงก่อนรีสตาร์ท
+        _relaunch_and_exit()
+
+    threading.Thread(target=_go, daemon=True).start()
+
+
 # ═══════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════
@@ -833,6 +934,9 @@ def run_tray():
         d.rectangle([10, 24, 54, 50], fill=(59, 130, 246))   # ตัวโฟลเดอร์
         return img
 
+    def on_show(icon, item):
+        _ui_state["show_request"] = True   # หน้าต่างสถานะจะ deiconify เอง
+
     def on_exit(icon, item):
         try:
             if sio.connected:
@@ -844,9 +948,78 @@ def run_tray():
 
     menu = pystray.Menu(
         pystray.MenuItem(lambda item: "🟢 Connected" if sio.connected else "🔴 Offline", None, enabled=False),
+        pystray.MenuItem("แสดงหน้าต่างสถานะ", on_show, default=True),
         pystray.MenuItem("Exit", on_exit),
     )
     pystray.Icon("RemoteFileAgent", make_icon(), "Remote File Agent", menu).run()
+
+
+def run_status_window():
+    """หน้าต่างสถานะ: โชว์ 🟢 เชื่อมต่อ/🔴 หลุด + log กิจกรรมสด ๆ (คล้าย cmd)
+       ปิดหน้าต่าง = ย่อลง tray (ยังทำงานต่อเบื้องหลัง)"""
+    import tkinter as tk
+    from tkinter import scrolledtext
+
+    BG, CARD, FG = "#0a0e17", "#111827", "#e8ecf4"
+    root = tk.Tk()
+    root.title("Remote File Agent — สถานะการทำงาน")
+    root.geometry("660x420")
+    root.minsize(440, 280)
+    root.configure(bg=BG)
+
+    top = tk.Frame(root, bg=BG)
+    top.pack(fill="x", padx=14, pady=(14, 6))
+    status_var = tk.StringVar(value="⏳ กำลังเชื่อมต่อ...")
+    status_lbl = tk.Label(top, textvariable=status_var, bg=BG, fg="#f59e0b",
+                          font=("Segoe UI", 14, "bold"), anchor="w")
+    status_lbl.pack(fill="x")
+    info = f"🖥️ {AGENT_ID or get_hostname()}    ·    🌐 {SERVER_URL}"
+    tk.Label(top, text=info, bg=BG, fg="#8494ad", font=("Segoe UI", 9), anchor="w").pack(fill="x", pady=(2, 0))
+
+    txt = scrolledtext.ScrolledText(root, bg=CARD, fg=FG, insertbackground=FG,
+                                    font=("Consolas", 9), relief="flat", borderwidth=0, wrap="word")
+    txt.pack(fill="both", expand=True, padx=14, pady=(6, 14))
+    txt.configure(state="disabled")
+
+    def poll():
+        if _ui_state["connected"]:
+            status_var.set("🟢 กำลังทำงาน — เชื่อมต่อ server แล้ว")
+            status_lbl.config(fg="#22c55e")
+        else:
+            status_var.set("🔴 หลุด / กำลังลองเชื่อมต่อใหม่...")
+            status_lbl.config(fg="#ef4444")
+
+        if _ui_state.get("show_request"):
+            _ui_state["show_request"] = False
+            try:
+                root.deiconify(); root.lift(); root.focus_force()
+            except Exception:
+                pass
+
+        lines = []
+        while True:
+            try:
+                lines.append(_log_queue.get_nowait())
+            except queue.Empty:
+                break
+        if lines:
+            txt.configure(state="normal")
+            txt.insert("end", "\n".join(lines) + "\n")
+            total = int(txt.index("end-1c").split(".")[0])
+            if total > 500:                       # เก็บแค่ ~500 บรรทัดล่าสุด
+                txt.delete("1.0", f"{total - 500}.0")
+            txt.see("end")
+            txt.configure(state="disabled")
+        root.after(400, poll)
+
+    def on_close():
+        root.withdraw()                           # ซ่อนไป tray แทนปิดจริง
+        logger.info("ซ่อนหน้าต่าง (ยังทำงานเบื้องหลัง — ดับเบิลคลิกไอคอน tray เพื่อเปิดใหม่)")
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    logger.info("📊 เปิดหน้าต่างสถานะ agent แล้ว")
+    root.after(300, poll)
+    root.mainloop()
 
 
 def is_already_running():
@@ -891,16 +1064,38 @@ def main():
         print()
         sys.exit(1)
 
-    # ถ้ามี pystray/Pillow → แสดงไอคอนใน tray (รันเบื้องหลังได้ด้วย pythonw ไม่มีหน้าต่าง)
-    # ถ้าไม่มี → รันปกติแบบเดิม
+    _attach_ui_log_handler()   # ให้ log ไหลเข้าหน้าต่างสถานะ
+
+    # socket loop ทำงานเบื้องหลังเสมอ
+    threading.Thread(target=agent_loop, daemon=True).start()
+
+    has_tray = False
     try:
         import pystray  # noqa: F401
         from PIL import Image  # noqa: F401
-        threading.Thread(target=agent_loop, daemon=True).start()
-        run_tray()
+        has_tray = True
     except ImportError:
-        logger.info("(no pystray/Pillow - running without tray icon)")
-        agent_loop()
+        pass
+    has_tk = False
+    try:
+        import tkinter  # noqa: F401
+        has_tk = True
+    except ImportError:
+        pass
+
+    # tray รันใน thread แยก, หน้าต่างสถานะรันบน main thread (tkinter ต้องอยู่ main)
+    if has_tray:
+        threading.Thread(target=run_tray, daemon=True).start()
+
+    if has_tk:
+        run_status_window()          # บล็อกที่นี่จนปิดโปรแกรม
+    elif has_tray:
+        while True:                  # ไม่มี tk แต่มี tray → คง main thread ไว้
+            time.sleep(1)
+    else:
+        logger.info("(no tray/tk - running console only)")
+        while True:
+            time.sleep(1)
 
 
 if __name__ == "__main__":

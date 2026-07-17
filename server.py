@@ -291,6 +291,16 @@ def handle_shutdown_req(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_self_update")
+def handle_self_update_req(data):
+    """สั่งให้ agent ดึงโค้ดใหม่จาก GitHub + รีสตาร์ทตัวเอง"""
+    req_id = send_to_agent(data["agent_id"], "self_update", {}, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 # ═══════════════════════════════════════════════════════════
 #  UTILITY FUNCTIONS
 # ═══════════════════════════════════════════════════════════
@@ -1303,6 +1313,7 @@ function openBroadcastInput() {
         <option value="ro">🗡️ RO</option>
         <option value="cookie-run" selected>🍪 Cookie-Run</option>
       </select>
+      <button class="btn" onclick="updateSelectedAgents()" title="ดึงโค้ดใหม่จาก GitHub + รีสตาร์ท agent">⬆️ อัปเดต agent (เครื่องที่เลือก)</button>
       <button class="btn" style="border-color:var(--danger); color:var(--danger)" onclick="clearInputAll()">🗑️ Clear input-id (เครื่องที่เลือก)</button>
     </div>
     <div class="stat-row">
@@ -1488,6 +1499,43 @@ async function clearInputAll() {
     }
   }
   toast(`เคลียร์ input-id เสร็จ: ${okMachines}/${agents.length} เครื่อง (ลบรวม ${totalDeleted})`, 'success');
+}
+
+// ── อัปเดต agent ทางไกล (ดึงโค้ดใหม่ + รีสตาร์ท) ──
+function updateOneAgent(agentId) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      socket.once('response_' + rid, (resp) => {
+        settled = true;
+        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
+      });
+    });
+    socket.emit('request_self_update', { agent_id: agentId });
+    setTimeout(() => { if (!settled) reject(new Error('timeout (เครื่องอาจหลุด/ปิดไปแล้ว)')); }, 25000);
+  });
+}
+
+async function updateSelectedAgents() {
+  const agents = getSelectedAgents();
+  if (!agents.length) { toast('ยังไม่ได้เลือกเครื่อง (ติ๊กเครื่องก่อน)', 'error'); return; }
+  if (!confirm(`สั่งอัปเดต agent + รีสตาร์ท ${agents.length} เครื่องที่เลือก ?\n\nแต่ละเครื่องจะดึงโค้ดใหม่จาก GitHub แล้วรีสตาร์ทตัวเอง (หลุดแล้วกลับมาเองในไม่กี่วิ)`)) return;
+
+  let ok = 0;
+  for (const a of agents) {
+    const mname = a.name || a.hostname || a.agent_id;
+    try {
+      await updateOneAgent(a.agent_id);
+      ok++;
+      bcLog(`⬆️ <b>${escHtml(mname)}</b> → สั่งอัปเดตแล้ว กำลังดึงโค้ด + รีสตาร์ท...`, false);
+    } catch (e) {
+      const msg = String(e.message || e);
+      const isOld = /unknown action/i.test(msg);
+      bcLog(`❌ <b>${escHtml(mname)}</b> → ${isOld ? 'agent เก่ายังไม่รองรับ (ต้องอัปเดตด้วยมือครั้งแรกก่อน)' : escHtml(msg)}`, true);
+    }
+  }
+  toast(`ส่งคำสั่งอัปเดต ${ok}/${agents.length} เครื่อง — รอเครื่องรีสตาร์ทและกลับมาเชื่อมต่อ`, 'success');
 }
 
 // ═══════════════════════════════════════════════════════════
