@@ -215,7 +215,7 @@ def format_file_info(path, name):
 def connect():
     _ui_state["connected"] = True
     logger.info("✅ Connected to server!")
-    agent_id = AGENT_ID if AGENT_ID else get_hostname()
+    agent_id = AGENT_ID or AGENT_NAME or get_hostname()  # ใช้ name ถ้ามี กัน hostname ซ้ำชนกัน
     sio.emit("agent_register", {
         "secret": AGENT_SECRET,
         "agent_id": agent_id,
@@ -490,6 +490,13 @@ def handle_upload_start(req_id, data):
 def handle_upload_chunk(req_id, data):
     """รับ chunk เขียนต่อท้ายไฟล์ และแตก zip อัตโนมัติเมื่อรับครบ"""
     sess = upload_sessions.get(req_id)
+    if not sess:
+        # chunk อาจมาก่อน upload_start ประมวลผลเสร็จ (ตอนอัปหลายไฟล์พร้อมกัน) → รอ session สักครู่
+        for _ in range(40):
+            time.sleep(0.05)
+            sess = upload_sessions.get(req_id)
+            if sess:
+                break
     if not sess:
         send_response(req_id, {"error": "ไม่พบ session อัปโหลด (upload_start หาย)"})
         return
@@ -1109,7 +1116,7 @@ def main():
         print("Agent already running - exiting this duplicate.")
         sys.exit(0)
 
-    agent_id = AGENT_ID if AGENT_ID else get_hostname()
+    agent_id = AGENT_ID or AGENT_NAME or get_hostname()  # ใช้ name ถ้ามี กัน hostname ซ้ำชนกัน
 
     print("=" * 55)
     print("  Remote File Manager - Agent (เครื่องลูก)")

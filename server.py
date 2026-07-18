@@ -67,13 +67,16 @@ def handle_agent_register(data):
         return
 
     agent_id = data.get("agent_id", f"agent-{len(agents)+1}")
+    new_name = data.get("name", "")
 
-    # ลบ connection เก่าของ agent_id เดียวกัน (กัน zombie ค้าง ทำให้คำสั่งวิ่งเข้าตัวที่ตายแล้ว → timeout)
+    # ลบเฉพาะ connection เก่าที่เป็น "เครื่องเดียวกันจริง" (agent_id + name ตรงกัน) กัน zombie
+    # แต่ไม่เตะเครื่องคนละชื่อที่ hostname/agent_id บังเอิญซ้ำกันออก
     stale_sids = [sid for sid, info in agents.items()
-                  if info.get("agent_id") == agent_id and sid != request.sid]
+                  if info.get("agent_id") == agent_id and info.get("name", "") == new_name
+                  and sid != request.sid]
     for sid in stale_sids:
         agents.pop(sid, None)
-        logger.info(f"🧹 แทนที่ connection เก่าของ {agent_id} (sid {sid[:6]}…)")
+        logger.info(f"🧹 แทนที่ connection เก่าของ {agent_id}/{new_name} (sid {sid[:6]}…)")
 
     agents[request.sid] = {
         "agent_id": agent_id,
@@ -1370,6 +1373,10 @@ function openBroadcastInput() {
   document.getElementById('contentArea').innerHTML = `
     <div class="toolbar">
       <h2 style="flex:1; font-size:18px">📤 ส่งเข้า input-id — เลือกเกม + เครื่อง</h2>
+      <select class="btn project-select" id="bcMode" title="โหมดการส่งไฟล์" onchange="renderBcHint()">
+        <option value="broadcast">📢 ส่งเหมือนกันทุกเครื่อง</option>
+        <option value="split">📦 ส่งตามลำดับ (เครื่องแรก ← ไฟล์แรก)</option>
+      </select>
       <select class="btn project-select" id="bcGame" title="เลือกเกมปลายทาง (โฟลเดอร์ input-id ของเกมนั้น)">
         <option value="pes">⚽ PES</option>
         <option value="ro">🗡️ RO</option>
@@ -1397,7 +1404,7 @@ function openBroadcastInput() {
     <div class="upload-zone" id="bcZone" onclick="document.getElementById('bcFile').click()">
       <div class="icon">📥</div>
       <div>ลากไฟล์มาวางที่นี่ หรือคลิกเพื่อเลือก</div>
-      <small>ไฟล์จะถูกส่งเข้าโฟลเดอร์ <b>input-id</b> ของเครื่องที่เลือก พร้อมกัน — สูงสุด __MAX_UPLOAD_MB__MB/ไฟล์</small>
+      <small id="bcHint"></small>
     </div>
     <input type="file" id="bcFile" style="display:none" multiple>
     <h3 style="margin:20px 0 10px; font-size:14px; color:var(--text-secondary)">ผลการทำงาน</h3>
@@ -1414,6 +1421,7 @@ function openBroadcastInput() {
     broadcastFiles(e.dataTransfer.files);
   });
   bcSyncAll();
+  renderBcHint();
 }
 
 function getSelectedAgents() {
@@ -1423,6 +1431,17 @@ function getSelectedAgents() {
 function getBcGame() {
   const el = document.getElementById('bcGame');
   return el ? el.value : 'cookie-run';
+}
+function getBcMode() {
+  const el = document.getElementById('bcMode');
+  return el ? el.value : 'broadcast';
+}
+function renderBcHint() {
+  const el = document.getElementById('bcHint');
+  if (!el) return;
+  el.innerHTML = getBcMode() === 'split'
+    ? 'โหมด <b>ส่งตามลำดับ</b> — ลากไฟล์ทั้งหมดครั้งเดียว ระบบเรียงเครื่องตามเลข + เรียงไฟล์ แล้วส่ง <b>ไฟล์แรก→เครื่องแรก, ไฟล์ที่สอง→เครื่องที่สอง</b> ไปเรื่อย ๆ เข้า <b>input-id</b> — สูงสุด __MAX_UPLOAD_MB__MB/ไฟล์'
+    : 'โหมด <b>ส่งเหมือนกัน</b> — ทุกเครื่องที่เลือกได้ไฟล์ชุดเดียวกันครบ (เข้า <b>input-id</b>) — สูงสุด __MAX_UPLOAD_MB__MB/ไฟล์';
 }
 function bcToggleAll(checked) {
   document.querySelectorAll('.bc-agent').forEach(c => { c.checked = checked; });
@@ -1502,6 +1521,8 @@ async function broadcastFiles(fileList) {
   if (!agents.length) { toast('ยังไม่ได้เลือกเครื่อง (ติ๊กเครื่องที่จะส่งก่อน)', 'error'); return; }
   if (!files.length) return;
 
+  if (getBcMode() === 'split') { return distributeFiles(files, agents, game); }
+
   for (const file of files) {
     if (file.size > __MAX_UPLOAD_MB__ * 1024 * 1024) {
       toast(file.name + ' ใหญ่เกิน __MAX_UPLOAD_MB__MB', 'error');
@@ -1512,17 +1533,70 @@ async function broadcastFiles(fileList) {
     catch (e) { bcLog('❌ อ่านไฟล์ ' + escHtml(file.name) + ' ไม่ได้', true); continue; }
 
     let ok = 0; const fails = [];
-    await Promise.all(agents.map(a => {
+    await runLimited(agents, 4, async (a) => {
       const mname = a.name || a.hostname || a.agent_id;
-      return uploadToInput(a.agent_id, file.name, file.size, base64, game)
-        .then(() => { ok++; })
-        .catch(e => { fails.push(mname + ': ' + (e.message || e)); });
-    }));
+      try { await uploadToInput(a.agent_id, file.name, file.size, base64, game); ok++; }
+      catch (e) { fails.push(mname + ': ' + (e.message || e)); }
+    });
     const failHtml = fails.length ? ' <span style="color:var(--danger)">❌ ' + fails.length + '</span>' : '';
     bcLog(`📎 <b>${escHtml(file.name)}</b> → [${escHtml(game)}] ✅ ส่งเข้า input-id สำเร็จ ${ok}/${agents.length} เครื่อง${failHtml}` +
           (fails.length ? '<br><small style="color:var(--text-dim)">' + escHtml(fails.join(' | ')) + '</small>' : ''), false);
     toast(`ส่ง ${file.name} → ${ok}/${agents.length} เครื่อง`, fails.length ? 'error' : 'success');
   }
+}
+
+// รันงานทีละ limit ตัวพร้อมกัน (กันยิงอัปโหลดทั้งหมดพร้อมกันจน server ท่วม → chunk มาก่อน session)
+async function runLimited(items, limit, fn) {
+  const arr = [...items];
+  let idx = 0;
+  async function worker() {
+    while (idx < arr.length) {
+      const i = idx++;
+      await fn(arr[i], i);
+    }
+  }
+  const workers = [];
+  for (let w = 0; w < Math.min(limit, arr.length); w++) workers.push(worker());
+  await Promise.all(workers);
+}
+
+function _numIn(s) { const m = String(s).match(/(\d+)/); return m === null ? Number.MAX_SAFE_INTEGER : parseInt(m[1], 10); }
+
+// โหมดส่งตามลำดับ: เรียงเครื่องตามเลข + เรียงไฟล์ แล้วส่งไฟล์ที่ i ให้เครื่องที่ i (ไม่อิงเลขตรง)
+async function distributeFiles(files, agents, game) {
+  const valid = files.filter(f => {
+    if (f.size > __MAX_UPLOAD_MB__ * 1024 * 1024) { toast(f.name + ' ใหญ่เกิน __MAX_UPLOAD_MB__MB', 'error'); return false; }
+    return true;
+  });
+  if (!valid.length) return;
+
+  // เรียงไฟล์ตามเลขในชื่อ (output1..output14, ไม่มีเลขไปท้าย) + เรียงเครื่องตามเลข
+  const sortedFiles = [...valid].sort((a, b) => _numIn(a.name) - _numIn(b.name) || a.name.localeCompare(b.name));
+  const sortedAgents = sortAgents(agents);
+  const pairN = Math.min(sortedFiles.length, sortedAgents.length);
+
+  bcLog(`📦 ส่งตามลำดับ: ${sortedFiles.length} ไฟล์ → ${sortedAgents.length} เครื่อง (จับคู่ ${pairN})`, false);
+
+  let assigned = 0;
+  const pairs = sortedAgents.slice(0, pairN).map((a, i) => ({ a, file: sortedFiles[i] }));
+  await runLimited(pairs, 4, async ({ a, file }) => {
+    const mname = a.name || a.hostname || a.agent_id;
+    try {
+      const b64 = await readAsBase64(file);
+      await uploadToInput(a.agent_id, file.name, file.size, b64, game);
+      assigned++;
+      bcLog(`🎯 <b>${escHtml(mname)}</b> ← <b>${escHtml(file.name)}</b> [${escHtml(game)}] ✅`, false);
+    } catch (e) {
+      bcLog(`❌ <b>${escHtml(mname)}</b> ← ${escHtml(file.name)} → ${escHtml(String(e.message || e))}`, true);
+    }
+  });
+
+  // เหลือ (ไฟล์เกิน หรือ เครื่องเกิน)
+  const leftFiles = sortedFiles.slice(pairN);
+  const leftAgents = sortedAgents.slice(pairN);
+  if (leftFiles.length) bcLog(`⚠️ ไฟล์เกิน ไม่ได้ส่ง ${leftFiles.length}: <small style="color:var(--text-dim)">${escHtml(leftFiles.map(f => f.name).join(', '))}</small>`, false);
+  if (leftAgents.length) bcLog(`➖ เครื่องเกิน ไม่ได้รับไฟล์ ${leftAgents.length}: <small style="color:var(--text-dim)">${escHtml(leftAgents.map(a => a.name || a.hostname || a.agent_id).join(', '))}</small>`, false);
+  toast(`ส่งตามลำดับเสร็จ: ${assigned} คู่${leftFiles.length ? ' / เหลือ ' + leftFiles.length + ' ไฟล์' : ''}`, 'success');
 }
 
 // ถาม path จริงของไฟล์ใน <game>/input-id (ใช้ list_ids ที่คืน entries = full path)
@@ -1792,14 +1866,28 @@ function initSocket() {
 // ═══════════════════════════════════════════════════════════
 //  RENDER AGENTS
 // ═══════════════════════════════════════════════════════════
+function agentSortKey(a) {
+  // ดึงเลขจากชื่อ (pc_7 -> 7) เพื่อเรียงตามเลข ถ้าไม่มีเลขให้ไปท้าย
+  const name = a.name || a.hostname || a.agent_id || '';
+  const m = name.match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+}
+function sortAgents(list) {
+  return [...(list || [])].sort((a, b) => {
+    const ka = agentSortKey(a), kb = agentSortKey(b);
+    if (ka !== kb) return ka - kb;
+    return String(a.name || a.hostname || '').localeCompare(String(b.name || b.hostname || ''));
+  });
+}
+
 function renderAgents(agents) {
-  agentsData = agents || [];
+  agentsData = sortAgents(agents);   // เรียงตามเลขในชื่อ (มีผลกับ sidebar + dropdown + broadcast + live view)
   const el = document.getElementById('agentList');
-  if (!agents || agents.length === 0) {
+  if (!agentsData.length) {
     el.innerHTML = '<div class="no-agents">⏳<br>รอเครื่องลูกเชื่อมต่อ...<br><small>เปิด agent.py ที่เครื่องลูก</small></div>';
     return;
   }
-  el.innerHTML = agents.map(a => `
+  el.innerHTML = agentsData.map(a => `
     <div class="agent-card ${currentAgent === a.agent_id ? 'active' : ''}"
          onclick="selectAgent('${a.agent_id}')">
       <div class="dot"></div>
