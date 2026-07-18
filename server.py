@@ -2122,7 +2122,12 @@ function deleteSelected() {
       if (resp.error) {
         toast('ลบล้มเหลว: ' + resp.error, 'error');
       } else {
-        toast(`ลบแล้ว ${resp.deleted} รายการ` + (resp.failed ? `, ล้มเหลว ${resp.failed}` : ''), resp.failed ? 'error' : 'success');
+        let msg = `ลบแล้ว ${resp.deleted} รายการ`;
+        if (resp.failed) {
+          msg += `, ล้มเหลว ${resp.failed}`;
+          if (resp.errors && resp.errors.length) msg += ' — ' + resp.errors[0];
+        }
+        toast(msg, resp.failed ? 'error' : 'success');
         loadDir(currentPath);
       }
     });

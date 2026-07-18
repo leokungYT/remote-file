@@ -17,6 +17,7 @@ import time
 import base64
 import socket
 import shutil
+import stat
 import platform
 import logging
 import threading
@@ -103,6 +104,7 @@ sio = socketio.Client(
 
 # เก็บสถานะการอัปโหลดแบบแบ่ง chunk (req_id -> {file, path, received})
 upload_sessions = {}
+upload_errors = {}   # req_id -> เหตุผลที่ upload_start ล้มเหลว (ให้ chunk รายงานเหตุผลจริง ไม่ใช่ "session หาย")
 
 _single_instance_handle = None  # เก็บ handle ของ mutex กัน agent เปิดซ้ำ
 
@@ -461,7 +463,8 @@ def handle_upload_start(req_id, data):
     if match or subpath:
         folder = _resolve_input_folder(match, subpath or "input-id")
         if not folder:
-            send_response(req_id, {"error": "หาโฟลเดอร์ input-id ไม่เจอ (base_match)"})
+            upload_errors[req_id] = f"หาโฟลเดอร์ '{subpath or 'input-id'}' ของ '{match}' ไม่เจอ (ไม่มีใน allowed_paths / agent เก่า)"
+            send_response(req_id, {"error": upload_errors[req_id]})
             return
         os.makedirs(folder, exist_ok=True)
         dest_path = os.path.join(folder, filename)
@@ -474,31 +477,43 @@ def handle_upload_start(req_id, data):
 
     dest_dir = os.path.dirname(dest_path)
     if not is_path_allowed(dest_dir):
-        send_response(req_id, {"error": f"ไม่มีสิทธิ์เขียนที่: {dest_dir}"})
+        upload_errors[req_id] = f"ไม่มีสิทธิ์เขียนที่: {dest_dir}"
+        send_response(req_id, {"error": upload_errors[req_id]})
         return
 
     try:
         os.makedirs(dest_dir, exist_ok=True)
         f = open(dest_path, "wb")
         upload_sessions[req_id] = {"file": f, "path": dest_path, "received": 0}
+        upload_errors.pop(req_id, None)   # start สำเร็จ ล้าง error เก่า (ถ้ามี)
         logger.info(f"  Upload start: {dest_path}")
         # ยังไม่ตอบกลับ รอ chunk สุดท้าย
     except Exception as e:
+        upload_errors[req_id] = str(e)
         send_response(req_id, {"error": str(e)})
 
 
 def handle_upload_chunk(req_id, data):
     """รับ chunk เขียนต่อท้ายไฟล์ และแตก zip อัตโนมัติเมื่อรับครบ"""
+    # ถ้า upload_start ของ req นี้ล้มเหลวไปแล้ว → ตอบเหตุผลจริงทันที (fail เร็ว ทุก chunk ไม่ต้อง sleep)
+    if req_id in upload_errors:
+        reason = upload_errors.pop(req_id) if data.get("is_last") else upload_errors.get(req_id)
+        send_response(req_id, {"error": reason})
+        return
+
     sess = upload_sessions.get(req_id)
     if not sess:
         # chunk อาจมาก่อน upload_start ประมวลผลเสร็จ (ตอนอัปหลายไฟล์พร้อมกัน) → รอ session สักครู่
         for _ in range(40):
             time.sleep(0.05)
+            if req_id in upload_errors:   # ระหว่างรอ ถ้า start ล้มเหลว → ตอบเหตุผลจริง
+                send_response(req_id, {"error": upload_errors.get(req_id)})
+                return
             sess = upload_sessions.get(req_id)
             if sess:
                 break
     if not sess:
-        send_response(req_id, {"error": "ไม่พบ session อัปโหลด (upload_start หาย)"})
+        send_response(req_id, {"error": "ไม่พบ session อัปโหลด (upload_start หาย/ล้มเหลว)"})
         return
 
     try:
@@ -589,29 +604,43 @@ def handle_delete(req_id, data):
         send_response(req_id, {"error": str(e)})
 
 
+def _force_remove(path):
+    """ลบไฟล์/โฟลเดอร์ให้ได้แม้เป็น read-only (เคลียร์ attribute ก่อนลบ)
+       ไม่สามารถลบไฟล์ที่ถูกโปรแกรมอื่นเปิดค้างอยู่ได้ (จะโยน PermissionError)"""
+    def _onerror(func, p, exc):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    if os.path.isdir(path):
+        shutil.rmtree(path, onerror=_onerror)
+    else:
+        try:
+            os.remove(path)
+        except PermissionError:
+            os.chmod(path, stat.S_IWRITE)
+            os.remove(path)
+
+
 def handle_delete_many(req_id, data):
-    """ลบหลายไฟล์/โฟลเดอร์ในคำสั่งเดียว (เร็วกว่าลบทีละไฟล์มาก)"""
+    """ลบหลายไฟล์/โฟลเดอร์ในคำสั่งเดียว (เร็วกว่าลบทีละไฟล์มาก) + บอกเหตุผลรายไฟล์"""
     paths = data.get("paths", [])
     deleted = 0
     failed = 0
     errors = []
     for p in paths:
-        if not is_path_allowed(p):
-            failed += 1
-            continue
+        name = os.path.basename(p.rstrip("\\/")) or p
         try:
-            if os.path.isdir(p):
-                shutil.rmtree(p)
-            elif os.path.exists(p):
-                os.remove(p)
-            else:
-                failed += 1
-                continue
+            if not is_path_allowed(p):
+                raise PermissionError("ไม่อยู่ในโฟลเดอร์ที่อนุญาต")
+            if not os.path.exists(p):
+                raise FileNotFoundError("ไม่พบไฟล์/โฟลเดอร์")
+            _force_remove(p)
             deleted += 1
         except Exception as e:
             failed += 1
-            if len(errors) < 5:
-                errors.append(str(e))
+            msg = f"{name}: {e}"
+            logger.warning(f"  delete fail - {msg}")
+            if len(errors) < 8:
+                errors.append(msg)
     logger.info(f"  Bulk delete: {deleted} deleted, {failed} failed ({len(paths)} requested)")
     send_response(req_id, {"success": True, "deleted": deleted, "failed": failed, "errors": errors})
 
