@@ -617,6 +617,8 @@ WEB_UI_HTML = r"""
   }
   .file-count b { color: var(--accent); font-size: 15px; }
   .file-count .dim { color: var(--text-dim); }
+  .file-count.sel-chip { border-color: var(--accent); background: rgba(59,130,246,0.12); color: var(--accent); }
+  .file-count.sel-chip b { color: var(--accent); }
 
   /* ── ลากคลุมเลือกไฟล์ (drag-to-select) ── */
   .file-table { user-select: none; -webkit-user-select: none; }  /* กันลากแล้วไปเลือกข้อความแทนติ๊กไฟล์ */
@@ -2046,12 +2048,13 @@ function renderFiles(files, path) {
     <div class="toolbar">
       ${projectSelect}
       <div class="breadcrumb">${breadcrumb}</div>
-      <button class="btn" onclick="downloadSelected()">💾 โหลดที่เลือก</button>
-      <button class="btn" onclick="openTransfer()" title="ย้าย/คัดลอกไฟล์ที่เลือกไปเครื่องอื่น">📦 ย้ายไปเครื่องอื่น</button>
-      <button class="btn btn-danger" onclick="deleteSelected()">🗑️ ลบที่เลือก</button>
+      <button class="btn" id="btnDownloadSel" onclick="downloadSelected()">💾 โหลดที่เลือก</button>
+      <button class="btn" id="btnTransfer" onclick="openTransfer()" title="ย้าย/คัดลอกไฟล์ที่เลือกไปเครื่องอื่น">📦 ย้ายไปเครื่องอื่น</button>
+      <button class="btn btn-danger" id="btnDeleteSel" onclick="deleteSelected()">🗑️ ลบที่เลือก</button>
       <button class="btn" onclick="loadDir(currentPath)">🔄 รีเฟรช</button>
       <button class="btn btn-primary" onclick="openUpload()">📤 อัปโหลด</button>
       <span class="file-count" title="จำนวนไฟล์ที่เหลือในโฟลเดอร์นี้">📄 เหลือ <b>${fileCount}</b> ไฟล์${dirCount ? ` <span class="dim">· ${dirCount} โฟลเดอร์</span>` : ''}</span>
+      <span class="file-count sel-chip" id="selChip" style="display:none" title="จำนวนไฟล์ที่เลือกอยู่">✅ เลือก <b>0</b> ไฟล์</span>
     </div>
     ${files.length === 0 ? '<div class="empty-state"><div class="icon">📭</div><h3>โฟลเดอร์ว่าง</h3></div>' : `
     <table class="file-table">
@@ -2091,6 +2094,7 @@ function renderFiles(files, path) {
     </table>
     `}
   `;
+  updateSelectedCount();
 }
 
 function baseName(p) {
@@ -2176,6 +2180,32 @@ function downloadFile(filePath, fileName) {
 // ── Bulk select / delete / download ──
 function toggleSelectAll(cb) {
   document.querySelectorAll('.file-check').forEach(x => x.checked = cb.checked);
+  updateSelectedCount();
+}
+
+// นับไฟล์ที่เลือกอยู่แบบสด ๆ → โชว์ชิป "เลือก N ไฟล์" + ตัวเลขบนปุ่ม (ที่เลือก/ย้าย/ลบ)
+function updateSelectedCount() {
+  const n = document.querySelectorAll('.file-check:checked').length;
+  const chip = document.getElementById('selChip');
+  if (chip) {
+    chip.style.display = n ? 'flex' : 'none';
+    const b = chip.querySelector('b');
+    if (b) b.textContent = n;
+  }
+  const setBtn = (id, base) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = n ? (base + ' (' + n + ')') : base;
+  };
+  setBtn('btnDownloadSel', '💾 โหลดที่เลือก');
+  setBtn('btnTransfer', '📦 ย้ายไปเครื่องอื่น');
+  setBtn('btnDeleteSel', '🗑️ ลบที่เลือก');
+}
+
+// ระหว่างลากคลุม อัปเดตตัวนับแค่เฟรมละครั้ง (กันหน่วงตอนไฟล์เยอะ)
+let _selCountRAF = null;
+function scheduleSelCount() {
+  if (_selCountRAF) return;
+  _selCountRAF = requestAnimationFrame(() => { _selCountRAF = null; updateSelectedCount(); });
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2227,12 +2257,14 @@ function initDragSelect() {
       _drag.lastCur = _drag.anchor;
       document.body.classList.add('no-select');
       _setCheck(_drag.anchor, _drag.target);
+      scheduleSelCount();
     }
     const cur = _rowIndexFromPoint(e.clientX, e.clientY);
     if (cur == null || cur === _drag.lastCur) return;
     _restoreRange(_drag.anchor, _drag.lastCur);     // ล้างช่วงเดิม
     _applyRange(_drag.anchor, cur, _drag.target);    // ทาช่วงใหม่
     _drag.lastCur = cur;
+    scheduleSelCount();
   });
 
   document.addEventListener('mouseup', () => {
@@ -2241,6 +2273,7 @@ function initDragSelect() {
     _drag.active = false;
     _drag.snap = null;
     document.body.classList.remove('no-select');
+    updateSelectedCount();
   });
 
   // Shift+คลิกที่ช่องติ๊ก = เลือกต่อเนื่องจากอันที่ติ๊กล่าสุด
@@ -2250,6 +2283,7 @@ function initDragSelect() {
     const idx = parseInt(cb.dataset.index);
     if (e.shiftKey && _lastCheckIndex != null) _applyRange(_lastCheckIndex, idx, cb.checked);
     _lastCheckIndex = idx;
+    updateSelectedCount();
   });
 }
 
