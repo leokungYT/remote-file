@@ -29,6 +29,13 @@ MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "500"))  # ขนาดไ�
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# เวลาที่ไฟล์ server.py ถูกเขียนล่าสุด → ใช้เป็น "build stamp" โชว์บนหน้าเว็บ
+# (autoupdate-file.bat เขียนทับไฟล์ = mtime เปลี่ยน → เช็กได้ว่า deploy โค้ดใหม่แล้วหรือยัง)
+try:
+    APP_BUILD = datetime.fromtimestamp(os.path.getmtime(os.path.abspath(__file__))).strftime("%Y-%m-%d %H:%M:%S")
+except Exception:
+    APP_BUILD = "unknown"
+
 # ─── LOGGING ──────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -391,7 +398,11 @@ def cleanup_pending():
 
 @app.route("/")
 def index():
-    return render_template_string(WEB_UI_HTML.replace("__MAX_UPLOAD_MB__", str(MAX_UPLOAD_MB)))
+    return render_template_string(
+        WEB_UI_HTML
+        .replace("__MAX_UPLOAD_MB__", str(MAX_UPLOAD_MB))
+        .replace("__APP_BUILD__", APP_BUILD)
+    )
 
 
 @app.route("/agent.py")
@@ -1087,6 +1098,7 @@ WEB_UI_HTML = r"""
   <h1>
     <span class="icon">📁</span>
     Remote File Manager
+    <span style="font-size:11px; font-weight:400; color:var(--text-dim); margin-left:10px" title="เวลาที่โค้ด server ถูกอัปเดตล่าสุด — ใช้เช็กว่า deploy โค้ดใหม่สำเร็จหรือยัง">build __APP_BUILD__</span>
   </h1>
   <div style="display:flex; align-items:center; gap:12px">
     <button class="btn" onclick="openDashboard()">⚽ Dashboard PES</button>
