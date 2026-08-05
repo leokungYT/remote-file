@@ -1219,10 +1219,19 @@ WEB_UI_HTML = r"""
       ลบไฟล์ต้นทางหลังส่งสำเร็จ (ติ๊ก = ย้าย, ไม่ติ๊ก = คัดลอก)
     </label>
 
-    <div id="transferProgress" style="max-height:210px; overflow-y:auto; margin:8px 0"></div>
+    <div id="transferStatus" style="display:none; margin:12px 0">
+      <div style="display:flex; justify-content:space-between; align-items:center; font-size:13px; margin-bottom:6px">
+        <span id="txStatusText" style="font-weight:700; color:var(--accent)">กำลังเตรียม...</span>
+        <span id="txStatusCount" style="font-size:12px"></span>
+      </div>
+      <div class="progress-bar" style="height:10px"><div id="txStatusBar" class="progress-fill" style="width:0%"></div></div>
+      <div id="txStatusCur" style="font-size:11px; color:var(--text-dim); margin-top:5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis"></div>
+    </div>
+
+    <div id="transferProgress" style="max-height:160px; overflow-y:auto; margin:8px 0; font-size:12px; line-height:1.6"></div>
 
     <div class="modal-buttons">
-      <button class="btn" onclick="closeModal('transferModal')">ปิด</button>
+      <button class="btn" id="transferCloseBtn" onclick="transferCloseOrCancel()">ปิด</button>
       <button class="btn btn-primary" id="transferStartBtn" onclick="startTransfer()">🚀 เริ่มย้าย</button>
     </div>
   </div>
@@ -2737,6 +2746,7 @@ function handleUpload(files) {
 let _txFiles = [];      // ไฟล์ที่เลือกไว้ย้าย
 let _txSource = null;   // agent_id ต้นทาง
 let _txBusy = false;
+let _txCancel = false;  // ตั้ง true เพื่อหยุดกลางคัน
 
 function txAgentLabel(agentId) {
   const a = (agentsData || []).find(x => x.agent_id === agentId);
@@ -2780,7 +2790,20 @@ function openTransfer() {
   document.getElementById('transferStartBtn').textContent = '🚀 เริ่มย้าย';
   document.getElementById('transferStartBtn').disabled = false;
   document.getElementById('transferProgress').innerHTML = '';
+  document.getElementById('transferStatus').style.display = 'none';
+  document.getElementById('transferCloseBtn').textContent = 'ปิด';
+  _txCancel = false;
   document.getElementById('transferModal').classList.add('show');
+}
+
+// ปุ่มมุมซ้ายล่าง: ระหว่างย้าย = หยุด, ตอนไม่ย้าย = ปิดหน้าต่าง
+function transferCloseOrCancel() {
+  if (_txBusy) {
+    _txCancel = true;
+    document.getElementById('transferCloseBtn').textContent = '⏳ กำลังหยุด...';
+    return;
+  }
+  closeModal('transferModal');
 }
 
 // Uint8Array → base64 (ทำเป็นก้อนกัน call stack ล้นตอนไฟล์ใหญ่)
@@ -2894,53 +2917,79 @@ async function startTransfer() {
   }
 
   _txBusy = true;
+  _txCancel = false;
+  const verb = deleteSource ? 'ย้าย' : 'คัดลอก';
   const startBtn = document.getElementById('transferStartBtn');
+  const closeBtn = document.getElementById('transferCloseBtn');
   startBtn.disabled = true;
-  const prog = document.getElementById('transferProgress');
-  prog.innerHTML = '';
+  startBtn.textContent = '⏳ กำลัง' + verb + '...';
+  closeBtn.textContent = '⏹️ หยุด';
 
-  const rows = _txFiles.map((f, i) => {
-    const id = 'txrow_' + i;
-    prog.innerHTML += `<div id="${id}" style="display:flex; justify-content:space-between; gap:10px; font-size:12px; padding:4px 0; border-bottom:1px solid var(--border)">
-      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap">📄 ${escHtml(f.name)}</span>
-      <span class="tx-status" style="color:var(--text-secondary); white-space:nowrap">รอ...</span></div>`;
-    return id;
-  });
-  const setStatus = (i, txt, color) => {
-    const el = document.querySelector('#' + rows[i] + ' .tx-status');
-    if (el) { el.textContent = txt; el.style.color = color || 'var(--text-secondary)'; }
+  const statusWrap = document.getElementById('transferStatus');
+  const statusText = document.getElementById('txStatusText');
+  const statusCount = document.getElementById('txStatusCount');
+  const statusBar = document.getElementById('txStatusBar');
+  const statusCur = document.getElementById('txStatusCur');
+  const logEl = document.getElementById('transferProgress');
+  statusWrap.style.display = 'block';
+  statusBar.style.background = '';
+  logEl.innerHTML = '';
+
+  const N = _txFiles.length;
+  const logLines = [];
+  const addLog = (html) => {
+    logLines.push(html);
+    if (logLines.length > 40) logLines.shift();   // เก็บแค่ ~40 บรรทัดล่าสุด (กันรก/หน่วงตอนไฟล์เยอะ)
+    logEl.innerHTML = logLines.join('');
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+  const updateStatus = (done, curName) => {
+    const pct = N ? Math.round((done / N) * 100) : 100;
+    statusBar.style.width = pct + '%';
+    statusText.textContent = `⏳ กำลัง${verb} ${done}/${N} (${pct}%)`;
+    statusCount.innerHTML = `<span style="color:#22c55e">✅ ${ok}</span>` + (fail ? ` · <span style="color:var(--danger)">❌ ${fail}</span>` : '');
+    statusCur.textContent = curName ? ('กำลังทำ: ' + curName) : '';
   };
 
   let ok = 0, fail = 0;
-  for (let i = 0; i < _txFiles.length; i++) {
+  updateStatus(0, '');
+  for (let i = 0; i < N; i++) {
+    if (_txCancel) { addLog('<div style="color:#f59e0b">⏹️ หยุดโดยผู้ใช้</div>'); break; }
     const f = _txFiles[i];
+    updateStatus(i, f.name);
     try {
-      setStatus(i, '⬇️ กำลังดึง...', 'var(--accent)');
       const bytes = await fetchFileBytesFrom(_txSource, f.full_path);
-      setStatus(i, '⬆️ กำลังส่ง...', 'var(--accent)');
       await uploadBase64ToAgent(destAgent, {
-        filename: f.name,
-        base64: bytesToBase64(bytes),
-        fileSize: bytes.length,
-        baseMatch: baseMatch,
-        subpath: subpath,
+        filename: f.name, base64: bytesToBase64(bytes), fileSize: bytes.length,
+        baseMatch: baseMatch, subpath: subpath,
       });
       if (deleteSource) {
-        setStatus(i, '🗑️ ลบต้นทาง...', 'var(--accent)');
         const dresp = await deleteFileOn(_txSource, f.full_path);
-        if (dresp && dresp.error) { setStatus(i, '⚠️ ส่งแล้ว แต่ลบต้นทางไม่ได้', '#f59e0b'); ok++; continue; }
+        if (dresp && dresp.error) {
+          addLog(`<div style="color:#f59e0b">⚠️ ${escHtml(f.name)} — ส่งแล้วแต่ลบต้นทางไม่ได้</div>`);
+          ok++; updateStatus(i + 1, ''); continue;
+        }
       }
-      setStatus(i, deleteSource ? '✅ ย้ายแล้ว' : '✅ คัดลอกแล้ว', '#22c55e');
       ok++;
+      if (i < 3 || (i + 1) % 20 === 0) addLog(`<div style="color:#22c55e">✅ ${escHtml(f.name)}</div>`);  // log เป็นช่วง กันรก
     } catch (e) {
-      setStatus(i, '❌ ' + (e.message || 'ล้มเหลว'), 'var(--danger)');
       fail++;
+      addLog(`<div style="color:var(--danger)">❌ ${escHtml(f.name)} — ${escHtml(e.message || 'ล้มเหลว')}</div>`);
     }
+    updateStatus(i + 1, '');
   }
 
+  const done = ok + fail;
   _txBusy = false;
+  _txCancel = false;
   startBtn.disabled = false;
-  toast(`${deleteSource ? 'ย้าย' : 'คัดลอก'}เสร็จ: สำเร็จ ${ok}` + (fail ? `, ล้มเหลว ${fail}` : ''), fail ? 'error' : 'success');
+  startBtn.textContent = '🚀 เริ่ม' + verb;
+  closeBtn.textContent = 'ปิด';
+  statusBar.style.width = '100%';
+  statusBar.style.background = fail ? 'var(--danger)' : 'var(--success)';
+  statusText.textContent = (done < N ? `⏹️ หยุดแล้ว — ${verb}ไป ${done}/${N}` : `✅ ${verb}เสร็จ ${ok}/${N}`);
+  addLog(`<div style="font-weight:700; margin-top:8px; color:var(--text-primary)">สรุป: สำเร็จ ${ok}` + (fail ? `, ล้มเหลว ${fail}` : '') + (done < N ? `, ยังไม่ทำ ${N - done}` : '') + `</div>`);
+  toast(`${verb}เสร็จ: สำเร็จ ${ok}` + (fail ? `, ล้มเหลว ${fail}` : ''), fail ? 'error' : 'success');
   if (deleteSource && ok) loadDir(currentPath);   // รีเฟรชต้นทาง (ตัวนับไฟล์อัปเดตตาม)
 }
 
