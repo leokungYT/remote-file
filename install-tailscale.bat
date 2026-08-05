@@ -77,7 +77,7 @@ echo.
 echo [OK] Connected. This PC Tailscale IP:
 "%TS%" ip -4
 echo.
-echo    Server: http://100.100.106.12:5000  (already in config.json)
+echo    Server: http://server:5000  (already in config.json)
 echo    Next:   run start_agent.bat
 echo.
 pause
