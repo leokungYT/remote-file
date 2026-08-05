@@ -11,7 +11,7 @@ cd /d "%~dp0"
 ::  EDIT ONCE: paste your Tailscale REUSABLE auth key below
 ::  (get it from https://login.tailscale.com/admin/settings/keys - use the Copy button)
 :: =====================================================================
-set "AUTHKEY=tskey-auth-kBvdL67G1d11CNTRL-dfZtZokA133WjKo9sQGz23WFEPVRuh6XL"
+set "AUTHKEY=tskey-auth-kdx5YEnuKP11CNTRL-uQLvVKF3fn16nnvuAYjwm163PVE1V1VL"
 :: =====================================================================
 
 set "TS=C:\Program Files\Tailscale\tailscale.exe"
@@ -54,12 +54,17 @@ if not exist "%TS%" ( echo [ERROR] Tailscale not installed. Install manually the
 
 :: --- [3/6] join Tailscale ---
 echo [3/6] Joining Tailscale ...
-"%TS%" up --authkey %AUTHKEY% --unattended
-if errorlevel 1 echo     [WARN] authkey join failed - if a browser opened, log in with the same account as the server
+"%TS%" status >nul 2>&1
+if %errorlevel%==0 (
+    echo     Already connected to Tailscale - skip.
+) else (
+    "%TS%" up --authkey %AUTHKEY% --unattended --timeout 45s
+    if errorlevel 1 echo     [WARN] authkey join failed - fix the key, OR run:  "%TS%" up   and log in manually
+)
 
 :: --- [4/6] set unique name (pc_<num>) in config.json ---
 echo [4/6] Setting name = pc_%PCNUM% ...
-powershell -NoProfile -Command "$c = Get-Content 'config.json' -Raw | ConvertFrom-Json; $c.name = 'pc_%PCNUM%'; ($c | ConvertTo-Json) | Set-Content 'config.json' -Encoding utf8"
+powershell -NoProfile -Command "$c = Get-Content 'config.json' -Raw | ConvertFrom-Json; $c.name = 'pc_%PCNUM%'; $j = $c | ConvertTo-Json; [System.IO.File]::WriteAllText((Join-Path (Get-Location) 'config.json'), $j, (New-Object System.Text.UTF8Encoding($false)))"
 
 :: --- [5/6] dependencies ---
 echo [5/6] Installing dependencies ...

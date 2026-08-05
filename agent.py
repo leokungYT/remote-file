@@ -36,7 +36,8 @@ def _load_config():
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     if os.path.exists(p):
         try:
-            with open(p, "r", encoding="utf-8") as f:
+            # utf-8-sig รองรับทั้งไฟล์ที่มี BOM และไม่มี (เช่นถูกเขียนโดย PowerShell)
+            with open(p, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception as e:
             print(f"[WARN] อ่าน config.json ไม่ได้ ใช้ค่าเริ่มต้นแทน: {e}")

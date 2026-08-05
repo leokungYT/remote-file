@@ -12,7 +12,7 @@ cd /d "%~dp0"
 ::   3) Paste it below after AUTHKEY=  (keep the AUTHKEY= part!)
 :: ================================================================
 
-set "AUTHKEY=tskey-auth-kBvdL67G1d11CNTRL-dfZtZokA133WjKo9sQGz23WFEPVRuh6XL"
+set "AUTHKEY=tskey-auth-kdx5YEnuKP11CNTRL-uQLvVKF3fn16nnvuAYjwm163PVE1V1VL"
 
 :: full path to tailscale (PATH is not refreshed in this window right after install)
 set "TS=C:\Program Files\Tailscale\tailscale.exe"
