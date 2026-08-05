@@ -618,6 +618,11 @@ WEB_UI_HTML = r"""
   .file-count b { color: var(--accent); font-size: 15px; }
   .file-count .dim { color: var(--text-dim); }
 
+  /* ── ลากคลุมเลือกไฟล์ (drag-to-select) ── */
+  body.no-select, body.no-select * { user-select: none !important; }
+  .file-table tbody tr[data-row] { cursor: default; }
+  .file-table tbody tr:has(.file-check:checked) { background: rgba(59,130,246,0.12); }
+
   .btn {
     padding: 8px 16px;
     border-radius: 8px;
@@ -2060,7 +2065,7 @@ function renderFiles(files, path) {
       </thead>
       <tbody>
         ${files.map((f, i) => `
-          <tr ondblclick="${f.is_dir ? `loadDir('${escAttr(f.full_path)}')` : `downloadFile('${escAttr(f.full_path)}', '${escAttr(f.name)}')`}">
+          <tr ${f.name === '..' ? '' : `data-row="${i}"`} ondblclick="${f.is_dir ? `loadDir('${escAttr(f.full_path)}')` : `downloadFile('${escAttr(f.full_path)}', '${escAttr(f.name)}')`}">
             <td style="text-align:center" onclick="event.stopPropagation()" ondblclick="event.stopPropagation()">
               ${f.name === '..' ? '' : `<input type="checkbox" class="file-check" data-index="${i}">`}
             </td>
@@ -2170,6 +2175,81 @@ function downloadFile(filePath, fileName) {
 // ── Bulk select / delete / download ──
 function toggleSelectAll(cb) {
   document.querySelectorAll('.file-check').forEach(x => x.checked = cb.checked);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  DRAG-TO-SELECT — ลากคลุมเลือกหลายไฟล์ทีเดียว + Shift+คลิกเลือกช่วง
+// ═══════════════════════════════════════════════════════════
+let _drag = { pending: false, active: false, anchor: 0, lastCur: 0, target: true, startY: 0, snap: null };
+let _lastCheckIndex = null;
+
+function _setCheck(i, state) {
+  const cb = document.querySelector('.file-check[data-index="' + i + '"]');
+  if (cb) cb.checked = state;
+}
+function _applyRange(a, b, state) {
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  for (let i = lo; i <= hi; i++) _setCheck(i, state);
+}
+function _restoreRange(a, b) {   // คืนค่าช่วงกลับเป็นสถานะก่อนเริ่มลาก (ตอนลากถอยหลัง)
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  for (let i = lo; i <= hi; i++) _setCheck(i, _drag.snap ? _drag.snap.has(i) : false);
+}
+function _rowIndexFromPoint(x, y) {
+  const el = document.elementFromPoint(x, y);
+  const tr = (el && el.closest) ? el.closest('tr[data-row]') : null;
+  return tr ? parseInt(tr.dataset.row) : null;
+}
+
+function initDragSelect() {
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    const tr = e.target.closest && e.target.closest('tr[data-row]');
+    if (!tr) return;
+    // ปล่อยให้ช่องติ๊ก / ปุ่ม action ทำงานปกติ (ไม่เริ่มลากจากตรงนั้น)
+    if (e.target.closest('.file-actions') || e.target.closest('input, button, a, select')) return;
+    _drag.pending = true;
+    _drag.active = false;
+    _drag.anchor = parseInt(tr.dataset.row);
+    _drag.startY = e.clientY;
+    e.preventDefault();   // กันการลากเลือกข้อความ (dblclick เปิดโฟลเดอร์ยังทำงาน)
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!_drag.pending) return;
+    if (!_drag.active) {
+      if (Math.abs(e.clientY - _drag.startY) < 4) return;   // ต้องขยับเมาส์ก่อนถึงเริ่มลาก
+      _drag.active = true;
+      _drag.snap = new Set();
+      document.querySelectorAll('.file-check:checked').forEach(cb => _drag.snap.add(parseInt(cb.dataset.index)));
+      _drag.target = !_drag.snap.has(_drag.anchor);   // เริ่มบนแถวที่ยังไม่ติ๊ก=เลือก, ติ๊กอยู่=ยกเลิก
+      _drag.lastCur = _drag.anchor;
+      document.body.classList.add('no-select');
+      _setCheck(_drag.anchor, _drag.target);
+    }
+    const cur = _rowIndexFromPoint(e.clientX, e.clientY);
+    if (cur == null || cur === _drag.lastCur) return;
+    _restoreRange(_drag.anchor, _drag.lastCur);     // ล้างช่วงเดิม
+    _applyRange(_drag.anchor, cur, _drag.target);    // ทาช่วงใหม่
+    _drag.lastCur = cur;
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (_drag.active) _lastCheckIndex = _drag.lastCur;
+    _drag.pending = false;
+    _drag.active = false;
+    _drag.snap = null;
+    document.body.classList.remove('no-select');
+  });
+
+  // Shift+คลิกที่ช่องติ๊ก = เลือกต่อเนื่องจากอันที่ติ๊กล่าสุด
+  document.addEventListener('click', (e) => {
+    const cb = e.target.closest && e.target.closest('.file-check');
+    if (!cb) return;
+    const idx = parseInt(cb.dataset.index);
+    if (e.shiftKey && _lastCheckIndex != null) _applyRange(_lastCheckIndex, idx, cb.checked);
+    _lastCheckIndex = idx;
+  });
 }
 
 function getSelectedFiles() {
@@ -2682,6 +2762,7 @@ function escAttr(s) {
 // ── DRAG & DROP ──
 document.addEventListener('DOMContentLoaded', () => {
   initSocket();
+  initDragSelect();
 
   const zone = document.getElementById('uploadZone');
   zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
