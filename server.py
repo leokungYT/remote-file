@@ -603,6 +603,21 @@ WEB_UI_HTML = r"""
   .breadcrumb span:hover { opacity: 0.7; }
   .breadcrumb .sep { color: var(--text-dim); cursor: default; }
 
+  .file-count {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .file-count b { color: var(--accent); font-size: 15px; }
+  .file-count .dim { color: var(--text-dim); }
+
   .btn {
     padding: 8px 16px;
     border-radius: 8px;
@@ -724,6 +739,18 @@ WEB_UI_HTML = r"""
     margin-bottom: 16px;
   }
   .modal input:focus { outline: none; border-color: var(--accent); }
+  select.modal-select {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 14px;
+  }
+  select.modal-select option { background: var(--bg-secondary); color: var(--text-primary); }
+  .modal label.fld { font-size: 13px; display: block; margin-bottom: 6px; color: var(--text-secondary); }
   .modal-buttons {
     display: flex;
     justify-content: flex-end;
@@ -1103,6 +1130,44 @@ WEB_UI_HTML = r"""
     <div id="uploadList"></div>
     <div class="modal-buttons">
       <button class="btn" onclick="closeModal('uploadModal')">ปิด</button>
+    </div>
+  </div>
+</div>
+
+<!-- TRANSFER MODAL (ย้าย/คัดลอกไฟล์ ข้ามเครื่อง) -->
+<div class="modal-overlay" id="transferModal">
+  <div class="modal" style="min-width:480px; max-width:580px">
+    <h2>📦 ย้าย / คัดลอกไฟล์ไปเครื่องอื่น</h2>
+    <div id="transferSummary" style="font-size:13px; color:var(--text-secondary); margin-bottom:14px"></div>
+
+    <label class="fld">ปลายทาง — เครื่องที่จะรับไฟล์</label>
+    <select id="transferDest" class="modal-select" style="margin-bottom:14px"></select>
+
+    <div style="display:flex; gap:10px; margin-bottom:6px">
+      <div style="flex:1">
+        <label class="fld">โปรเจกต์ (โฟลเดอร์หลัก)</label>
+        <input type="text" id="transferBase" placeholder="เช่น pes">
+      </div>
+      <div style="flex:1">
+        <label class="fld">โฟลเดอร์ย่อย</label>
+        <input type="text" id="transferSub" placeholder="เช่น input-id">
+      </div>
+    </div>
+    <div style="font-size:11px; color:var(--text-dim); margin-bottom:14px">
+      ไฟล์จะไปอยู่ที่โฟลเดอร์เดียวกันของเครื่องปลายทาง (เครื่องปลายทาง resolve พาธเอง — ต้องมีโฟลเดอร์นี้ใน allowed_paths)
+    </div>
+
+    <label style="display:flex; align-items:center; gap:8px; font-size:13px; margin-bottom:6px; cursor:pointer">
+      <input type="checkbox" id="transferDelete" checked style="width:auto"
+             onchange="document.getElementById('transferStartBtn').textContent = this.checked ? '🚀 เริ่มย้าย' : '📋 เริ่มคัดลอก'">
+      ลบไฟล์ต้นทางหลังส่งสำเร็จ (ติ๊ก = ย้าย, ไม่ติ๊ก = คัดลอก)
+    </label>
+
+    <div id="transferProgress" style="max-height:210px; overflow-y:auto; margin:8px 0"></div>
+
+    <div class="modal-buttons">
+      <button class="btn" onclick="closeModal('transferModal')">ปิด</button>
+      <button class="btn btn-primary" id="transferStartBtn" onclick="startTransfer()">🚀 เริ่มย้าย</button>
     </div>
   </div>
 </div>
@@ -1966,14 +2031,21 @@ function renderFiles(files, path) {
         ${allowed.map(p => `<option value="${escHtml(p)}" ${sameRoot(path, p) ? 'selected' : ''}>📁 ${escHtml(baseName(p))}</option>`).join('')}
       </select>` : '';
 
+  // นับจำนวนไฟล์/โฟลเดอร์ที่เหลือในโฟลเดอร์นี้ (ไม่นับ ".." ที่เป็นปุ่มย้อนกลับ)
+  const realItems = files.filter(f => f.name !== '..');
+  const fileCount = realItems.filter(f => !f.is_dir).length;
+  const dirCount = realItems.filter(f => f.is_dir).length;
+
   content.innerHTML = `
     <div class="toolbar">
       ${projectSelect}
       <div class="breadcrumb">${breadcrumb}</div>
       <button class="btn" onclick="downloadSelected()">💾 โหลดที่เลือก</button>
+      <button class="btn" onclick="openTransfer()" title="ย้าย/คัดลอกไฟล์ที่เลือกไปเครื่องอื่น">📦 ย้ายไปเครื่องอื่น</button>
       <button class="btn btn-danger" onclick="deleteSelected()">🗑️ ลบที่เลือก</button>
       <button class="btn" onclick="loadDir(currentPath)">🔄 รีเฟรช</button>
       <button class="btn btn-primary" onclick="openUpload()">📤 อัปโหลด</button>
+      <span class="file-count" title="จำนวนไฟล์ที่เหลือในโฟลเดอร์นี้">📄 เหลือ <b>${fileCount}</b> ไฟล์${dirCount ? ` <span class="dim">· ${dirCount} โฟลเดอร์</span>` : ''}</span>
     </div>
     ${files.length === 0 ? '<div class="empty-state"><div class="icon">📭</div><h3>โฟลเดอร์ว่าง</h3></div>' : `
     <table class="file-table">
@@ -2337,6 +2409,221 @@ function handleUpload(files) {
     };
     reader.readAsDataURL(file);
   });
+}
+
+// ═══════════════════════════════════════════════════════════
+//  TRANSFER — ย้าย/คัดลอกไฟล์ ข้ามเครื่อง (เครื่อง 1 → เครื่อง 2)
+//  หลักการ: ดึงไฟล์จากเครื่องต้นทาง → ส่งขึ้นเครื่องปลายทาง
+//           (ปลายทาง resolve โฟลเดอร์เองจาก base_match/subpath) → ลบต้นทาง (ถ้าเลือกย้าย)
+// ═══════════════════════════════════════════════════════════
+let _txFiles = [];      // ไฟล์ที่เลือกไว้ย้าย
+let _txSource = null;   // agent_id ต้นทาง
+let _txBusy = false;
+
+function txAgentLabel(agentId) {
+  const a = (agentsData || []).find(x => x.agent_id === agentId);
+  return a ? (a.name || a.hostname || a.agent_id) : agentId;
+}
+
+// โฟลเดอร์โปรเจกต์ (allowed_path) ที่ครอบ currentPath อยู่
+function currentProjectRoot() {
+  const agent = agentsData.find(a => a.agent_id === currentAgent);
+  const allowed = (agent && agent.allowed_paths) || [];
+  return allowed.find(p => sameRoot(currentPath, p)) || null;
+}
+
+function openTransfer() {
+  const files = getSelectedFiles().filter(f => !f.is_dir);
+  if (!files.length) { toast('เลือกไฟล์ (ไม่ใช่โฟลเดอร์) ที่จะย้ายก่อน', 'info'); return; }
+
+  const others = (agentsData || []).filter(a => a.agent_id !== currentAgent);
+  if (!others.length) { toast('ไม่มีเครื่องปลายทางอื่นที่ออนไลน์', 'error'); return; }
+
+  _txFiles = files;
+  _txSource = currentAgent;
+
+  // เดาโฟลเดอร์ปลายทางจากตำแหน่งปัจจุบัน → base_match (ชื่อโปรเจกต์) + subpath (โฟลเดอร์ย่อย)
+  const root = currentProjectRoot();
+  const baseMatch = root ? baseName(root) : '';
+  let subpath = '';
+  if (root) {
+    const np = currentPath.replace(/\\/g, '/');
+    const nr = root.replace(/\\/g, '/');
+    subpath = np.slice(nr.length).replace(/^\/+/, '');
+  }
+
+  document.getElementById('transferSummary').innerHTML =
+    `จะส่ง <b>${files.length}</b> ไฟล์ จากเครื่อง <b>${escHtml(txAgentLabel(currentAgent))}</b> ไปเครื่องที่เลือก`;
+  document.getElementById('transferDest').innerHTML =
+    others.map(a => `<option value="${escAttr(a.agent_id)}">🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}</option>`).join('');
+  document.getElementById('transferBase').value = baseMatch;
+  document.getElementById('transferSub').value = subpath;
+  document.getElementById('transferDelete').checked = true;
+  document.getElementById('transferStartBtn').textContent = '🚀 เริ่มย้าย';
+  document.getElementById('transferStartBtn').disabled = false;
+  document.getElementById('transferProgress').innerHTML = '';
+  document.getElementById('transferModal').classList.add('show');
+}
+
+// Uint8Array → base64 (ทำเป็นก้อนกัน call stack ล้นตอนไฟล์ใหญ่)
+function bytesToBase64(bytes) {
+  let bin = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  }
+  return btoa(bin);
+}
+
+// ดึง bytes ของไฟล์จากเครื่องที่ระบุ (เรียกทีละไฟล์เท่านั้น)
+function fetchFileBytesFrom(agentId, filePath) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, val) => { if (!settled) { settled = true; fn(val); } };
+    const onSent = (data) => {
+      const rid = data.request_id;
+      let chunks = [];
+      const onChunk = (chunk) => {
+        if (chunk.error) { socket.off('file_chunk_' + rid, onChunk); finish(reject, new Error(chunk.error)); return; }
+        chunks.push(chunk.data);
+        if (chunk.is_last) {
+          socket.off('file_chunk_' + rid, onChunk);
+          const bin = atob(chunks.join(''));
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          finish(resolve, arr);
+        }
+      };
+      socket.on('file_chunk_' + rid, onChunk);
+      socket.once('response_' + rid, (resp) => {
+        if (resp && resp.error) { socket.off('file_chunk_' + rid, onChunk); finish(reject, new Error(resp.error)); }
+      });
+    };
+    socket.once('request_sent', onSent);
+    setTimeout(() => { socket.off('request_sent', onSent); finish(reject, new Error('หมดเวลาดึงไฟล์จากต้นทาง')); }, 120000);
+    socket.emit('request_download', { agent_id: agentId, path: filePath });
+  });
+}
+
+// ส่ง base64 ขึ้นเครื่องปลายทาง (ให้ agent resolve โฟลเดอร์เองจาก base_match/subpath)
+function uploadBase64ToAgent(agentId, opts) {
+  return new Promise((resolve, reject) => {
+    const uploadId = 'tx_' + Math.random().toString(36).slice(2, 8);
+    const CHUNK = 512 * 1024;
+    const b64 = opts.base64;
+    const total = Math.ceil(b64.length / CHUNK) || 1;
+    let settled = false;
+    const onReady = (info) => {
+      if (info.upload_id !== uploadId) return;
+      socket.off('upload_ready', onReady);
+      const rid = info.request_id;
+      socket.once('response_' + rid, (resp) => {
+        settled = true;
+        if (resp && resp.error) reject(new Error(resp.error));
+        else resolve(resp);
+      });
+      for (let i = 0; i < total; i++) {
+        socket.emit('request_upload_chunk', {
+          agent_id: agentId,
+          request_id: rid,
+          data: b64.slice(i * CHUNK, (i + 1) * CHUNK),
+          is_last: (i === total - 1),
+        });
+      }
+    };
+    socket.on('upload_ready', onReady);
+    const startMsg = {
+      agent_id: agentId,
+      upload_id: uploadId,
+      dest_path: opts.filename,          // fallback; ถ้ามี base_match/subpath ปลายทางจะ override
+      filename: opts.filename,
+      file_size: opts.fileSize,
+    };
+    if (opts.baseMatch) startMsg.base_match = opts.baseMatch;
+    if (opts.subpath != null && opts.subpath !== '') startMsg.subpath = opts.subpath;
+    socket.emit('request_upload_start', startMsg);
+    setTimeout(() => {
+      if (!settled) { socket.off('upload_ready', onReady); reject(new Error('หมดเวลา (ปลายทางไม่ตอบ)')); }
+    }, 120000);
+  });
+}
+
+// ลบไฟล์เดียวในเครื่องที่ระบุ (คืน resp เสมอ ไม่ throw เพื่อไม่ให้ลูปสะดุด)
+function deleteFileOn(agentId, filePath) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    const onSent = (data) => {
+      socket.once('response_' + data.request_id, (resp) => done(resp || {}));
+    };
+    socket.once('request_sent', onSent);
+    setTimeout(() => { socket.off('request_sent', onSent); done({ error: 'หมดเวลาลบต้นทาง' }); }, 30000);
+    socket.emit('request_delete', { agent_id: agentId, path: filePath });
+  });
+}
+
+async function startTransfer() {
+  if (_txBusy) return;
+  const destAgent = document.getElementById('transferDest').value;
+  const baseMatch = document.getElementById('transferBase').value.trim();
+  const subpath = document.getElementById('transferSub').value.trim();
+  const deleteSource = document.getElementById('transferDelete').checked;
+
+  if (!destAgent) { toast('เลือกเครื่องปลายทางก่อน', 'info'); return; }
+  if (destAgent === _txSource) { toast('ต้นทางกับปลายทางเป็นเครื่องเดียวกัน', 'error'); return; }
+  if (!baseMatch && !subpath) {
+    if (!confirm('ไม่ได้ระบุโฟลเดอร์ปลายทาง — ไฟล์จะไปที่ Desktop ของเครื่องปลายทาง\nต้องการดำเนินการต่อหรือไม่?')) return;
+  }
+
+  _txBusy = true;
+  const startBtn = document.getElementById('transferStartBtn');
+  startBtn.disabled = true;
+  const prog = document.getElementById('transferProgress');
+  prog.innerHTML = '';
+
+  const rows = _txFiles.map((f, i) => {
+    const id = 'txrow_' + i;
+    prog.innerHTML += `<div id="${id}" style="display:flex; justify-content:space-between; gap:10px; font-size:12px; padding:4px 0; border-bottom:1px solid var(--border)">
+      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap">📄 ${escHtml(f.name)}</span>
+      <span class="tx-status" style="color:var(--text-secondary); white-space:nowrap">รอ...</span></div>`;
+    return id;
+  });
+  const setStatus = (i, txt, color) => {
+    const el = document.querySelector('#' + rows[i] + ' .tx-status');
+    if (el) { el.textContent = txt; el.style.color = color || 'var(--text-secondary)'; }
+  };
+
+  let ok = 0, fail = 0;
+  for (let i = 0; i < _txFiles.length; i++) {
+    const f = _txFiles[i];
+    try {
+      setStatus(i, '⬇️ กำลังดึง...', 'var(--accent)');
+      const bytes = await fetchFileBytesFrom(_txSource, f.full_path);
+      setStatus(i, '⬆️ กำลังส่ง...', 'var(--accent)');
+      await uploadBase64ToAgent(destAgent, {
+        filename: f.name,
+        base64: bytesToBase64(bytes),
+        fileSize: bytes.length,
+        baseMatch: baseMatch,
+        subpath: subpath,
+      });
+      if (deleteSource) {
+        setStatus(i, '🗑️ ลบต้นทาง...', 'var(--accent)');
+        const dresp = await deleteFileOn(_txSource, f.full_path);
+        if (dresp && dresp.error) { setStatus(i, '⚠️ ส่งแล้ว แต่ลบต้นทางไม่ได้', '#f59e0b'); ok++; continue; }
+      }
+      setStatus(i, deleteSource ? '✅ ย้ายแล้ว' : '✅ คัดลอกแล้ว', '#22c55e');
+      ok++;
+    } catch (e) {
+      setStatus(i, '❌ ' + (e.message || 'ล้มเหลว'), 'var(--danger)');
+      fail++;
+    }
+  }
+
+  _txBusy = false;
+  startBtn.disabled = false;
+  toast(`${deleteSource ? 'ย้าย' : 'คัดลอก'}เสร็จ: สำเร็จ ${ok}` + (fail ? `, ล้มเหลว ${fail}` : ''), fail ? 'error' : 'success');
+  if (deleteSource && ok) loadDir(currentPath);   // รีเฟรชต้นทาง (ตัวนับไฟล์อัปเดตตาม)
 }
 
 // ═══════════════════════════════════════════════════════════
