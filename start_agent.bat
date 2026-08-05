@@ -2,7 +2,10 @@
 cd /d "%~dp0"
 
 :: ----- CONFIG (fallback; config.json can also provide these) -----
+:: เชื่อมต่อได้หลาย server พร้อมกัน คั่นด้วยเครื่องหมายจุลภาค (,)
+set SERVER_URLS=http://server:5000,http://nuuboy:5000
 set SERVER_URL=http://server:5000
+set SERVER_URL2=http://nuuboy:5000
 set AGENT_SECRET=2ec990f60382a004d664f06f99a3e7f5
 set ALLOWED_PATHS=
 :: ----------------------------------------------------------------
@@ -11,10 +14,11 @@ set ALLOWED_PATHS=
 echo [0/3] Stopping old agent (if running)...
 powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'pythonw.exe' -and $_.CommandLine -like '*agent.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 
-:: ===== [1/3] auto-update agent.py from server =====
+:: ===== [1/3] auto-update agent.py from server (ลอง server แรก ถ้าไม่ได้ลองตัวที่สอง) =====
 echo [1/3] Updating agent.py from server...
 del /q "agent.py.new" >nul 2>&1
 curl -k -L --connect-timeout 10 --max-time 60 "%SERVER_URL%/agent.py" -o "agent.py.new" >nul 2>&1
+if not exist "agent.py.new" curl -k -L --connect-timeout 10 --max-time 60 "%SERVER_URL2%/agent.py" -o "agent.py.new" >nul 2>&1
 if not exist "agent.py.new" goto skipupdate
 :: verify the download looks like the real agent.py (not an error page)
 findstr /C:"RemoteFileManagerAgent_SingleInstance" "agent.py.new" >nul 2>&1

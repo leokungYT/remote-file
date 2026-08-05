@@ -45,7 +45,40 @@ def _load_config():
 
 _cfg = _load_config()
 
-SERVER_URL = os.environ.get("SERVER_URL") or _cfg.get("server_url") or "http://YOUR_SERVER_IP:5000"
+
+def _parse_server_urls():
+    """รวมรายชื่อ server ที่จะเชื่อมต่อ (รองรับหลายเครื่องพร้อมกัน เช่น server + nuuboy)
+       ลำดับความสำคัญ:
+         env SERVER_URLS (คั่นด้วย , หรือ ;) > env SERVER_URL >
+         config 'server_urls' (list หรือ string) > config 'server_url' > ค่าเริ่มต้น"""
+    raw = []
+    env_multi = os.environ.get("SERVER_URLS", "").strip()
+    env_single = os.environ.get("SERVER_URL", "").strip()
+    if env_multi:
+        raw = env_multi.replace(";", ",").split(",")
+    elif env_single:
+        raw = [env_single]
+    else:
+        cfg_multi = _cfg.get("server_urls")
+        cfg_single = _cfg.get("server_url")
+        if isinstance(cfg_multi, list) and cfg_multi:
+            raw = [str(u) for u in cfg_multi]
+        elif isinstance(cfg_multi, str) and cfg_multi.strip():
+            raw = cfg_multi.replace(";", ",").split(",")
+        elif cfg_single:
+            raw = [str(cfg_single)]
+    # ทำความสะอาด + ตัด url ซ้ำ (คงลำดับเดิม)
+    seen, urls = set(), []
+    for u in raw:
+        u = u.strip().rstrip("/")
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
+    return urls or ["http://YOUR_SERVER_IP:5000"]
+
+
+SERVER_URLS = _parse_server_urls()
+SERVER_URL = SERVER_URLS[0]   # server หลัก (ใช้ตอนแสดงผล/auto-update)
 AGENT_SECRET = os.environ.get("AGENT_SECRET") or _cfg.get("agent_secret") or "my-agent-secret-2024"
 AGENT_ID = os.environ.get("AGENT_ID") or _cfg.get("agent_id") or ""  # ปล่อยว่าง = ใช้ชื่อเครื่อง
 AGENT_NAME = os.environ.get("AGENT_NAME") or _cfg.get("name") or ""  # ชื่อที่แสดงในเว็บ (ปล่อยว่าง = ใช้ hostname)
@@ -95,13 +128,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── SOCKET.IO CLIENT ────────────────────────────────────
-sio = socketio.Client(
-    reconnection=True,
-    reconnection_delay=RECONNECT_DELAY,
-    reconnection_delay_max=30,
-    logger=False,
-)
+# ─── SOCKET.IO CLIENTS (หลาย server พร้อมกัน) ─────────────
+# Agent เชื่อมต่อได้หลาย server พร้อมกัน (เช่น "server" และ "nuuboy")
+# ทุก server เห็นเครื่องนี้ออนไลน์ และ ดู/ดาวน์โหลด/อัปโหลด/แก้ไข/ลบ ได้เท่ากันทั้งหมด
+_clients = {}                 # url -> socketio.Client
+_client_connected = {}        # url -> bool (เชื่อมต่ออยู่ไหม)
+_local = threading.local()    # เก็บ client ของ thread ที่กำลังจัดการคำสั่ง (ตอบกลับให้ถูก server)
+
+
+def _current_client():
+    """client ของ server ที่ส่งคำสั่งนี้เข้ามา — ใช้ตอบกลับให้กลับไปเครื่องที่สั่ง"""
+    return getattr(_local, "client", None)
+
+
+def _any_connected():
+    return any(c.connected for c in _clients.values())
+
+
+def _connected_count():
+    return sum(1 for c in _clients.values() if c.connected)
+
+
+def _disconnect_all():
+    for c in list(_clients.values()):
+        try:
+            if c.connected:
+                c.disconnect()
+        except Exception:
+            pass
+
+
+def _spawn_with_client(target):
+    """เปิด thread ใหม่โดยพก client ปัจจุบันติดไปด้วย
+       (thread ใหม่ไม่สืบทอด thread-local เอง จึงต้อง set ให้)"""
+    client = _current_client()
+
+    def _wrapped():
+        _local.client = client
+        target()
+
+    threading.Thread(target=_wrapped, daemon=True).start()
 
 # เก็บสถานะการอัปโหลดแบบแบ่ง chunk (req_id -> {file, path, received})
 upload_sessions = {}
@@ -214,42 +280,8 @@ def format_file_info(path, name):
 #  SOCKET.IO EVENT HANDLERS
 # ═══════════════════════════════════════════════════════════
 
-@sio.event
-def connect():
-    _ui_state["connected"] = True
-    logger.info("✅ Connected to server!")
-    agent_id = AGENT_ID or AGENT_NAME or get_hostname()  # ใช้ name ถ้ามี กัน hostname ซ้ำชนกัน
-    sio.emit("agent_register", {
-        "secret": AGENT_SECRET,
-        "agent_id": agent_id,
-        "name": AGENT_NAME,
-        "hostname": get_hostname(),
-        "os_info": get_os_info(),
-        "ip": get_local_ip(),
-        "allowed_paths": ALLOWED_PATHS,
-    })
-
-
-@sio.event
-def disconnect():
-    _ui_state["connected"] = False
-    logger.warning("❌ Disconnected from server")
-
-
-@sio.on("registered")
-def on_registered(data):
-    logger.info(f"📋 Registered as: {data.get('agent_id')}")
-
-
-@sio.on("auth_failed")
-def on_auth_failed(data):
-    logger.error(f"🔒 Authentication failed: {data.get('message')}")
-    logger.error("ตรวจสอบ AGENT_SECRET ว่าตรงกับ server หรือไม่")
-
-
-@sio.on("command")
-def on_command(data):
-    """รับคำสั่งจาก server"""
+def _dispatch_command(data):
+    """แยกคำสั่งจาก server ไปยัง handler (client ปัจจุบันถูก set ไว้ใน _local แล้ว)"""
     req_id = data.get("request_id")
     action = data.get("action")
     payload = data.get("data", {})
@@ -295,8 +327,65 @@ def on_command(data):
 
 
 def send_response(req_id, data):
+    """ตอบกลับไปยัง server ที่ส่งคำสั่งนี้เข้ามา (ไม่ใช่ทุก server)"""
     data["request_id"] = req_id
-    sio.emit("agent_response", data)
+    client = _current_client()
+    if client is None:
+        logger.warning("ไม่มี client ปัจจุบัน — ตอบกลับไม่ได้")
+        return
+    try:
+        client.emit("agent_response", data)
+    except Exception as e:
+        logger.warning(f"ส่ง response ไม่สำเร็จ: {e}")
+
+
+def _make_client(url):
+    """สร้าง socketio client 1 ตัวต่อ server 1 เครื่อง พร้อมผูก event handler ครบชุด"""
+    client = socketio.Client(
+        reconnection=True,
+        reconnection_delay=RECONNECT_DELAY,
+        reconnection_delay_max=30,
+        logger=False,
+    )
+
+    @client.event
+    def connect():
+        _local.client = client
+        _client_connected[url] = True
+        _ui_state["connected"] = True
+        logger.info(f"✅ Connected to server: {url}")
+        agent_id = AGENT_ID or AGENT_NAME or get_hostname()  # ใช้ name ถ้ามี กัน hostname ซ้ำชนกัน
+        client.emit("agent_register", {
+            "secret": AGENT_SECRET,
+            "agent_id": agent_id,
+            "name": AGENT_NAME,
+            "hostname": get_hostname(),
+            "os_info": get_os_info(),
+            "ip": get_local_ip(),
+            "allowed_paths": ALLOWED_PATHS,
+        })
+
+    @client.event
+    def disconnect():
+        _client_connected[url] = False
+        _ui_state["connected"] = _any_connected()
+        logger.warning(f"❌ Disconnected from server: {url}")
+
+    @client.on("registered")
+    def on_registered(data):
+        logger.info(f"📋 Registered as: {data.get('agent_id')} @ {url}")
+
+    @client.on("auth_failed")
+    def on_auth_failed(data):
+        logger.error(f"🔒 Authentication failed @ {url}: {data.get('message')}")
+        logger.error("ตรวจสอบ AGENT_SECRET ว่าตรงกับ server หรือไม่")
+
+    @client.on("command")
+    def on_command(data):
+        _local.client = client   # ผูก response ให้กลับไปที่ server ที่สั่งมา
+        _dispatch_command(data)
+
+    return client
 
 
 # ═══════════════════════════════════════════════════════════
@@ -389,6 +478,11 @@ def handle_download(req_id, data):
         send_response(req_id, {"error": f"ไม่พบไฟล์: {path}"})
         return
 
+    client = _current_client()
+    if client is None:
+        logger.warning("ไม่มี client ปัจจุบัน — ส่งไฟล์ไม่ได้")
+        return
+
     try:
         file_size = os.path.getsize(path)
         logger.info(f"  Sending file: {path} ({file_size} bytes)")
@@ -401,7 +495,7 @@ def handle_download(req_id, data):
                     break
                 is_last = f.tell() >= file_size
 
-                sio.emit("file_chunk", {
+                client.emit("file_chunk", {
                     "request_id": req_id,
                     "data": base64.b64encode(chunk).decode("ascii"),
                     "chunk_index": chunk_index,
@@ -877,11 +971,7 @@ def handle_shutdown(req_id, data):
 
     def _die():
         time.sleep(0.6)  # รอให้ response ถูกส่งกลับไปก่อนค่อยปิด
-        try:
-            if sio.connected:
-                sio.disconnect()
-        except Exception:
-            pass
+        _disconnect_all()
         os._exit(0)
 
     threading.Thread(target=_die, daemon=True).start()
@@ -904,27 +994,35 @@ def _release_single_instance():
 
 def _download_new_agent():
     """โหลด agent.py ตัวล่าสุดจาก server (/agent.py) มาเขียนทับ ถ้าต่างจากเดิม
+       ลองทีละ server จนกว่าจะสำเร็จ (รองรับหลาย server)
        คืน True = มีของใหม่เขียนทับแล้ว, False = เหมือนเดิม (ไม่ต้องรีสตาร์ท)
        - ตรวจไฟล์ก่อนเขียนทับ กันโหลดหน้า error / ไฟล์เพี้ยนมาทำ agent พัง"""
     import requests
     here = os.path.dirname(os.path.abspath(__file__))
     dest = os.path.join(here, "agent.py")
-    r = requests.get(SERVER_URL.rstrip("/") + "/agent.py", timeout=30)
-    r.raise_for_status()
-    code = r.content
-    text = code.decode("utf-8", "ignore")
-    if len(code) < 3000 or "RemoteFileManagerAgent_SingleInstance" not in text or "def main()" not in text:
-        raise RuntimeError("agent.py ที่โหลดมาไม่ถูกต้อง (ยกเลิกการอัปเดต)")
-    try:
-        with open(dest, "rb") as f:
-            if f.read() == code:
-                return False   # เหมือนเดิม
-    except Exception:
-        pass
-    with open(dest, "wb") as f:
-        f.write(code)
-    logger.info(f"⬆️ อัปเดต agent.py จาก server สำเร็จ ({len(code)} bytes)")
-    return True
+    last_err = None
+    for url in SERVER_URLS:
+        try:
+            r = requests.get(url.rstrip("/") + "/agent.py", timeout=30)
+            r.raise_for_status()
+            code = r.content
+            text = code.decode("utf-8", "ignore")
+            if len(code) < 3000 or "RemoteFileManagerAgent_SingleInstance" not in text or "def main()" not in text:
+                raise RuntimeError("agent.py ที่โหลดมาไม่ถูกต้อง")
+            try:
+                with open(dest, "rb") as f:
+                    if f.read() == code:
+                        return False   # เหมือนเดิม
+            except Exception:
+                pass
+            with open(dest, "wb") as f:
+                f.write(code)
+            logger.info(f"⬆️ อัปเดต agent.py จาก {url} สำเร็จ ({len(code)} bytes)")
+            return True
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"อัปเดตไม่สำเร็จจากทุก server: {last_err}")
 
 
 def _relaunch_and_exit():
@@ -940,11 +1038,7 @@ def _relaunch_and_exit():
         logger.info("🔄 เปิด agent ตัวใหม่แล้ว — กำลังปิดตัวเก่า")
     except Exception as e:
         logger.error(f"relaunch failed: {e}")
-    try:
-        if sio.connected:
-            sio.disconnect()
-    except Exception:
-        pass
+    _disconnect_all()
     time.sleep(0.3)
     os._exit(0)
 
@@ -972,7 +1066,7 @@ def handle_self_update(req_id, data):
         time.sleep(0.4)  # ให้ response ส่งถึงก่อนรีสตาร์ท
         _relaunch_and_exit()
 
-    threading.Thread(target=_go, daemon=True).start()
+    _spawn_with_client(_go)   # พก client ที่สั่งมาไปด้วย จะได้ตอบกลับถูก server
 
 
 def _startup_autoupdate():
@@ -980,51 +1074,66 @@ def _startup_autoupdate():
        ครอบคลุมทุกวิธีเปิด (bat / vbs / scheduled task) — ปิดได้ด้วย env AGENT_NO_AUTOUPDATE=1"""
     if os.environ.get("AGENT_NO_AUTOUPDATE"):
         return
+    here = os.path.dirname(os.path.abspath(__file__))
+    changed = False
     try:
         import requests
-        here = os.path.dirname(os.path.abspath(__file__))
-        r = requests.get(SERVER_URL.rstrip("/") + "/agent.py", timeout=8)
-        if r.status_code != 200 or not r.content:
-            return
-        new = r.content
-        text = new.decode("utf-8", "ignore")
-        # ตรวจว่าเป็น agent.py จริง กันโหลดหน้า error/ไฟล์เพี้ยนมาทับ
-        if len(new) < 3000 or "RemoteFileManagerAgent_SingleInstance" not in text or "def main()" not in text:
-            return
-        with open(os.path.join(here, "agent.py"), "rb") as f:
-            if f.read() == new:
-                return   # เหมือนเดิม ไม่ต้องทำอะไร
-        with open(os.path.join(here, "agent.py"), "wb") as f:
-            f.write(new)
-        logger.info("⬆️ พบ agent.py เวอร์ชันใหม่จาก server — อัปเดตแล้ว กำลังรีสตาร์ท")
+        for url in SERVER_URLS:   # ลองทีละ server จนกว่าจะเจอที่ตอบได้
+            try:
+                r = requests.get(url.rstrip("/") + "/agent.py", timeout=8)
+                if r.status_code != 200 or not r.content:
+                    continue
+                new = r.content
+                text = new.decode("utf-8", "ignore")
+                # ตรวจว่าเป็น agent.py จริง กันโหลดหน้า error/ไฟล์เพี้ยนมาทับ
+                if len(new) < 3000 or "RemoteFileManagerAgent_SingleInstance" not in text or "def main()" not in text:
+                    continue
+                with open(os.path.join(here, "agent.py"), "rb") as f:
+                    if f.read() == new:
+                        return   # เหมือนเดิม ไม่ต้องทำอะไร
+                with open(os.path.join(here, "agent.py"), "wb") as f:
+                    f.write(new)
+                logger.info(f"⬆️ พบ agent.py เวอร์ชันใหม่จาก {url} — อัปเดตแล้ว กำลังรีสตาร์ท")
+                changed = True
+                break
+            except Exception:
+                continue
     except Exception as e:
         logger.info(f"(ข้ามการเช็กอัปเดตตอนเปิด: {e})")
         return
-    _relaunch_and_exit()
+    if changed:
+        _relaunch_and_exit()
 
 
 # ═══════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════
-def agent_loop():
-    """ลูปเชื่อมต่อ server + reconnect อัตโนมัติ"""
+def _connect_loop(url, client):
+    """ลูปเชื่อมต่อ server หนึ่งเครื่อง + reconnect อัตโนมัติ"""
     while True:
         try:
-            logger.info(f"🔗 Connecting to {SERVER_URL}...")
-            sio.connect(SERVER_URL, transports=["websocket", "polling"])
-            sio.wait()
+            logger.info(f"🔗 Connecting to {url}...")
+            client.connect(url, transports=["websocket", "polling"])
+            client.wait()
         except socketio.exceptions.ConnectionError as e:
-            logger.warning(f"Connection failed: {e}")
-            logger.info(f"Retrying in {RECONNECT_DELAY}s...")
+            logger.warning(f"[{url}] เชื่อมต่อไม่ได้: {e} — ลองใหม่ใน {RECONNECT_DELAY}s")
             time.sleep(RECONNECT_DELAY)
-        except KeyboardInterrupt:
-            logger.info("Agent stopped by user")
-            if sio.connected:
-                sio.disconnect()
-            break
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"[{url}] ผิดพลาด: {e}")
             time.sleep(RECONNECT_DELAY)
+
+
+def agent_loop():
+    """เชื่อมต่อทุก server พร้อมกัน (แต่ละเครื่องมี thread เชื่อมต่อของตัวเอง)"""
+    for url in SERVER_URLS:
+        client = _make_client(url)
+        _clients[url] = client
+        _client_connected[url] = False
+        threading.Thread(target=_connect_loop, args=(url, client),
+                         daemon=True, name=f"conn:{url}").start()
+    # คง thread นี้ไว้ (thread เชื่อมต่อจริงเป็น daemon แยกต่างหาก)
+    while True:
+        time.sleep(3600)
 
 
 def run_tray():
@@ -1043,16 +1152,17 @@ def run_tray():
         _ui_state["show_request"] = True   # หน้าต่างสถานะจะ deiconify เอง
 
     def on_exit(icon, item):
-        try:
-            if sio.connected:
-                sio.disconnect()
-        except Exception:
-            pass
+        _disconnect_all()
         icon.stop()
         os._exit(0)
 
+    def _status_text(item):
+        if _any_connected():
+            return f"🟢 เชื่อมต่อ {_connected_count()}/{len(SERVER_URLS)} server"
+        return "🔴 Offline"
+
     menu = pystray.Menu(
-        pystray.MenuItem(lambda item: "🟢 Connected" if sio.connected else "🔴 Offline", None, enabled=False),
+        pystray.MenuItem(_status_text, None, enabled=False),
         pystray.MenuItem("แสดงหน้าต่างสถานะ", on_show, default=True),
         pystray.MenuItem("Exit", on_exit),
     )
@@ -1078,7 +1188,7 @@ def run_status_window():
     status_lbl = tk.Label(top, textvariable=status_var, bg=BG, fg="#f59e0b",
                           font=("Segoe UI", 14, "bold"), anchor="w")
     status_lbl.pack(fill="x")
-    info = f"🖥️ {AGENT_ID or get_hostname()}    ·    🌐 {SERVER_URL}"
+    info = f"🖥️ {AGENT_ID or get_hostname()}    ·    🌐 {', '.join(SERVER_URLS)}"
     tk.Label(top, text=info, bg=BG, fg="#8494ad", font=("Segoe UI", 9), anchor="w").pack(fill="x", pady=(2, 0))
 
     txt = scrolledtext.ScrolledText(root, bg=CARD, fg=FG, insertbackground=FG,
@@ -1087,8 +1197,8 @@ def run_status_window():
     txt.configure(state="disabled")
 
     def poll():
-        if _ui_state["connected"]:
-            status_var.set("🟢 กำลังทำงาน — เชื่อมต่อ server แล้ว")
+        if _any_connected():
+            status_var.set(f"🟢 กำลังทำงาน — เชื่อมต่อ {_connected_count()}/{len(SERVER_URLS)} server")
             status_lbl.config(fg="#22c55e")
         else:
             status_var.set("🔴 หลุด / กำลังลองเชื่อมต่อใหม่...")
@@ -1155,17 +1265,24 @@ def main():
     print(f"  Hostname    : {get_hostname()}")
     print(f"  OS          : {get_os_info()}")
     print(f"  IP          : {get_local_ip()}")
-    print(f"  Server      : {SERVER_URL}")
+    if len(SERVER_URLS) == 1:
+        print(f"  Server      : {SERVER_URLS[0]}")
+    else:
+        print(f"  Servers     : {len(SERVER_URLS)} เครื่อง")
+        for i, u in enumerate(SERVER_URLS, 1):
+            print(f"                {i}. {u}")
     if ALLOWED_PATHS:
         print(f"  Allowed     : {', '.join(ALLOWED_PATHS)}")
     else:
         print(f"  Allowed     : ทุกตำแหน่ง (ไม่จำกัด)")
     print("=" * 55)
 
-    if SERVER_URL == "http://YOUR_SERVER_IP:5000":
-        print("\n⚠️  กรุณาตั้งค่า SERVER_URL ก่อน!")
-        print("   แก้ในไฟล์นี้ หรือตั้ง environment variable:")
-        print('   set SERVER_URL=http://192.168.1.100:5000')
+    if SERVER_URLS == ["http://YOUR_SERVER_IP:5000"]:
+        print("\n⚠️  กรุณาตั้งค่า server ก่อน!")
+        print("   แก้ในไฟล์ config.json:")
+        print('   "server_urls": ["http://server:5000", "http://nuuboy:5000"]')
+        print("   หรือตั้ง environment variable:")
+        print('   set SERVER_URLS=http://server:5000,http://nuuboy:5000')
         print()
         sys.exit(1)
 

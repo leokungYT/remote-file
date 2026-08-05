@@ -65,12 +65,14 @@ netsh advfirewall firewall add rule name="FileManager" dir=in action=allow proto
 
 ### 1. ตั้งค่า
 
-เปิดไฟล์ `agent.py` แก้ค่า `SERVER_URL`:
+แก้ค่าในไฟล์ `config.json` (แนะนำ):
 
-```python
-SERVER_URL = "http://IP-เครื่องหลัก:5000"
-AGENT_SECRET = "รหัสลับ-ต้องตรงกับ-server"
-AGENT_ID = ""  # ปล่อยว่าง = ใช้ชื่อเครื่อง
+```json
+{
+  "server_urls": ["http://IP-เครื่องหลัก:5000"],
+  "agent_secret": "รหัสลับ-ต้องตรงกับ-server",
+  "agent_id": ""
+}
 ```
 
 หรือตั้งผ่าน Environment Variable:
@@ -81,6 +83,30 @@ set AGENT_SECRET=office-secret-2024
 set AGENT_ID=สำนักงาน-กทม
 python agent.py
 ```
+
+### 🔗 เชื่อมต่อหลาย server พร้อมกัน (เช่น server + nuuboy)
+
+อยากให้ **2 เครื่อง server ดู/แก้ไขไฟล์พร้อมกันได้เท่ากัน** ใส่หลาย URL ได้เลย:
+
+```json
+{
+  "server_urls": [
+    "http://server:5000",
+    "http://nuuboy:5000"
+  ]
+}
+```
+
+หรือผ่าน Environment Variable (คั่นด้วย `,`):
+
+```cmd
+set SERVER_URLS=http://server:5000,http://nuuboy:5000
+python agent.py
+```
+
+- เครื่องลูกจะเชื่อมต่อ **ทุก server พร้อมกัน** → ทั้งสองเครื่องเห็นเครื่องลูกออนไลน์ และสั่งงานได้เท่ากันทั้งหมด
+- ทั้งสอง server ต้องรัน `server.py` และใช้ `AGENT_SECRET` **ค่าเดียวกัน**
+- คำสั่ง/ผลลัพธ์ (ดาวน์โหลด, อัปโหลด, ดูจอ) จะตอบกลับเฉพาะ server ที่สั่ง — ไม่ชนกัน
 
 ### 2. จำกัดโฟลเดอร์ที่เข้าถึงได้ (แนะนำ)
 
