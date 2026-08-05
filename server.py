@@ -1997,15 +1997,19 @@ function initSocket() {
 //  RENDER AGENTS
 // ═══════════════════════════════════════════════════════════
 function agentSortKey(a) {
-  // ดึงเลขจากชื่อ (pc_7 -> 7) เพื่อเรียงตามเลข ถ้าไม่มีเลขให้ไปท้าย
-  const name = a.name || a.hostname || a.agent_id || '';
+  // เรียงเป็น 2 กลุ่ม: ชื่อปกติ (pc_1..pc_16) กลุ่ม 0 ก่อน, ชื่อขึ้นต้นเลขด้วย n (pc_n01..pc_n115) กลุ่ม 1 ต่อท้าย
+  // แต่ละกลุ่มเรียงตามเลขในชื่อ (pc_n01 -> 1, pc_n115 -> 115) — ถ้าไม่มีเลขให้ไปท้ายสุด
+  const name = (a.name || a.hostname || a.agent_id || '').toLowerCase();
+  const nMatch = name.match(/n0*(\d+)/);   // เลขที่นำหน้าด้วย n เช่น n01, n115 → กลุ่มหลัง
+  if (nMatch) return [1, parseInt(nMatch[1], 10)];
   const m = name.match(/(\d+)/);
-  return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+  return [0, m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER];
 }
 function sortAgents(list) {
   return [...(list || [])].sort((a, b) => {
     const ka = agentSortKey(a), kb = agentSortKey(b);
-    if (ka !== kb) return ka - kb;
+    if (ka[0] !== kb[0]) return ka[0] - kb[0];   // กลุ่ม: ปกติก่อน แล้วค่อย n-series
+    if (ka[1] !== kb[1]) return ka[1] - kb[1];   // แล้วเรียงตามเลข
     return String(a.name || a.hostname || '').localeCompare(String(b.name || b.hostname || ''));
   });
 }
