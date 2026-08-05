@@ -1243,6 +1243,19 @@ function countHeroesOnAgent(agentId) {
   });
 }
 
+// นับไฟล์ที่เหลือในโฟลเดอร์ pes/input-id ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
+function countInputIdOnAgent(agentId) {
+  return new Promise((resolve) => {
+    let settled = false;
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      socket.once('response_' + rid, (resp) => { settled = true; resolve(resp || {}); });
+    });
+    socket.emit('request_list_ids', { agent_id: agentId, subpath: 'input-id', base_match: 'pes' });
+    setTimeout(() => { if (!settled) resolve({ error: 'timeout' }); }, 20000);
+  });
+}
+
 async function openDashboard() {
   currentAgent = null;
   document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
@@ -1273,7 +1286,15 @@ async function openDashboard() {
       const res = await countHeroesOnAgent(a.agent_id);
       onlineCount++;
       grandTotal += res.total_files || 0;
-      perAgent.push({ name: a.name || a.hostname || a.agent_id, total: res.total_files || 0, exists: res.exists });
+      // นับไฟล์ที่เหลือใน pes/input-id ของเครื่องนี้
+      const ir = await countInputIdOnAgent(a.agent_id);
+      perAgent.push({
+        name: a.name || a.hostname || a.agent_id,
+        total: res.total_files || 0, exists: res.exists,
+        inputId: (ir && typeof ir.total === 'number') ? ir.total : null,
+        inputExists: ir ? ir.exists : undefined,
+        inputErr: ir ? ir.error : undefined,
+      });
       const combos = res.combos || {};
       for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
     } catch (e) {
@@ -1306,15 +1327,29 @@ function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlin
       <div class="hero-name" title="${escHtml(h.name)}">${escHtml(h.name)}</div>
       <div class="hero-count">${h.count}</div>
     </div>`).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ที่ตรงกับชื่อฮีโร่</h3></div>';
-  const agentRows = perAgent.map(p => `
-    <div class="agent-stat">
-      <span>🖥️ ${escHtml(p.name)}</span>
-      <span>${p.error ? '<span style="color:var(--danger)">' + escHtml(p.error) + '</span>' : (p.exists === false ? '<span style="color:var(--warning)">ไม่พบโฟลเดอร์ found-hero</span>' : p.total + ' ไฟล์')}</span>
-    </div>`).join('');
+  const inputIdTotal = perAgent.reduce((s, p) => s + (p.inputId || 0), 0);
+  const agentRows = perAgent.map(p => {
+    let right;
+    if (p.error) {
+      right = '<span style="color:var(--danger)">' + escHtml(p.error) + '</span>';
+    } else {
+      const inputTxt = p.inputExists === false
+        ? '<span style="color:var(--warning)">ไม่พบ input-id</span>'
+        : (p.inputId == null ? '<span style="color:var(--text-dim)">-</span>'
+                             : '<b style="color:var(--accent)">' + p.inputId + '</b> ไฟล์');
+      const heroTxt = p.exists === false
+        ? '<span style="color:var(--warning)">ไม่พบ found-hero</span>'
+        : (p.total + ' ไฟล์');
+      right = '<span title="ไฟล์ที่เหลือในโฟลเดอร์ input-id">📥 input-id: ' + inputTxt + '</span>'
+            + '<span style="color:var(--text-dim); margin:0 10px">·</span>'
+            + '<span style="color:var(--text-secondary)" title="ไฟล์ในโฟลเดอร์ found-hero">🦸 found-hero: ' + heroTxt + '</span>';
+    }
+    return '<div class="agent-stat"><span>🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
+  }).join('');
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">⚽ Dashboard PES — found-hero</h2>
+      <h2 style="flex:1; font-size:18px">⚽ Dashboard PES</h2>
       ${pcSelectHtml(dashboardScope, 'dashboardScope=this.value; openDashboard()')}
       <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อฮีโร่ / combo..." oninput="filterHeroCards(this.value)">
       <button class="btn btn-primary" onclick="openDashboard()">🔄 รีเฟรช</button>
@@ -1322,13 +1357,14 @@ function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlin
     <div class="stat-row">
       <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
       <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
-      <div class="stat-tile"><div class="stat-label">ไฟล์ทั้งหมด (ทุกไฟล์)</div><div class="stat-val" style="color:var(--accent)">${grandTotal}</div></div>
+      <div class="stat-tile"><div class="stat-label">input-id เหลือรวม</div><div class="stat-val" style="color:var(--accent)">${inputIdTotal}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ found-hero รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal}</div></div>
       <div class="stat-tile"><div class="stat-label">id ที่ตรงชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
     </div>
     <div class="hero-grid">${cards}</div>
     <div id="dashNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
-    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง</h3>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — input-id ที่เหลือ + found-hero</h3>
     <div class="agent-stats">${agentRows}</div>
   `;
 }
