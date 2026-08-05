@@ -12,7 +12,7 @@ import time
 import uuid
 import base64
 import hashlib
-import logging
+import logging  
 from datetime import datetime
 from pathlib import Path
 
@@ -770,7 +770,9 @@ WEB_UI_HTML = r"""
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: 14px;
   }
-  .pc-grid.single { grid-template-columns: 1fr; }
+  /* zoom เครื่องเดียว: จัดกึ่งกลาง + จำกัดความกว้าง ให้ภาพพอดีความสูงจอ ไม่ต้องเลื่อน */
+  .pc-grid.single { grid-template-columns: 1fr; max-width: 1500px; margin: 0 auto; }
+  .pc-grid.single .pc-shot { aspect-ratio: auto; height: calc(100vh - 240px); min-height: 300px; }
   .pc-tile {
     background: var(--bg-card);
     border: 1px solid var(--border);

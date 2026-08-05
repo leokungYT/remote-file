@@ -2,10 +2,14 @@
 cd /d "%~dp0"
 
 :: ----- CONFIG (fallback; config.json can also provide these) -----
-set SERVER_URL=http://26.155.240.151:5000
+set SERVER_URL=http://100.114.247.98:5000
 set AGENT_SECRET=2ec990f60382a004d664f06f99a3e7f5
 set ALLOWED_PATHS=
 :: ----------------------------------------------------------------
+
+:: ===== [0/3] stop old agent first (so update takes effect + no duplicate) =====
+echo [0/3] Stopping old agent (if running)...
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'pythonw.exe' -and $_.CommandLine -like '*agent.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 
 :: ===== [1/3] auto-update agent.py from server =====
 echo [1/3] Updating agent.py from server...
