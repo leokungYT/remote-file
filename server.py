@@ -619,7 +619,8 @@ WEB_UI_HTML = r"""
   .file-count .dim { color: var(--text-dim); }
 
   /* ── ลากคลุมเลือกไฟล์ (drag-to-select) ── */
-  body.no-select, body.no-select * { user-select: none !important; }
+  .file-table { user-select: none; -webkit-user-select: none; }  /* กันลากแล้วไปเลือกข้อความแทนติ๊กไฟล์ */
+  body.no-select, body.no-select * { user-select: none !important; -webkit-user-select: none !important; }
   .file-table tbody tr[data-row] { cursor: default; }
   .file-table tbody tr:has(.file-check:checked) { background: rgba(59,130,246,0.12); }
 
