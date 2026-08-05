@@ -1,69 +1,83 @@
 @echo off
-title Install Tailscale VPN (unattended) - Remote File Agent
+title Install Tailscale VPN - Remote File Agent
 cd /d "%~dp0"
 
 :: ================================================================
-::  ลง Tailscale + เข้า network อัตโนมัติ (ไม่ต้องล็อกอินทีละเครื่อง)
-::  ทำครั้งเดียวต่อเครื่อง แล้วเครื่องจะได้ IP คงที่ (100.x.x.x)
+::  Install Tailscale + join network with an auth key.
+::  Run once per agent machine (Run as administrator).
 ::
-::  วิธีเตรียม:
-::   1) ไปที่  https://login.tailscale.com/admin/settings/keys
-::   2) สร้าง "Auth key" แบบ Reusable (ติ๊ก Reusable) แล้วก็อปมา
-::   3) วางแทน  PASTE_YOUR_AUTHKEY_HERE  ด้านล่าง
-::   4) รันไฟล์นี้ที่เครื่องลูก (คลิกขวา > Run as administrator)
+::  PREPARE (once):
+::   1) https://login.tailscale.com/admin/settings/keys
+::   2) Generate auth key, tick "Reusable", copy it
+::   3) Paste it below after AUTHKEY=  (keep the AUTHKEY= part!)
 :: ================================================================
 
 set "AUTHKEY=PASTE_YOUR_AUTHKEY_HERE"
 
+:: full path to tailscale (PATH is not refreshed in this window right after install)
+set "TS=C:\Program Files\Tailscale\tailscale.exe"
+
 if "%AUTHKEY%"=="PASTE_YOUR_AUTHKEY_HERE" (
-    echo [ERROR] ยังไม่ได้ใส่ AUTHKEY - เปิดไฟล์นี้แล้วแก้บรรทัด set "AUTHKEY=..." ก่อน
+    echo.
+    echo [ERROR] AUTHKEY not set. Open this file in Notepad and change the line:
+    echo            set "AUTHKEY=tskey-auth-xxxxxxxx"
+    echo         Keep the  AUTHKEY=  part, only replace PASTE_YOUR_AUTHKEY_HERE.
+    echo.
     pause
     exit /b 1
 )
 
-:: --- ต้องเป็น admin ---
+:: --- must be Administrator ---
 net session >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] กรุณารันไฟล์นี้แบบ Run as administrator
+    echo [ERROR] Please run this file as Administrator.
     pause
     exit /b 1
 )
 
-:: --- ลง Tailscale ถ้ายังไม่มี ---
-where tailscale >nul 2>&1
-if %errorlevel%==0 goto joinnet
+:: --- already installed? ---
+if exist "%TS%" goto joinnet
 
 echo [1/2] Installing Tailscale ...
-:: ลองผ่าน winget ก่อน (เงียบ) - Win10 1809+/Win11
+:: try winget first (silent). works on Win10 1809+/Win11
 winget install --id tailscale.tailscale -e --silent --accept-package-agreements --accept-source-agreements >nul 2>&1
-where tailscale >nul 2>&1
-if %errorlevel%==0 goto joinnet
+if exist "%TS%" goto joinnet
 
-:: fallback: ดาวน์โหลด installer มารันเอง
-echo     (winget ใช้ไม่ได้ - ดาวน์โหลด installer แทน)
+:: fallback: download + open the installer GUI (click Install -> Finish)
+echo     (winget not available)
+echo     Downloading Tailscale installer...
 curl -k -L --retry 3 --connect-timeout 15 "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -o "tailscale-setup.exe"
 if not exist "tailscale-setup.exe" (
-    echo [ERROR] ดาวน์โหลด Tailscale ไม่ได้
+    echo [ERROR] Download failed. Install manually: https://tailscale.com/download/windows
     pause
     exit /b 1
 )
-start /wait "" "tailscale-setup.exe" /S
+echo.
+echo     >>> Please click through the installer (Install then Finish) <<<
+echo.
+start /wait "" "tailscale-setup.exe"
 del /q "tailscale-setup.exe" >nul 2>&1
 
+if not exist "%TS%" (
+    echo [ERROR] Tailscale still not found. Install it manually then run this again.
+    pause
+    exit /b 1
+)
+
 :joinnet
-echo [2/2] Joining Tailscale network (unattended) ...
-tailscale up --authkey %AUTHKEY% --unattended
+echo [2/2] Joining Tailscale network ...
+"%TS%" up --authkey %AUTHKEY% --unattended
 if errorlevel 1 (
-    echo [ERROR] เข้า network ไม่สำเร็จ - ตรวจ AUTHKEY ว่ายังไม่หมดอายุ
+    echo [ERROR] Join failed - check the AUTHKEY (maybe expired/invalid).
     pause
     exit /b 1
 )
 
 echo.
-echo [OK] เชื่อม Tailscale แล้ว - IP ของเครื่องนี้:
-tailscale ip -4
+echo [OK] Connected. This PC Tailscale IP:
+"%TS%" ip -4
 echo.
-echo    * เอา IP ของเครื่อง "server" (100.x.x.x) ไปตั้งเป็น SERVER_URL ที่เครื่องลูก
-echo      เช่น  http://100.x.x.x:5000
+echo    Server: http://100.114.247.98:5000  (already in config.json)
+echo    Next:   run start_agent.bat
 echo.
 pause
