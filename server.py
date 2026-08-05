@@ -2747,6 +2747,7 @@ let _txFiles = [];      // ไฟล์ที่เลือกไว้ย้�
 let _txSource = null;   // agent_id ต้นทาง
 let _txBusy = false;
 let _txCancel = false;  // ตั้ง true เพื่อหยุดกลางคัน
+let _txDone = 0, _txTotal = 0;  // ความคืบหน้าปัจจุบัน (ใช้ในข้อความเตือน)
 
 function txAgentLabel(agentId) {
   const a = (agentsData || []).find(x => x.agent_id === agentId);
@@ -2796,9 +2797,10 @@ function openTransfer() {
   document.getElementById('transferModal').classList.add('show');
 }
 
-// ปุ่มมุมซ้ายล่าง: ระหว่างย้าย = หยุด, ตอนไม่ย้าย = ปิดหน้าต่าง
+// ปุ่มมุมซ้ายล่าง: ระหว่างย้าย = หยุด (เตือนก่อน), ตอนไม่ย้าย = ปิดหน้าต่าง
 function transferCloseOrCancel() {
   if (_txBusy) {
+    if (!confirm(`⏳ กำลังย้ายไฟล์อยู่ (${_txDone}/${_txTotal})\n\nต้องการหยุดการย้ายหรือไม่?\n(ไฟล์ที่ย้ายไปแล้วจะไม่ถูกยกเลิก)`)) return;
     _txCancel = true;
     document.getElementById('transferCloseBtn').textContent = '⏳ กำลังหยุด...';
     return;
@@ -2936,6 +2938,7 @@ async function startTransfer() {
   logEl.innerHTML = '';
 
   const N = _txFiles.length;
+  _txTotal = N; _txDone = 0;
   const logLines = [];
   const addLog = (html) => {
     logLines.push(html);
@@ -2944,6 +2947,7 @@ async function startTransfer() {
     logEl.scrollTop = logEl.scrollHeight;
   };
   const updateStatus = (done, curName) => {
+    _txDone = done;
     const pct = N ? Math.round((done / N) * 100) : 100;
     statusBar.style.width = pct + '%';
     statusText.textContent = `⏳ กำลัง${verb} ${done}/${N} (${pct}%)`;
@@ -3071,10 +3075,15 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Escape') closeModal('renameModal');
   });
 
-  // Close modal on overlay click
+  // Close modal on overlay click (แต่ถ้ากำลังย้ายไฟล์อยู่ ให้เตือน ไม่ปิด)
   document.querySelectorAll('.modal-overlay').forEach(m => {
     m.addEventListener('click', (e) => {
-      if (e.target === m) m.classList.remove('show');
+      if (e.target !== m) return;
+      if (m.id === 'transferModal' && _txBusy) {
+        alert(`⏳ กำลังย้ายไฟล์อยู่ (${_txDone}/${_txTotal})\n\nกรุณารอจนเสร็จ หรือกดปุ่ม "หยุด" เพื่อยกเลิกก่อน`);
+        return;   // ไม่ปิดหน้าต่างระหว่างย้าย
+      }
+      m.classList.remove('show');
     });
   });
 });
