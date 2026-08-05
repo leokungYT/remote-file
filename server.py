@@ -1012,6 +1012,34 @@ WEB_UI_HTML = r"""
   .hero-card.combo { border-color: rgba(245,158,11,0.35); background: linear-gradient(140deg, var(--bg-card), rgba(245,158,11,0.05)); }
   .hero-card.combo .hero-count { color: var(--warning); }
 
+  /* ── MACHINE input-id cards (Dashboard input-id รายเครื่อง) ── */
+  .machine-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
+    gap: 12px;
+  }
+  .mid-card {
+    background: linear-gradient(150deg, var(--bg-card), var(--bg-secondary));
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 16px;
+    text-align: center;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .mid-card:hover { transform: translateY(-3px); border-color: var(--accent); box-shadow: 0 8px 20px rgba(0,0,0,0.28); }
+  .mid-name {
+    font-size: 13px; font-weight: 600; color: var(--text-secondary);
+    margin-bottom: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mid-count {
+    font-size: 38px; font-weight: 800; line-height: 1;
+    font-family: 'JetBrains Mono', monospace; letter-spacing: -1px;
+  }
+  .mid-label { font-size: 11px; color: var(--text-dim); margin-top: 6px; }
+  .mid-badge { display: inline-block; margin-top: 8px; padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .mid-badge.zero { background: rgba(239,68,68,0.15); color: var(--danger); }
+  .mid-badge.low  { background: rgba(245,158,11,0.15); color: var(--warning); }
+
   /* ── COOKIE-RUN id cards (แสดงชื่อ id) ── */
   .id-grid {
     display: grid;
@@ -1102,6 +1130,7 @@ WEB_UI_HTML = r"""
   </h1>
   <div style="display:flex; align-items:center; gap:12px">
     <button class="btn" onclick="openDashboard()">⚽ Dashboard PES</button>
+    <button class="btn" onclick="openInputIdDashboard()">📥 input-id รายเครื่อง</button>
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
     <button class="btn" onclick="openLiveView()">🖥️ Live View</button>
@@ -1220,6 +1249,7 @@ const HERO_LIST = ["Fabio Cannavaro","Paolo Maldini","Daniele De Rossi","Didier 
 
 let dashboardScope = 'ALL';  // 'ALL' = รวมทุกเครื่อง, หรือ agent_id ของเครื่องที่เลือก
 let cookieScope = 'ALL';     // scope แยกของ dashboard cookie-run
+let inputIdScope = 'ALL';    // scope ของ dashboard input-id รายเครื่อง
 
 function pcSelectHtml(scopeVal, onchangeExpr) {
   const agents = agentsData || [];
@@ -1367,6 +1397,102 @@ function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlin
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — input-id ที่เหลือ + found-hero</h3>
     <div class="agent-stats">${agentRows}</div>
   `;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  DASHBOARD input-id รายเครื่อง (โชว์ไฟล์ที่เหลือใน pes/input-id แต่ละเครื่อง)
+// ═══════════════════════════════════════════════════════════
+async function openInputIdDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const allAgents = agentsData || [];
+  if (inputIdScope !== 'ALL' && !allAgents.some(a => a.agent_id === inputIdScope)) inputIdScope = 'ALL';
+  const agents = inputIdScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === inputIdScope);
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">📥 Dashboard PES — input-id ที่เหลือรายเครื่อง</h2>
+      ${pcSelectHtml(inputIdScope, 'inputIdScope=this.value; openInputIdDashboard()')}
+      <button class="btn btn-primary" onclick="openInputIdDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+
+  if (!allAgents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+
+  const perAgent = [];
+  let total = 0, onlineCount = 0;
+  for (const a of agents) {
+    const name = a.name || a.hostname || a.agent_id;
+    const ir = await countInputIdOnAgent(a.agent_id);
+    if (ir && ir.error) {
+      perAgent.push({ name, error: ir.error });
+    } else {
+      onlineCount++;
+      const cnt = (ir && typeof ir.total === 'number') ? ir.total : 0;
+      total += cnt;
+      perAgent.push({ name, count: cnt, exists: ir ? ir.exists : undefined });
+    }
+  }
+  renderInputIdDashboard(perAgent, agents.length, onlineCount, total);
+}
+
+function renderInputIdDashboard(perAgent, totalMachines, onlineCount, total) {
+  const content = document.getElementById('contentArea');
+  const cards = perAgent.map(p => {
+    if (p.error) {
+      return `<div class="mid-card" data-name="${escHtml(p.name)}">
+        <div class="mid-name">🖥️ ${escHtml(p.name)}</div>
+        <div class="mid-count" style="color:var(--danger); font-size:15px">${escHtml(p.error)}</div></div>`;
+    }
+    if (p.exists === false) {
+      return `<div class="mid-card" data-name="${escHtml(p.name)}">
+        <div class="mid-name">🖥️ ${escHtml(p.name)}</div>
+        <div class="mid-count" style="color:var(--warning); font-size:18px">—</div>
+        <div class="mid-label">ไม่พบโฟลเดอร์ input-id</div></div>`;
+    }
+    const c = p.count;
+    const color = c === 0 ? 'var(--danger)' : (c < 100 ? 'var(--warning)' : 'var(--accent)');
+    const badge = c === 0 ? '<div class="mid-badge zero">หมดแล้ว</div>'
+                : (c < 100 ? '<div class="mid-badge low">ใกล้หมด</div>' : '');
+    return `<div class="mid-card" data-name="${escHtml(p.name)}">
+      <div class="mid-name">🖥️ ${escHtml(p.name)}</div>
+      <div class="mid-count" style="color:${color}">${c.toLocaleString()}</div>
+      <div class="mid-label">ไฟล์เหลือใน input-id</div>
+      ${badge}
+    </div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">📥 Dashboard PES — input-id ที่เหลือรายเครื่อง</h2>
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาเครื่อง..." oninput="filterMidCards(this.value)">
+      ${pcSelectHtml(inputIdScope, 'inputIdScope=this.value; openInputIdDashboard()')}
+      <button class="btn btn-primary" onclick="openInputIdDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
+      <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
+      <div class="stat-tile"><div class="stat-label">input-id เหลือรวม</div><div class="stat-val" style="color:var(--accent)">${total.toLocaleString()}</div></div>
+    </div>
+    <div class="machine-grid">${cards}</div>
+    <div id="midNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบเครื่องที่ค้นหา</div>
+  `;
+}
+
+function filterMidCards(q) {
+  q = (q || '').trim().toLowerCase();
+  let shown = 0;
+  document.querySelectorAll('.mid-card').forEach(card => {
+    const match = !q || (card.dataset.name || '').toLowerCase().includes(q);
+    card.style.display = match ? '' : 'none';
+    if (match) shown++;
+  });
+  const nr = document.getElementById('midNoResult');
+  if (nr) nr.style.display = shown === 0 ? '' : 'none';
 }
 
 // ═══════════════════════════════════════════════════════════
