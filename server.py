@@ -619,6 +619,13 @@ WEB_UI_HTML = r"""
   .file-count .dim { color: var(--text-dim); }
   .file-count.sel-chip { border-color: var(--accent); background: rgba(59,130,246,0.12); color: var(--accent); }
   .file-count.sel-chip b { color: var(--accent); }
+  .select-n { display: flex; align-items: center; gap: 6px; }
+  .select-n input {
+    width: 100px; padding: 8px 10px; background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text-primary); font-family: inherit; font-size: 13px;
+  }
+  .select-n input:focus { outline: none; border-color: var(--accent); }
 
   /* ── ลากคลุมเลือกไฟล์ (drag-to-select) ── */
   .file-table { user-select: none; -webkit-user-select: none; }  /* กันลากแล้วไปเลือกข้อความแทนติ๊กไฟล์ */
@@ -2053,6 +2060,10 @@ function renderFiles(files, path) {
       <button class="btn btn-danger" id="btnDeleteSel" onclick="deleteSelected()">🗑️ ลบที่เลือก</button>
       <button class="btn" onclick="loadDir(currentPath)">🔄 รีเฟรช</button>
       <button class="btn btn-primary" onclick="openUpload()">📤 อัปโหลด</button>
+      <div class="select-n" title="กรอกจำนวน แล้วเลือกไฟล์ตั้งแต่บนสุดตามจำนวนนั้น">
+        <input type="number" id="selectNInput" min="1" placeholder="เลือกกี่ไฟล์" onkeydown="if(event.key==='Enter')selectFirstN()">
+        <button class="btn" onclick="selectFirstN()">✅ เลือกจำนวน</button>
+      </div>
       <span class="file-count" title="จำนวนไฟล์ที่เหลือในโฟลเดอร์นี้">📄 เหลือ <b>${fileCount}</b> ไฟล์${dirCount ? ` <span class="dim">· ${dirCount} โฟลเดอร์</span>` : ''}</span>
       <span class="file-count sel-chip" id="selChip" style="display:none" title="จำนวนไฟล์ที่เลือกอยู่">✅ เลือก <b>0</b> ไฟล์</span>
     </div>
@@ -2206,6 +2217,20 @@ let _selCountRAF = null;
 function scheduleSelCount() {
   if (_selCountRAF) return;
   _selCountRAF = requestAnimationFrame(() => { _selCountRAF = null; updateSelectedCount(); });
+}
+
+// เลือกไฟล์ N อันแรก (บนสุด) ตามจำนวนที่กรอก เช่น มี 2000 กรอก 1000 = ติ๊ก 1000 อันแรก
+function selectFirstN() {
+  const inp = document.getElementById('selectNInput');
+  const boxes = Array.from(document.querySelectorAll('.file-check'));   // เรียงตามลำดับที่แสดง (บน→ล่าง)
+  if (!boxes.length) { toast('โฟลเดอร์นี้ไม่มีไฟล์ให้เลือก', 'info'); return; }
+  let n = parseInt(inp && inp.value, 10);
+  if (isNaN(n) || n < 1) { toast('กรอกจำนวนไฟล์ที่ต้องการเลือก (ตัวเลข)', 'info'); if (inp) inp.focus(); return; }
+  const capped = Math.min(n, boxes.length);
+  boxes.forEach((cb, i) => cb.checked = i < capped);   // เลือก N อันแรก, ที่เหลือไม่เลือก
+  _lastCheckIndex = null;
+  updateSelectedCount();
+  toast('เลือก ' + capped + ' ไฟล์แรกแล้ว' + (n > boxes.length ? ` (มีทั้งหมด ${boxes.length})` : ''), 'success');
 }
 
 // ═══════════════════════════════════════════════════════════
