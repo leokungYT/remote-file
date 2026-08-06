@@ -8,7 +8,8 @@
   "agent_id": "",
   "allowed_paths": [
     "Desktop/pes",
-    "Desktop/cookie-run"
+    "Desktop/cookie-run",
+    "Desktop/main"
   ],
   "cookie_id_path": "Desktop/cookie-run/id-found"
 }

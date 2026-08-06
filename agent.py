@@ -95,9 +95,11 @@ def _norm_path(p):
         p = os.path.join(os.path.expanduser("~"), p)
     return os.path.abspath(p)
 
+# โปรเจกต์/เกมหลักที่ต้องเข้าถึงได้ทุกเครื่อง (เพิ่มเกมใหม่ตรงนี้ → อัปเดต agent.py = ได้ทุกเครื่อง)
 DEFAULT_ALLOWED_PATHS = [
     "Desktop/pes",
     "Desktop/cookie-run",
+    "Desktop/main",        # เกม Line Ranger
 ]
 _env_allowed = os.environ.get("ALLOWED_PATHS", "").strip()
 _cfg_allowed = _cfg.get("allowed_paths")
@@ -110,6 +112,14 @@ elif isinstance(_cfg_allowed, str) and _cfg_allowed.strip():
 else:
     _raw_allowed = list(DEFAULT_ALLOWED_PATHS)
 ALLOWED_PATHS = [_norm_path(p) for p in _raw_allowed]
+
+# ถ้าไม่ได้ override ด้วย env ALLOWED_PATHS → รวมโปรเจกต์หลัก (pes, cookie-run, main) เข้าไปเสมอ
+# ทำให้เพิ่มโปรเจกต์ใหม่ให้ทุกเครื่องได้ผ่านการอัปเดต agent.py โดยไม่ต้องแก้ config.json ทีละเครื่อง
+if not _env_allowed:
+    for _d in DEFAULT_ALLOWED_PATHS:
+        _dn = _norm_path(_d)
+        if _dn not in ALLOWED_PATHS:
+            ALLOWED_PATHS.append(_dn)
 
 # โฟลเดอร์ id ของ dashboard cookie-run (กำหนดเองได้)
 # ลำดับ: env COOKIE_ID_PATH > config.json "cookie_id_path" > ปล่อยว่าง (ใช้วิธีเดาจาก allowed_paths + base_match)

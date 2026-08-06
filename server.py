@@ -1646,6 +1646,7 @@ function openBroadcastInput() {
         <option value="pes">⚽ PES</option>
         <option value="ro">🗡️ RO</option>
         <option value="cookie-run" selected>🍪 Cookie-Run</option>
+        <option value="main">🎮 Line Ranger</option>
       </select>
       <button class="btn" onclick="updateSelectedAgents()" title="ดึงโค้ดใหม่จาก GitHub + รีสตาร์ท agent">⬆️ อัปเดต agent (เครื่องที่เลือก)</button>
       <button class="btn" style="border-color:var(--danger); color:var(--danger)" onclick="clearInputAll()">🗑️ Clear input-id (เครื่องที่เลือก)</button>
@@ -2230,7 +2231,7 @@ function renderFiles(files, path) {
   const breadcrumb = buildBreadcrumb(path);
   const projectSelect = allowed.length ? `
       <select class="btn project-select" onchange="if(this.value) loadDir(this.value)" title="เลือกโปรเจกต์/โฟลเดอร์">
-        ${allowed.map(p => `<option value="${escHtml(p)}" ${sameRoot(path, p) ? 'selected' : ''}>📁 ${escHtml(baseName(p))}</option>`).join('')}
+        ${allowed.map(p => `<option value="${escHtml(p)}" ${sameRoot(path, p) ? 'selected' : ''}>📁 ${escHtml(projectLabel(p))}</option>`).join('')}
       </select>` : '';
 
   // นับจำนวนไฟล์/โฟลเดอร์ที่เหลือในโฟลเดอร์นี้ (ไม่นับ ".." ที่เป็นปุ่มย้อนกลับ)
@@ -2297,6 +2298,12 @@ function renderFiles(files, path) {
 
 function baseName(p) {
   return (p || '').split(/[\\\/]/).filter(Boolean).pop() || p;
+}
+// ชื่อโปรเจกต์ที่โชว์ให้สวย (โฟลเดอร์ main = เกม Line Ranger)
+const PROJECT_LABELS = { 'main': 'Line Ranger' };
+function projectLabel(p) {
+  const b = baseName(p);
+  return PROJECT_LABELS[String(b).toLowerCase()] || b;
 }
 function sameRoot(path, base) {
   if (!path || !base) return false;
