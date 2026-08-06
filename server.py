@@ -1283,7 +1283,6 @@ let agentsData = [];
 const HERO_LIST = ["Fabio Cannavaro","Paolo Maldini","Daniele De Rossi","Didier Drogba","Mohamed Salah","Nico Paz","Federico Dimarco","Luka","rgson","Arribas","Aubameyang","Ramedhan Saifullah","Chrigor","Lamine=x2","Mbappe","Joan Garcia","Martin Odegaard","Atep","Gareth Bale","Marcelo","Peter Schmeichel","Leonardo Bonucci","Ronald Koeman","Casemiro","Erling Haaland","Hugo Ekitike","Declan Rice","Hidetoshi Nakata","Seigo Narazaki","Shunsuke Nakamura","Vitinha","David Raya","Kvaratskhelia","Johan Cruyff","Filippo Inzaghi","Jordi Alba","Oliver Kahn","David Beckham","Rivaldo","Gianluigi Buffon","Andrea Pirlo","Gialuca Zambrotta","Lilian Thuram","Patrick Vieira","Marcel Desailly","Luis Suarez","Schweinsteiger","Bronckhorst"];
 
 let cookieScope = 'ALL';     // scope แยกของ dashboard cookie-run
-let inputIdScope = 'ALL';    // scope ของ dashboard input-id รายเครื่อง
 
 function pcSelectHtml(scopeVal, onchangeExpr) {
   const agents = agentsData || [];
@@ -1323,12 +1322,10 @@ function countInputIdOnAgent(agentId) {
 // dashboard แบบนับไฟล์ตามชื่อฮีโร่ — ใช้ทั้ง PES (found-hero) และ Backup (backup) โครงเดียวกัน ต่างแค่โฟลเดอร์
 const DASH_KINDS = {
   hero:   { subpath: 'found-hero', label: 'found-hero', title: '⚽ Dashboard PES', reopen: 'openDashboard' },
-  backup: { subpath: 'backup',     label: 'backup',     title: '🗄️ Dashboard Backup', reopen: 'openBackupDashboard' },
 };
-let _dashScope = { hero: 'ALL', backup: 'ALL' };
+let _dashScope = { hero: 'ALL' };
 
 function openDashboard() { return openHeroDash('hero'); }
-function openBackupDashboard() { return openHeroDash('backup'); }
 
 async function openHeroDash(kind) {
   const cfg = DASH_KINDS[kind];
@@ -1445,21 +1442,44 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
 }
 
 // ═══════════════════════════════════════════════════════════
-//  DASHBOARD input-id รายเครื่อง (โชว์ไฟล์ที่เหลือใน pes/input-id แต่ละเครื่อง)
+//  DASHBOARD รายเครื่อง (นับไฟล์ในโฟลเดอร์) — input-id และ backup แยกหน้ากัน โครงเดียวกัน
 // ═══════════════════════════════════════════════════════════
-async function openInputIdDashboard() {
+const FOLDER_DASH = {
+  inputid: { subpath: 'input-id', base: 'pes', title: '📥 Dashboard input-id — ไฟล์ที่เหลือรายเครื่อง', label: 'input-id', reopen: 'openInputIdDashboard' },
+  backup:  { subpath: 'backup',   base: 'pes', title: '🗄️ Dashboard Backup — ไฟล์ backup รายเครื่อง', label: 'backup',   reopen: 'openBackupDashboard' },
+};
+let _folderScope = { inputid: 'ALL', backup: 'ALL' };
+
+function openInputIdDashboard() { return openFolderDash('inputid'); }
+function openBackupDashboard() { return openFolderDash('backup'); }
+
+// นับไฟล์ในโฟลเดอร์ <base>/<subpath> ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
+function countFolderOnAgent(agentId, subpath, base) {
+  return new Promise((resolve) => {
+    let settled = false;
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      socket.once('response_' + rid, (resp) => { settled = true; resolve(resp || {}); });
+    });
+    socket.emit('request_list_ids', { agent_id: agentId, subpath: subpath, base_match: base });
+    setTimeout(() => { if (!settled) resolve({ error: 'timeout' }); }, 20000);
+  });
+}
+
+async function openFolderDash(kind) {
+  const cfg = FOLDER_DASH[kind];
   currentAgent = null;
   document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
   const content = document.getElementById('contentArea');
   const allAgents = agentsData || [];
-  if (inputIdScope !== 'ALL' && !allAgents.some(a => a.agent_id === inputIdScope)) inputIdScope = 'ALL';
-  const agents = inputIdScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === inputIdScope);
+  if (_folderScope[kind] !== 'ALL' && !allAgents.some(a => a.agent_id === _folderScope[kind])) _folderScope[kind] = 'ALL';
+  const agents = _folderScope[kind] === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _folderScope[kind]);
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">📥 Dashboard PES — input-id ที่เหลือรายเครื่อง</h2>
-      ${pcSelectHtml(inputIdScope, 'inputIdScope=this.value; openInputIdDashboard()')}
-      <button class="btn btn-primary" onclick="openInputIdDashboard()">🔄 รีเฟรช</button>
+      <h2 style="flex:1; font-size:18px">${cfg.title}</h2>
+      ${pcSelectHtml(_folderScope[kind], `_folderScope['${kind}']=this.value; ${cfg.reopen}()`)}
+      <button class="btn btn-primary" onclick="${cfg.reopen}()">🔄 รีเฟรช</button>
     </div>
     <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
 
@@ -1472,7 +1492,7 @@ async function openInputIdDashboard() {
   let total = 0, onlineCount = 0;
   for (const a of agents) {
     const name = a.name || a.hostname || a.agent_id;
-    const ir = await countInputIdOnAgent(a.agent_id);
+    const ir = await countFolderOnAgent(a.agent_id, cfg.subpath, cfg.base);
     if (ir && ir.error) {
       perAgent.push({ name, error: ir.error });
     } else {
@@ -1482,10 +1502,11 @@ async function openInputIdDashboard() {
       perAgent.push({ name, count: cnt, exists: ir ? ir.exists : undefined });
     }
   }
-  renderInputIdDashboard(perAgent, agents.length, onlineCount, total);
+  renderFolderDash(kind, perAgent, agents.length, onlineCount, total);
 }
 
-function renderInputIdDashboard(perAgent, totalMachines, onlineCount, total) {
+function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
+  const cfg = FOLDER_DASH[kind];
   const content = document.getElementById('contentArea');
   const cards = perAgent.map(p => {
     if (p.error) {
@@ -1497,31 +1518,31 @@ function renderInputIdDashboard(perAgent, totalMachines, onlineCount, total) {
       return `<div class="mid-card" data-name="${escHtml(p.name)}">
         <div class="mid-name">🖥️ ${escHtml(p.name)}</div>
         <div class="mid-count" style="color:var(--warning); font-size:18px">—</div>
-        <div class="mid-label">ไม่พบโฟลเดอร์ input-id</div></div>`;
+        <div class="mid-label">ไม่พบโฟลเดอร์ ${cfg.label}</div></div>`;
     }
     const c = p.count;
     const color = c === 0 ? 'var(--danger)' : (c < 100 ? 'var(--warning)' : 'var(--accent)');
-    const badge = c === 0 ? '<div class="mid-badge zero">หมดแล้ว</div>'
-                : (c < 100 ? '<div class="mid-badge low">ใกล้หมด</div>' : '');
+    const badge = c === 0 ? '<div class="mid-badge zero">ว่าง</div>'
+                : (c < 100 ? '<div class="mid-badge low">น้อย</div>' : '');
     return `<div class="mid-card" data-name="${escHtml(p.name)}">
       <div class="mid-name">🖥️ ${escHtml(p.name)}</div>
       <div class="mid-count" style="color:${color}">${c.toLocaleString()}</div>
-      <div class="mid-label">ไฟล์เหลือใน input-id</div>
+      <div class="mid-label">ไฟล์ใน ${cfg.label}</div>
       ${badge}
     </div>`;
   }).join('');
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">📥 Dashboard PES — input-id ที่เหลือรายเครื่อง</h2>
+      <h2 style="flex:1; font-size:18px">${cfg.title}</h2>
       <input type="text" class="dash-search" placeholder="🔍 ค้นหาเครื่อง..." oninput="filterMidCards(this.value)">
-      ${pcSelectHtml(inputIdScope, 'inputIdScope=this.value; openInputIdDashboard()')}
-      <button class="btn btn-primary" onclick="openInputIdDashboard()">🔄 รีเฟรช</button>
+      ${pcSelectHtml(_folderScope[kind], `_folderScope['${kind}']=this.value; ${cfg.reopen}()`)}
+      <button class="btn btn-primary" onclick="${cfg.reopen}()">🔄 รีเฟรช</button>
     </div>
     <div class="stat-row">
       <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
       <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
-      <div class="stat-tile"><div class="stat-label">input-id เหลือรวม</div><div class="stat-val" style="color:var(--accent)">${total.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">${cfg.label} รวม</div><div class="stat-val" style="color:var(--accent)">${total.toLocaleString()}</div></div>
     </div>
     <div class="machine-grid">${cards}</div>
     <div id="midNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบเครื่องที่ค้นหา</div>
