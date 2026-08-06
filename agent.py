@@ -318,6 +318,8 @@ def _dispatch_command(data):
             handle_delete_many(req_id, payload)
         elif action == "count_heroes":
             handle_count_heroes(req_id, payload)
+        elif action == "count_prefix_ids":
+            handle_count_prefix_ids(req_id, payload)
         elif action == "list_ids":
             handle_list_ids(req_id, payload)
         elif action == "rename_file":
@@ -845,6 +847,74 @@ def handle_count_heroes(req_id, data):
     logger.info(f"  count_heroes: {total_files} files, {len(combos)} combos in {folder} (exists={exists})")
     send_response(req_id, {"success": True, "combos": combos,
                            "total_files": total_files, "folder": folder, "exists": exists})
+
+
+def _prefix_combo(filename, rel_dir):
+    """แกะชื่อฮีโร่ (combo) ออกจากชื่อไฟล์แบบ Line Ranger
+
+    รูปแบบไฟล์: "<prefix>-<ชื่อไฟล์เดิม>.xml" โดย prefix = ชื่อฮีโร่ที่ต่อกันด้วย '+'
+      kikoruU+-RB136_TK24_norandom408dd2d9_LINE_COCOS_PREF_KEY.xml -> "kikoruU"
+      kikoru+Kafka+-RB136_..._LINE_COCOS_PREF_KEY.xml              -> "kikoru+Kafka"
+    ถ้าไฟล์ไม่มี prefix แต่อยู่ในโฟลเดอร์ย่อย (backup-id/<name1+name2>/) ใช้ชื่อโฟลเดอร์แทน
+    คืน None ถ้าหาชื่อไม่ได้ (เช่นไฟล์เดิมล้วนๆ ที่ไม่มีฮีโร่)"""
+    stem = os.path.splitext(filename)[0]
+    if "-" in stem:
+        head = stem.split("-", 1)[0].strip()
+        # ชื่อไฟล์เดิมมี '_' เสมอ (RB136_TK24_...) ส่วน prefix ฮีโร่ไม่มี → ใช้กันจับผิดตัว
+        if head and "_" not in head:
+            parts = [p.strip() for p in head.split("+") if p.strip()]
+            if parts:
+                return "+".join(parts)
+    if rel_dir:
+        top = rel_dir.replace("\\", "/").split("/")[0].strip()
+        parts = [p.strip() for p in top.split("+") if p.strip()]
+        if parts:
+            return "+".join(parts)
+    return None
+
+
+def handle_count_prefix_ids(req_id, data):
+    """นับ id ตามชื่อฮีโร่ที่อยู่หน้าชื่อไฟล์ (Dashboard Line Ranger — โฟลเดอร์ backup-id)
+
+    1 ไฟล์ = 1 id; ไฟล์ที่มี 2 ชื่อจะนับเป็น combo เดียว เช่น "kikoru+Kafka"
+    """
+    subpath = data.get("subpath", "backup-id")
+    match = (data.get("base_match") or "").strip().lower()
+    exts = [str(e).lower() for e in (data.get("exts") or []) if str(e).strip()]
+
+    base = _resolve_game_base(match)
+    if base is None:
+        send_response(req_id, {"success": True, "combos": {}, "total_files": 0,
+                               "matched_files": 0, "folder": "", "exists": False})
+        return
+
+    folder = os.path.join(base, subpath)
+    combos = {}
+    total_files = 0
+    matched_files = 0
+    exists = os.path.isdir(folder)
+    if exists:
+        try:
+            for root, dirs, filenames in os.walk(folder):
+                rel_dir = os.path.relpath(root, folder)
+                if rel_dir == ".":
+                    rel_dir = ""
+                for fn in filenames:
+                    if exts and os.path.splitext(fn)[1].lower() not in exts:
+                        continue
+                    total_files += 1
+                    combo = _prefix_combo(fn, rel_dir)
+                    if combo:
+                        matched_files += 1
+                        combos[combo] = combos.get(combo, 0) + 1
+        except Exception as e:
+            send_response(req_id, {"error": str(e)})
+            return
+
+    logger.info(f"  count_prefix_ids: {total_files} files, {matched_files} matched, "
+                f"{len(combos)} combos in {folder} (exists={exists})")
+    send_response(req_id, {"success": True, "combos": combos, "total_files": total_files,
+                           "matched_files": matched_files, "folder": folder, "exists": exists})
 
 
 def _reply_ids(req_id, folder):

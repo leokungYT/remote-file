@@ -259,6 +259,20 @@ def handle_count_heroes(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_count_prefix_ids")
+def handle_count_prefix_ids(data):
+    """ขอให้เครื่องลูกนับ id ตามชื่อฮีโร่หน้าชื่อไฟล์ (Line Ranger — backup-id)"""
+    req_id = send_to_agent(data["agent_id"], "count_prefix_ids", {
+        "subpath": data.get("subpath", "backup-id"),
+        "base_match": data.get("base_match", "main"),
+        "exts": data.get("exts", []),
+    }, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 @socketio.on("request_list_ids")
 def handle_list_ids(data):
     """ขอให้เครื่องลูกดึงรายชื่อ id ในโฟลเดอร์ (เช่น cookie-run\\id-found)"""
@@ -1024,6 +1038,10 @@ WEB_UI_HTML = r"""
   /* combo (หลายฮีโร่รวมกัน) ใช้สีส้มแยกจากฮีโร่เดี่ยว */
   .hero-card.combo { border-color: rgba(245,158,11,0.35); background: linear-gradient(140deg, var(--bg-card), rgba(245,158,11,0.05)); }
   .hero-card.combo .hero-count { color: var(--warning); }
+  /* ชื่อหลัก (Line Ranger) — เน้นเขียวให้ต่างจากชื่ออื่นที่เจอในไฟล์ */
+  .hero-card.main-name { border-color: rgba(16,185,129,0.4); background: linear-gradient(140deg, var(--bg-card), rgba(16,185,129,0.06)); }
+  .hero-card.main-name .hero-count { color: var(--success); }
+  .hero-sub { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
 
   /* ── MACHINE input-id cards (Dashboard input-id รายเครื่อง) ── */
   .machine-grid {
@@ -1157,6 +1175,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openBackupDashboard()">🗄️ Dashboard Backup</button>
     <button class="btn" onclick="openInputIdDashboard()">📥 input-id รายเครื่อง</button>
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
+    <button class="btn" onclick="openRangerDashboard()">🏹 Dashboard Line Ranger</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
     <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
     <button class="btn" onclick="openLiveView()">🖥️ Live View</button>
@@ -1446,7 +1465,7 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
 // ═══════════════════════════════════════════════════════════
 const FOLDER_DASH = {
   inputid: { subpath: 'input-id', base: 'pes', title: '📥 Dashboard input-id — ไฟล์ที่เหลือรายเครื่อง', label: 'input-id', reopen: 'openInputIdDashboard' },
-  backup:  { subpath: 'backup',   base: 'pes', title: '🗄️ Dashboard Backup — ไฟล์ backup รายเครื่อง', label: 'backup',   reopen: 'openBackupDashboard' },
+  backup:  { subpath: 'backup',   base: 'main', title: '🗄️ Dashboard Backup — ไฟล์ backup รายเครื่อง (Line Ranger)', label: 'backup', reopen: 'openBackupDashboard' },
 };
 let _folderScope = { inputid: 'ALL', backup: 'ALL' };
 
@@ -1558,6 +1577,163 @@ function filterMidCards(q) {
     if (match) shown++;
   });
   const nr = document.getElementById('midNoResult');
+  if (nr) nr.style.display = shown === 0 ? '' : 'none';
+}
+
+// ═══════════════════════════════════════════════════════════
+//  DASHBOARD LINE RANGER (นับ id ในโฟลเดอร์ main/backup-id รวมทุกเครื่อง)
+//  ชื่อไฟล์: <ชื่อฮีโร่ต่อกันด้วย +>-<ชื่อไฟล์เดิม>.xml
+//    kikoruU+-RB136_TK24_norandom408dd2d9_LINE_COCOS_PREF_KEY.xml → kikoruU
+//    kikoru+Kafka+-RB136_..._LINE_COCOS_PREF_KEY.xml              → kikoru+Kafka (นับรวมเป็นชุดเดียว)
+// ═══════════════════════════════════════════════════════════
+const RANGER_MAIN_NAMES = ['Reno', 'hina', 'KafkaU', 'Kafka', 'kikoru', 'kikoruU'];
+const RANGER_CFG = { subpath: 'backup-id', base: 'main', label: 'backup-id' };
+let _rangerScope = 'ALL';
+
+// นับ id ในโฟลเดอร์ main/backup-id ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
+function countRangerOnAgent(agentId) {
+  return new Promise((resolve) => {
+    let settled = false;
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      socket.once('response_' + rid, (resp) => { settled = true; resolve(resp || {}); });
+    });
+    socket.emit('request_count_prefix_ids', {
+      agent_id: agentId, subpath: RANGER_CFG.subpath, base_match: RANGER_CFG.base, exts: ['.xml'],
+    });
+    setTimeout(() => { if (!settled) resolve({ error: 'timeout' }); }, 20000);
+  });
+}
+
+async function openRangerDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const allAgents = agentsData || [];
+  if (_rangerScope !== 'ALL' && !allAgents.some(a => a.agent_id === _rangerScope)) _rangerScope = 'ALL';
+  const agents = _rangerScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _rangerScope);
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🏹 Dashboard Line Ranger — ${RANGER_CFG.label}</h2>
+      ${pcSelectHtml(_rangerScope, '_rangerScope=this.value; openRangerDashboard()')}
+      <button class="btn btn-primary" onclick="openRangerDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+
+  if (!allAgents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+
+  const comboTotals = {};
+  let grandTotal = 0, matchedTotal = 0, onlineCount = 0;
+  const perAgent = [];
+
+  for (const a of agents) {
+    const name = a.name || a.hostname || a.agent_id;
+    const res = await countRangerOnAgent(a.agent_id);
+    if (!res || res.error) {
+      perAgent.push({ name, error: String((res && res.error) || 'ไม่ตอบกลับ') });
+      continue;
+    }
+    onlineCount++;
+    grandTotal += res.total_files || 0;
+    matchedTotal += res.matched_files || 0;
+    perAgent.push({
+      name, total: res.total_files || 0, matched: res.matched_files || 0, exists: res.exists,
+    });
+    const combos = res.combos || {};
+    for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
+  }
+  renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, agents.length, onlineCount);
+}
+
+function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, totalMachines, onlineCount) {
+  const content = document.getElementById('contentArea');
+
+  // 1) combo (ตามที่อยู่ในชื่อไฟล์จริง) — kikoru+Kafka นับเป็นชุดเดียว ไม่แตกออก
+  const combos = Object.keys(comboTotals)
+    .map(k => ({ name: k, count: comboTotals[k] }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  // 2) รวมรายชื่อ — ชื่อเดียวกันที่อยู่คนละ combo เอามาบวกกัน (kikoru เดี่ยว + kikoru+Kafka)
+  const nameTotals = {};
+  const nameCombos = {};
+  combos.forEach(c => {
+    c.name.split('+').map(s => s.trim()).filter(Boolean).forEach(n => {
+      nameTotals[n] = (nameTotals[n] || 0) + c.count;
+      nameCombos[n] = (nameCombos[n] || 0) + 1;
+    });
+  });
+  const names = Object.keys(nameTotals).map(n => ({
+    name: n, count: nameTotals[n], combos: nameCombos[n],
+    main: RANGER_MAIN_NAMES.some(m => m.toLowerCase() === n.toLowerCase()),
+  })).sort((a, b) => (b.main - a.main) || b.count - a.count || a.name.localeCompare(b.name));
+
+  const nameCards = names.length ? names.map(n => `
+    <div class="hero-card rg-card${n.main ? ' main-name' : ''}" data-name="${escHtml(n.name)}">
+      <div class="hero-name" title="${escHtml(n.name)}">${escHtml(n.name)}</div>
+      <div class="hero-count">${n.count.toLocaleString()}</div>
+      <div class="hero-sub">${n.combos} แบบ</div>
+    </div>`).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ยังไม่พบชื่อฮีโร่ในไฟล์</h3></div>';
+
+  const comboCards = combos.length ? combos.map(c => {
+    const parts = c.name.split('+').filter(Boolean);
+    return `<div class="hero-card rg-card${parts.length > 1 ? ' combo' : ''}" data-name="${escHtml(c.name)}">
+      <div class="hero-name" title="${escHtml(c.name)}">${escHtml(c.name)}</div>
+      <div class="hero-count">${c.count.toLocaleString()}</div>
+      <div class="hero-sub">${parts.length > 1 ? parts.length + ' ชื่อ/ไฟล์' : 'ชื่อเดียว'}</div>
+    </div>`;
+  }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ที่มีชื่อฮีโร่</h3></div>';
+
+  const agentRows = perAgent.map(p => {
+    let right;
+    if (p.error) {
+      right = '<span style="color:var(--danger)">' + escHtml(p.error) + '</span>';
+    } else if (p.exists === false) {
+      right = '<span style="color:var(--warning)">ไม่พบโฟลเดอร์ ' + RANGER_CFG.label + '</span>';
+    } else {
+      right = '<span title="ไฟล์ที่มีชื่อฮีโร่"><b style="color:var(--success)">' + p.matched.toLocaleString() + '</b> id</span>'
+            + '<span style="color:var(--text-dim); margin:0 10px">·</span>'
+            + '<span style="color:var(--text-secondary)" title="ไฟล์ .xml ทั้งหมดใน ' + RANGER_CFG.label + '">🗂️ ทั้งหมด ' + p.total.toLocaleString() + ' ไฟล์</span>';
+    }
+    return '<div class="agent-stat"><span>🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
+  }).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🏹 Dashboard Line Ranger</h2>
+      ${pcSelectHtml(_rangerScope, '_rangerScope=this.value; openRangerDashboard()')}
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อ / combo..." oninput="filterRangerCards(this.value)">
+      <button class="btn btn-primary" onclick="openRangerDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
+      <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ ${RANGER_CFG.label} รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">id ที่มีชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${combos.length}</div></div>
+    </div>
+    <h3 style="margin:4px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ทุกเครื่อง (ชื่อเดียวกันคนละ combo บวกรวมกัน)</h3>
+    <div class="hero-grid">${nameCards}</div>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">แยกตามไฟล์ (combo) — ไฟล์ที่มี 2 ชื่อจะนับเป็นชุดเดียว เช่น kikoru+Kafka</h3>
+    <div class="hero-grid">${comboCards}</div>
+    <div id="rangerNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — ${RANGER_CFG.label}</h3>
+    <div class="agent-stats">${agentRows}</div>
+  `;
+}
+
+function filterRangerCards(q) {
+  q = (q || '').trim().toLowerCase();
+  let shown = 0;
+  document.querySelectorAll('.rg-card').forEach(card => {
+    const match = !q || (card.dataset.name || '').toLowerCase().includes(q);
+    card.style.display = match ? '' : 'none';
+    if (match) shown++;
+  });
+  const nr = document.getElementById('rangerNoResult');
   if (nr) nr.style.display = shown === 0 ? '' : 'none';
 }
 
