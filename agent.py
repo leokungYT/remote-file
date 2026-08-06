@@ -961,19 +961,101 @@ def handle_clear_input(req_id, data):
 #  MuMu Player 12 control (เปิด/ปิด instance รายเครื่อง)
 # ═══════════════════════════════════════════════════════════
 
+_MUMU_SUBS = ("shell", "nx_main", "nx_device", "")
+_MUMU_PRODS = ("MuMuPlayer-12.0", "MuMuPlayerGlobal-12.0", "MuMu Player 12",
+               "MuMuPlayer", "MuMuPlayerGlobal", "MuMuNebula")
+_MUMU_DRIVES = ("C:", "D:", "E:", "F:")
+_MUMU_PFS = ("Program Files", "Program Files (x86)")
+
+
+def _mumu_reg_locations():
+    """อ่าน InstallLocation ของ MuMu จาก registry (Uninstall keys)"""
+    locs = []
+    try:
+        import winreg
+    except Exception:
+        return locs
+    roots = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ]
+    for hive, path in roots:
+        try:
+            key = winreg.OpenKey(hive, path)
+            count = winreg.QueryInfoKey(key)[0]
+        except Exception:
+            continue
+        for i in range(count):
+            try:
+                sk = winreg.OpenKey(key, winreg.EnumKey(key, i))
+                name = str(winreg.QueryValueEx(sk, "DisplayName")[0])
+            except Exception:
+                continue
+            if "mumu" in name.lower():
+                try:
+                    loc = winreg.QueryValueEx(sk, "InstallLocation")[0]
+                    if loc and os.path.isdir(loc):
+                        locs.append(loc)
+                except Exception:
+                    pass
+    return locs
+
+
 def _mumu_manager_path():
-    """หา MuMuManager.exe (config mumu_manager_path ก่อน แล้ว fallback path มาตรฐาน)"""
-    cands = []
-    if MUMU_MANAGER_PATH:
-        cands.append(MUMU_MANAGER_PATH)
-    for drive in ("C:", "D:", "E:"):
-        for prod in ("MuMuPlayer-12.0", "MuMuPlayerGlobal-12.0"):
-            cands.append(rf"{drive}\Program Files\Netease\{prod}\shell\MuMuManager.exe")
-            cands.append(rf"{drive}\Program Files\Netease\{prod}\nx_main\MuMuManager.exe")
-    for c in cands:
-        if c and os.path.isfile(c):
-            return c
+    """หา MuMuManager.exe: config > path มาตรฐาน > registry > ค้นใต้โฟลเดอร์ Netease"""
+    import glob
+    if MUMU_MANAGER_PATH and os.path.isfile(MUMU_MANAGER_PATH):
+        return MUMU_MANAGER_PATH
+    # 1) path มาตรฐานหลายแบบ
+    for drive in _MUMU_DRIVES:
+        for pf in _MUMU_PFS:
+            for prod in _MUMU_PRODS:
+                for sub in _MUMU_SUBS:
+                    c = os.path.join(f"{drive}\\", pf, "Netease", prod, sub, "MuMuManager.exe")
+                    if os.path.isfile(c):
+                        return c
+    # 2) install location จาก registry
+    for loc in _mumu_reg_locations():
+        for sub in _MUMU_SUBS:
+            c = os.path.join(loc, sub, "MuMuManager.exe")
+            if os.path.isfile(c):
+                return c
+        try:
+            hits = glob.glob(os.path.join(loc, "**", "MuMuManager.exe"), recursive=True)
+            if hits:
+                return hits[0]
+        except Exception:
+            pass
+    # 3) ค้นใต้โฟลเดอร์ Netease (จำกัดวงแค่โฟลเดอร์ Netease จึงเร็ว)
+    for drive in _MUMU_DRIVES:
+        for pf in _MUMU_PFS:
+            base = os.path.join(f"{drive}\\", pf, "Netease")
+            if os.path.isdir(base):
+                try:
+                    hits = glob.glob(os.path.join(base, "**", "MuMuManager.exe"), recursive=True)
+                    if hits:
+                        return hits[0]
+                except Exception:
+                    pass
     return None
+
+
+def _mumu_hint():
+    """บอกใบ้ว่าเจอโฟลเดอร์ Netease/MuMu ที่ไหนบ้าง เผื่อ user เอาไปตั้ง path"""
+    found = []
+    for drive in _MUMU_DRIVES:
+        for pf in _MUMU_PFS:
+            base = os.path.join(f"{drive}\\", pf, "Netease")
+            if os.path.isdir(base):
+                try:
+                    for d in os.listdir(base):
+                        found.append(os.path.join(base, d))
+                except Exception:
+                    pass
+    if found:
+        return " | เจอโฟลเดอร์: " + ", ".join(found[:6])
+    return " | ไม่เจอโฟลเดอร์ Netease เลย (MuMu ติดตั้งไว้ไดรฟ์/โฟลเดอร์ไหน?)"
 
 
 def _run_hidden(args, timeout=30):
@@ -1015,7 +1097,7 @@ def _mumu_list():
     """ดึงรายชื่อ instance ทั้งหมดของ MuMu 12 (MuMuManager info -v all)"""
     mgr = _mumu_manager_path()
     if not mgr:
-        return {"error": "หา MuMuManager.exe ไม่เจอ — ตั้ง 'mumu_manager_path' ใน config.json"}
+        return {"error": "หา MuMuManager.exe ไม่เจอ — ตั้ง 'mumu_manager_path' ใน config.json" + _mumu_hint()}
     try:
         out, _ = _run_hidden([mgr, "info", "-v", "all"], timeout=20)
         data = json.loads(out)
@@ -1050,7 +1132,7 @@ def _mumu_open(indices):
     """เปิด instance ตามเลขที่เลือก (MuMuManager control -v <idx> launch)"""
     mgr = _mumu_manager_path()
     if not mgr:
-        return {"error": "หา MuMuManager.exe ไม่เจอ — ตั้ง 'mumu_manager_path' ใน config.json"}
+        return {"error": "หา MuMuManager.exe ไม่เจอ — ตั้ง 'mumu_manager_path' ใน config.json" + _mumu_hint()}
     opened, errors = [], []
     for idx in indices:
         try:
