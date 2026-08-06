@@ -16,7 +16,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, render_template_string, request, send_file, jsonify, session
+from flask import Flask, render_template_string, request, send_file, jsonify, session, make_response
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
 # ─── CONFIG ───────────────────────────────────────────────
@@ -425,11 +425,17 @@ def cleanup_pending():
 
 @app.route("/")
 def index():
-    return render_template_string(
+    html = render_template_string(
         WEB_UI_HTML
         .replace("__MAX_UPLOAD_MB__", str(MAX_UPLOAD_MB))
         .replace("__APP_BUILD__", APP_BUILD)
     )
+    # ห้าม browser cache หน้านี้ — ไม่งั้นแก้โค้ด+รีสตาร์ทแล้วยังเห็นหน้าเก่า ต้องคอยกด Ctrl+F5 เอง
+    resp = make_response(html)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.route("/agent.py")
