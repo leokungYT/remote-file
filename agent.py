@@ -128,6 +128,9 @@ COOKIE_ID_PATH = (os.environ.get("COOKIE_ID_PATH") or _cfg.get("cookie_id_path")
 # โฟลเดอร์ input-id (ที่รับไฟล์จากปุ่ม broadcast + ปุ่ม clear) กำหนดเองได้ ปล่อยว่าง = ใช้ base_match + subpath
 COOKIE_INPUT_PATH = (os.environ.get("COOKIE_INPUT_PATH") or _cfg.get("cookie_input_path") or "").strip()
 
+# MuMu Player 12: path ของ MuMuManager.exe (ปล่อยว่าง = ค้นหาอัตโนมัติจาก path มาตรฐาน)
+MUMU_MANAGER_PATH = (os.environ.get("MUMU_MANAGER_PATH") or _cfg.get("mumu_manager_path") or "").strip()
+
 CHUNK_SIZE = 512 * 1024  # 512KB per chunk
 RECONNECT_DELAY = 5  # seconds
 
@@ -329,6 +332,8 @@ def _dispatch_command(data):
             handle_self_update(req_id, payload)
         elif action == "screenshot":
             handle_screenshot(req_id, payload)
+        elif action == "mumu_control":
+            handle_mumu_control(req_id, payload)
         else:
             send_response(req_id, {"error": f"Unknown action: {action}"})
     except Exception as e:
@@ -950,6 +955,132 @@ def handle_clear_input(req_id, data):
     logger.info(f"  clear_input: ลบ {deleted} รายการใน {folder}")
     send_response(req_id, {"success": True, "deleted": deleted, "exists": True,
                            "folder": folder, "errors": errors})
+
+
+# ═══════════════════════════════════════════════════════════
+#  MuMu Player 12 control (เปิด/ปิด instance รายเครื่อง)
+# ═══════════════════════════════════════════════════════════
+
+def _mumu_manager_path():
+    """หา MuMuManager.exe (config mumu_manager_path ก่อน แล้ว fallback path มาตรฐาน)"""
+    cands = []
+    if MUMU_MANAGER_PATH:
+        cands.append(MUMU_MANAGER_PATH)
+    for drive in ("C:", "D:", "E:"):
+        for prod in ("MuMuPlayer-12.0", "MuMuPlayerGlobal-12.0"):
+            cands.append(rf"{drive}\Program Files\Netease\{prod}\shell\MuMuManager.exe")
+            cands.append(rf"{drive}\Program Files\Netease\{prod}\nx_main\MuMuManager.exe")
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+def _run_hidden(args, timeout=30):
+    """รันคำสั่งแบบไม่โผล่หน้าต่าง คืน (stdout_text, returncode)"""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    r = subprocess.run(args, capture_output=True, timeout=timeout, creationflags=flags)
+    out = (r.stdout or b"").decode("utf-8", "ignore")
+    if not out.strip():
+        out = (r.stderr or b"").decode("utf-8", "ignore")
+    return out, r.returncode
+
+
+def _mumu_kill_all():
+    """taskkill ทุก process ที่ชื่อมี MuMu หรือ Nemu (ปิด MuMu ทั้งหมด)"""
+    killed = []
+    try:
+        out, _ = _run_hidden(["tasklist", "/fo", "csv", "/nh"], timeout=15)
+        for line in out.splitlines():
+            parts = [x.strip().strip('"') for x in line.split('","')]
+            if not parts or not parts[0]:
+                continue
+            name = parts[0].strip('"')
+            low = name.lower()
+            if "mumu" in low or "nemu" in low:
+                pid = parts[1] if len(parts) > 1 else ""
+                if pid.isdigit():
+                    try:
+                        _run_hidden(["taskkill", "/F", "/PID", pid], timeout=10)
+                        killed.append(name)
+                    except Exception:
+                        pass
+    except Exception as e:
+        return {"error": f"taskkill ล้มเหลว: {e}"}
+    logger.info(f"  MuMu kill: ปิด {len(killed)} process")
+    return {"success": True, "killed": killed, "count": len(killed)}
+
+
+def _mumu_list():
+    """ดึงรายชื่อ instance ทั้งหมดของ MuMu 12 (MuMuManager info -v all)"""
+    mgr = _mumu_manager_path()
+    if not mgr:
+        return {"error": "หา MuMuManager.exe ไม่เจอ — ตั้ง 'mumu_manager_path' ใน config.json"}
+    try:
+        out, _ = _run_hidden([mgr, "info", "-v", "all"], timeout=20)
+        data = json.loads(out)
+    except Exception as e:
+        return {"error": f"อ่านรายชื่อ instance ไม่ได้: {e}"}
+
+    # รูปแบบอาจเป็น {"0":{...},"1":{...}} หรือ instance เดียว {...}
+    if isinstance(data, dict) and ("index" in data or "name" in data) and not any(k.isdigit() for k in data.keys()):
+        items = {str(data.get("index", 0)): data}
+    elif isinstance(data, dict):
+        items = data
+    else:
+        return {"error": "รูปแบบข้อมูล MuMuManager ไม่รู้จัก"}
+
+    instances = []
+    for k, v in items.items():
+        if not isinstance(v, dict):
+            continue
+        idx = v.get("index", k)
+        try:
+            idx = int(idx)
+        except Exception:
+            pass
+        running = bool(v.get("is_process_started") or v.get("is_android_started")
+                       or str(v.get("player_state", "")).lower() in ("start_finished", "starting", "running"))
+        instances.append({"index": idx, "name": v.get("name") or f"MuMu-{idx}", "running": running})
+    instances.sort(key=lambda x: (isinstance(x["index"], str), x["index"]))
+    return {"success": True, "instances": instances, "manager": mgr}
+
+
+def _mumu_open(indices):
+    """เปิด instance ตามเลขที่เลือก (MuMuManager control -v <idx> launch)"""
+    mgr = _mumu_manager_path()
+    if not mgr:
+        return {"error": "หา MuMuManager.exe ไม่เจอ — ตั้ง 'mumu_manager_path' ใน config.json"}
+    opened, errors = [], []
+    for idx in indices:
+        try:
+            _run_hidden([mgr, "control", "-v", str(idx), "launch"], timeout=40)
+            opened.append(idx)
+        except Exception as e:
+            errors.append(f"จอ {idx}: {e}")
+    logger.info(f"  MuMu open: เปิด {opened}")
+    return {"success": True, "opened": opened, "errors": errors}
+
+
+def handle_mumu_control(req_id, data):
+    """เปิด/ปิด/ดึงรายชื่อ MuMu instance (รันใน thread กันบล็อก socket)"""
+    sub = data.get("sub")
+
+    def _go():
+        try:
+            if sub == "list":
+                res = _mumu_list()
+            elif sub == "open":
+                res = _mumu_open(data.get("indices", []))
+            elif sub == "close":
+                res = _mumu_kill_all()
+            else:
+                res = {"error": f"คำสั่ง mumu ไม่รู้จัก: {sub}"}
+        except Exception as e:
+            res = {"error": str(e)}
+        send_response(req_id, res)
+
+    _spawn_with_client(_go)
 
 
 def handle_screenshot(req_id, data):

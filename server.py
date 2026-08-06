@@ -318,6 +318,19 @@ def handle_self_update_req(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_mumu")
+def handle_mumu_req(data):
+    """สั่งเปิด/ปิด/ดึงรายชื่อ MuMu instance ที่เครื่องลูก"""
+    req_id = send_to_agent(data["agent_id"], "mumu_control", {
+        "sub": data.get("sub"),
+        "indices": data.get("indices", []),
+    }, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 @socketio.on("request_screenshot")
 def handle_screenshot_req(data):
     """สั่งให้ agent จับภาพหน้าจอส่งกลับ (live view / PC monitor)"""
@@ -1040,6 +1053,17 @@ WEB_UI_HTML = r"""
   .mid-badge.zero { background: rgba(239,68,68,0.15); color: var(--danger); }
   .mid-badge.low  { background: rgba(245,158,11,0.15); color: var(--warning); }
 
+  /* ── MuMu control cards ── */
+  .mumu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
+  .mumu-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+  .mumu-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .mumu-name { font-weight: 700; font-size: 14px; }
+  .mumu-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .mumu-actions .btn { padding: 6px 10px; font-size: 12px; }
+  .mumu-body { min-height: 30px; }
+  .mumu-inst { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+  .mumu-inst input { width: auto; margin: 0; }
+
   /* ── COOKIE-RUN id cards (แสดงชื่อ id) ── */
   .id-grid {
     display: grid;
@@ -1133,6 +1157,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openInputIdDashboard()">📥 input-id รายเครื่อง</button>
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
+    <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
     <button class="btn" onclick="openLiveView()">🖥️ Live View</button>
     <span class="status-badge status-online" id="connStatus">● เชื่อมต่อแล้ว</span>
   </div>
@@ -1502,6 +1527,117 @@ function filterMidCards(q) {
   });
   const nr = document.getElementById('midNoResult');
   if (nr) nr.style.display = shown === 0 ? '' : 'none';
+}
+
+// ═══════════════════════════════════════════════════════════
+//  MuMu Player 12 — เปิด/ปิด instance รายเครื่อง
+// ═══════════════════════════════════════════════════════════
+function mumuReq(agentId, sub, indices) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v || {}); } };
+    const onSent = (data) => { socket.once('response_' + data.request_id, (resp) => done(resp)); };
+    socket.once('request_sent', onSent);
+    setTimeout(() => { socket.off('request_sent', onSent); done({ error: 'หมดเวลา (เครื่องไม่ตอบ)' }); }, 45000);
+    socket.emit('request_mumu', { agent_id: agentId, sub: sub, indices: indices || [] });
+  });
+}
+
+function openMumuDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const agents = agentsData || [];
+  window._mumuAgents = agents.slice();
+  if (!agents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+  const cards = agents.map((a, i) => {
+    const label = escHtml(a.name || a.hostname || a.agent_id);
+    return `<div class="mumu-card" id="mm_card_${i}">
+      <div class="mumu-head">
+        <span class="mumu-name">🖥️ ${label}</span>
+        <div class="mumu-actions">
+          <button class="btn" onclick="mumuLoad(${i})">🔄 โหลดจอ</button>
+          <button class="btn btn-primary" onclick="mumuOpenSel(${i})">▶️ เปิดที่เลือก</button>
+          <button class="btn btn-danger" onclick="mumuClose(${i})">⛔ ปิดทั้งหมด</button>
+        </div>
+      </div>
+      <div class="mumu-body" id="mm_body_${i}"><span style="color:var(--text-dim); font-size:12px">กด "โหลดจอ" เพื่อดึงรายชื่อ instance มาติ๊กเลือก</span></div>
+      <div class="mumu-status" id="mm_status_${i}" style="font-size:12px; margin-top:8px"></div>
+    </div>`;
+  }).join('');
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🎮 MuMu Player 12 — เปิด/ปิด รายเครื่อง</h2>
+      <button class="btn" onclick="mumuLoadAll()">🔄 โหลดจอทุกเครื่อง</button>
+      <button class="btn btn-danger" onclick="mumuCloseAll()">⛔ ปิด MuMu ทุกเครื่อง</button>
+    </div>
+    <div class="mumu-grid">${cards}</div>`;
+}
+
+async function mumuLoad(i) {
+  const a = (window._mumuAgents || [])[i];
+  if (!a) return;
+  const body = document.getElementById('mm_body_' + i);
+  document.getElementById('mm_status_' + i).innerHTML = '';
+  body.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังโหลดรายชื่อจอ...</span>';
+  const res = await mumuReq(a.agent_id, 'list', []);
+  if (res.error) { body.innerHTML = `<span style="color:var(--danger); font-size:12px">❌ ${escHtml(res.error)}</span>`; return; }
+  const insts = res.instances || [];
+  if (!insts.length) { body.innerHTML = '<span style="color:var(--warning); font-size:12px">ไม่พบ instance</span>'; return; }
+  body.innerHTML = '<div style="display:flex; flex-wrap:wrap; gap:8px">' +
+    insts.map(ins => `<label class="mumu-inst" title="${ins.running ? 'กำลังเปิดอยู่' : 'ปิดอยู่'}">
+      <input type="checkbox" class="mm_chk_${i}" value="${escAttr(String(ins.index))}">
+      <span>${ins.running ? '🟢' : '⚪'} ${escHtml(String(ins.name))} <span style="color:var(--text-dim)">#${escHtml(String(ins.index))}</span></span>
+    </label>`).join('') + '</div>';
+}
+
+async function mumuLoadAll() {
+  const n = (window._mumuAgents || []).length;
+  for (let i = 0; i < n; i++) await mumuLoad(i);   // ทำทีละเครื่อง กัน request ชนกัน
+}
+
+async function mumuOpenSel(i) {
+  const a = (window._mumuAgents || [])[i];
+  if (!a) return;
+  const checked = [...document.querySelectorAll('.mm_chk_' + i + ':checked')].map(c => c.value);
+  if (!checked.length) { toast('ยังไม่ได้ติ๊กจอที่จะเปิด (กด "โหลดจอ" ก่อนถ้ายังไม่มีรายการ)', 'info'); return; }
+  const status = document.getElementById('mm_status_' + i);
+  status.innerHTML = `<span style="color:var(--accent)">⏳ กำลังเปิดจอ ${escHtml(checked.join(', '))}...</span>`;
+  const res = await mumuReq(a.agent_id, 'open', checked);
+  if (res.error) { status.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`; return; }
+  status.innerHTML = `<span style="color:#22c55e">✅ สั่งเปิดจอ ${escHtml((res.opened || []).join(', '))} แล้ว</span>`;
+  setTimeout(() => mumuLoad(i), 3500);   // รีเฟรชสถานะจอหลังเปิด
+}
+
+async function mumuClose(i) {
+  const a = (window._mumuAgents || [])[i];
+  if (!a) return;
+  const name = a.name || a.hostname || a.agent_id;
+  if (!confirm(`⛔ ปิด MuMu ทั้งหมดที่เครื่อง "${name}" ?\n(taskkill ทุก process ของ MuMu)`)) return;
+  const status = document.getElementById('mm_status_' + i);
+  status.innerHTML = '<span style="color:var(--accent)">⏳ กำลังปิด...</span>';
+  const res = await mumuReq(a.agent_id, 'close', []);
+  if (res.error) { status.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`; return; }
+  status.innerHTML = `<span style="color:#22c55e">✅ ปิดแล้ว ${res.count || 0} process</span>`;
+  setTimeout(() => mumuLoad(i), 1500);
+}
+
+async function mumuCloseAll() {
+  const agents = window._mumuAgents || [];
+  if (!agents.length) return;
+  if (!confirm(`⛔ ปิด MuMu ทั้งหมดของทุกเครื่อง (${agents.length} เครื่อง) ?`)) return;
+  for (let i = 0; i < agents.length; i++) {
+    const status = document.getElementById('mm_status_' + i);
+    if (status) status.innerHTML = '<span style="color:var(--accent)">⏳ กำลังปิด...</span>';
+    const res = await mumuReq(agents[i].agent_id, 'close', []);
+    if (status) status.innerHTML = res.error
+      ? `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`
+      : `<span style="color:#22c55e">✅ ปิดแล้ว ${res.count || 0} process</span>`;
+  }
+  toast('สั่งปิด MuMu ทุกเครื่องแล้ว', 'success');
 }
 
 // ═══════════════════════════════════════════════════════════
