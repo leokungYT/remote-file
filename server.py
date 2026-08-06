@@ -1154,6 +1154,7 @@ WEB_UI_HTML = r"""
   </h1>
   <div style="display:flex; align-items:center; gap:12px">
     <button class="btn" onclick="openDashboard()">⚽ Dashboard PES</button>
+    <button class="btn" onclick="openBackupDashboard()">🗄️ Dashboard Backup</button>
     <button class="btn" onclick="openInputIdDashboard()">📥 input-id รายเครื่อง</button>
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
@@ -1281,7 +1282,6 @@ let agentsData = [];
 // ═══════════════════════════════════════════════════════════
 const HERO_LIST = ["Fabio Cannavaro","Paolo Maldini","Daniele De Rossi","Didier Drogba","Mohamed Salah","Nico Paz","Federico Dimarco","Luka","rgson","Arribas","Aubameyang","Ramedhan Saifullah","Chrigor","Lamine=x2","Mbappe","Joan Garcia","Martin Odegaard","Atep","Gareth Bale","Marcelo","Peter Schmeichel","Leonardo Bonucci","Ronald Koeman","Casemiro","Erling Haaland","Hugo Ekitike","Declan Rice","Hidetoshi Nakata","Seigo Narazaki","Shunsuke Nakamura","Vitinha","David Raya","Kvaratskhelia","Johan Cruyff","Filippo Inzaghi","Jordi Alba","Oliver Kahn","David Beckham","Rivaldo","Gianluigi Buffon","Andrea Pirlo","Gialuca Zambrotta","Lilian Thuram","Patrick Vieira","Marcel Desailly","Luis Suarez","Schweinsteiger","Bronckhorst"];
 
-let dashboardScope = 'ALL';  // 'ALL' = รวมทุกเครื่อง, หรือ agent_id ของเครื่องที่เลือก
 let cookieScope = 'ALL';     // scope แยกของ dashboard cookie-run
 let inputIdScope = 'ALL';    // scope ของ dashboard input-id รายเครื่อง
 
@@ -1292,7 +1292,7 @@ function pcSelectHtml(scopeVal, onchangeExpr) {
   return `<select class="btn project-select" onchange="${onchangeExpr}" title="เลือกเครื่องที่จะแสดง">${opts}</select>`;
 }
 
-function countHeroesOnAgent(agentId) {
+function countHeroesOnAgent(agentId, subpath) {
   return new Promise((resolve, reject) => {
     let settled = false;
     socket.once('request_sent', (data) => {
@@ -1302,7 +1302,7 @@ function countHeroesOnAgent(agentId) {
         if (resp.error) reject(new Error(resp.error)); else resolve(resp);
       });
     });
-    socket.emit('request_count_heroes', { agent_id: agentId, names: HERO_LIST, subpath: 'found-hero' });
+    socket.emit('request_count_heroes', { agent_id: agentId, names: HERO_LIST, subpath: subpath || 'found-hero' });
     setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 20000);
   });
 }
@@ -1320,19 +1320,30 @@ function countInputIdOnAgent(agentId) {
   });
 }
 
-async function openDashboard() {
+// dashboard แบบนับไฟล์ตามชื่อฮีโร่ — ใช้ทั้ง PES (found-hero) และ Backup (backup) โครงเดียวกัน ต่างแค่โฟลเดอร์
+const DASH_KINDS = {
+  hero:   { subpath: 'found-hero', label: 'found-hero', title: '⚽ Dashboard PES', reopen: 'openDashboard' },
+  backup: { subpath: 'backup',     label: 'backup',     title: '🗄️ Dashboard Backup', reopen: 'openBackupDashboard' },
+};
+let _dashScope = { hero: 'ALL', backup: 'ALL' };
+
+function openDashboard() { return openHeroDash('hero'); }
+function openBackupDashboard() { return openHeroDash('backup'); }
+
+async function openHeroDash(kind) {
+  const cfg = DASH_KINDS[kind];
   currentAgent = null;
   document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
   const content = document.getElementById('contentArea');
   const allAgents = agentsData || [];
-  if (dashboardScope !== 'ALL' && !allAgents.some(a => a.agent_id === dashboardScope)) dashboardScope = 'ALL';
-  const agents = dashboardScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === dashboardScope);
+  if (_dashScope[kind] !== 'ALL' && !allAgents.some(a => a.agent_id === _dashScope[kind])) _dashScope[kind] = 'ALL';
+  const agents = _dashScope[kind] === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _dashScope[kind]);
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">⚽ Dashboard PES — found-hero</h2>
-      ${pcSelectHtml(dashboardScope, 'dashboardScope=this.value; openDashboard()')}
-      <button class="btn btn-primary" onclick="openDashboard()">🔄 รีเฟรช</button>
+      <h2 style="flex:1; font-size:18px">${cfg.title} — ${cfg.label}</h2>
+      ${pcSelectHtml(_dashScope[kind], `_dashScope['${kind}']=this.value; ${cfg.reopen}()`)}
+      <button class="btn btn-primary" onclick="${cfg.reopen}()">🔄 รีเฟรช</button>
     </div>
     <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
 
@@ -1347,7 +1358,7 @@ async function openDashboard() {
 
   for (const a of agents) {
     try {
-      const res = await countHeroesOnAgent(a.agent_id);
+      const res = await countHeroesOnAgent(a.agent_id, cfg.subpath);
       onlineCount++;
       grandTotal += res.total_files || 0;
       // นับไฟล์ที่เหลือใน pes/input-id ของเครื่องนี้
@@ -1357,7 +1368,6 @@ async function openDashboard() {
         total: res.total_files || 0, exists: res.exists,
         inputId: (ir && typeof ir.total === 'number') ? ir.total : null,
         inputExists: ir ? ir.exists : undefined,
-        inputErr: ir ? ir.error : undefined,
       });
       const combos = res.combos || {};
       for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
@@ -1365,7 +1375,7 @@ async function openDashboard() {
       perAgent.push({ name: a.name || a.hostname || a.agent_id, error: String(e.message || e) });
     }
   }
-  renderDashboard(comboTotals, grandTotal, perAgent, agents.length, onlineCount);
+  renderHeroDash(kind, comboTotals, grandTotal, perAgent, agents.length, onlineCount);
 }
 
 function filterHeroCards(q) {
@@ -1380,7 +1390,8 @@ function filterHeroCards(q) {
   if (noRes) noRes.style.display = shown === 0 ? '' : 'none';
 }
 
-function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlineCount) {
+function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, onlineCount) {
+  const cfg = DASH_KINDS[kind];
   const content = document.getElementById('contentArea');
   const sorted = Object.keys(comboTotals)
     .map(k => ({ name: k, count: comboTotals[k] }))
@@ -1401,34 +1412,34 @@ function renderDashboard(comboTotals, grandTotal, perAgent, totalMachines, onlin
         ? '<span style="color:var(--warning)">ไม่พบ input-id</span>'
         : (p.inputId == null ? '<span style="color:var(--text-dim)">-</span>'
                              : '<b style="color:var(--accent)">' + p.inputId + '</b> ไฟล์');
-      const heroTxt = p.exists === false
-        ? '<span style="color:var(--warning)">ไม่พบ found-hero</span>'
+      const folderTxt = p.exists === false
+        ? '<span style="color:var(--warning)">ไม่พบ ' + cfg.label + '</span>'
         : (p.total + ' ไฟล์');
       right = '<span title="ไฟล์ที่เหลือในโฟลเดอร์ input-id">📥 input-id: ' + inputTxt + '</span>'
             + '<span style="color:var(--text-dim); margin:0 10px">·</span>'
-            + '<span style="color:var(--text-secondary)" title="ไฟล์ในโฟลเดอร์ found-hero">🦸 found-hero: ' + heroTxt + '</span>';
+            + '<span style="color:var(--text-secondary)" title="ไฟล์ในโฟลเดอร์ ' + cfg.label + '">🗂️ ' + cfg.label + ': ' + folderTxt + '</span>';
     }
     return '<div class="agent-stat"><span>🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
   }).join('');
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">⚽ Dashboard PES</h2>
-      ${pcSelectHtml(dashboardScope, 'dashboardScope=this.value; openDashboard()')}
+      <h2 style="flex:1; font-size:18px">${cfg.title}</h2>
+      ${pcSelectHtml(_dashScope[kind], `_dashScope['${kind}']=this.value; ${cfg.reopen}()`)}
       <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อฮีโร่ / combo..." oninput="filterHeroCards(this.value)">
-      <button class="btn btn-primary" onclick="openDashboard()">🔄 รีเฟรช</button>
+      <button class="btn btn-primary" onclick="${cfg.reopen}()">🔄 รีเฟรช</button>
     </div>
     <div class="stat-row">
       <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
       <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
       <div class="stat-tile"><div class="stat-label">input-id เหลือรวม</div><div class="stat-val" style="color:var(--accent)">${inputIdTotal}</div></div>
-      <div class="stat-tile"><div class="stat-label">ไฟล์ found-hero รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ ${cfg.label} รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal}</div></div>
       <div class="stat-tile"><div class="stat-label">id ที่ตรงชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
     </div>
     <div class="hero-grid">${cards}</div>
     <div id="dashNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
-    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — input-id ที่เหลือ + found-hero</h3>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — input-id ที่เหลือ + ${cfg.label}</h3>
     <div class="agent-stats">${agentRows}</div>
   `;
 }
