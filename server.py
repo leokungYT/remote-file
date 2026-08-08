@@ -439,6 +439,80 @@ def index():
     return resp
 
 
+# ── รูปตัวละคร Line Ranger (img/ranger) ─────────────────────
+# ลำดับที่มองหา: env HERO_IMG_PATH > img/ranger ข้างๆ server.py > โฟลเดอร์ LGR/main ที่พบบ่อย
+_HERO_IMG_CACHE = {"dir": None, "index": None}
+
+
+def _hero_img_dir():
+    """หาโฟลเดอร์รูปตัวละคร (จำผลไว้ ไม่ต้องไล่หาทุก request)"""
+    if _HERO_IMG_CACHE["dir"] and os.path.isdir(_HERO_IMG_CACHE["dir"]):
+        return _HERO_IMG_CACHE["dir"]
+    here = os.path.dirname(os.path.abspath(__file__))
+    home = os.path.expanduser("~")
+    cands = []
+    env = os.environ.get("HERO_IMG_PATH", "").strip()
+    if env:
+        cands.append(env)
+    cands += [
+        os.path.join(here, "img", "ranger"),
+        os.path.join(home, "Downloads", "LGR", "img", "ranger"),
+        os.path.join(home, "Desktop", "LGR", "img", "ranger"),
+        os.path.join(home, "Desktop", "main", "img", "ranger"),
+    ]
+    for c in cands:
+        if c and os.path.isdir(c):
+            _HERO_IMG_CACHE["dir"] = c
+            _HERO_IMG_CACHE["index"] = None
+            return c
+    return None
+
+
+def _hero_img_index(folder):
+    """map ชื่อตัวพิมพ์เล็ก -> ชื่อไฟล์จริง (เทียบชื่อแบบไม่สนพิมพ์เล็ก/ใหญ่)"""
+    if _HERO_IMG_CACHE["index"] is not None:
+        return _HERO_IMG_CACHE["index"]
+    idx = {}
+    try:
+        for fn in os.listdir(folder):
+            stem, ext = os.path.splitext(fn)
+            if ext.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                idx.setdefault(stem.lower(), fn)
+    except Exception:
+        pass
+    _HERO_IMG_CACHE["index"] = idx
+    return idx
+
+
+@app.route("/hero-img/<path:name>")
+def serve_hero_img(name):
+    """ส่งรูปตัวละครตามชื่อ เช่น /hero-img/Kafka -> img/ranger/Kafka.png"""
+    folder = _hero_img_dir()
+    if not folder:
+        return ("", 404)
+    stem = os.path.splitext(os.path.basename(name))[0].strip()   # basename กัน path traversal
+    if not stem:
+        return ("", 404)
+    fn = _hero_img_index(folder).get(stem.lower())
+    if not fn:
+        return ("", 404)
+    full = os.path.join(folder, fn)
+    if not os.path.isfile(full):
+        return ("", 404)
+    resp = make_response(send_file(full))
+    resp.headers["Cache-Control"] = "public, max-age=86400"   # รูปแทบไม่เปลี่ยน ให้ browser cache ไว้
+    return resp
+
+
+@app.route("/hero-img-list")
+def serve_hero_img_list():
+    """บอกว่ามีรูปตัวไหนบ้าง (ไว้เช็คตอนตั้งค่า)"""
+    folder = _hero_img_dir()
+    if not folder:
+        return jsonify({"folder": None, "names": []})
+    return jsonify({"folder": folder, "names": sorted(_hero_img_index(folder).values())})
+
+
 @app.route("/agent.py")
 def serve_agent_py():
     """ให้เครื่องลูกดาวน์โหลด agent.py ตัวล่าสุดจาก server ได้ตรงๆ"""
@@ -1049,8 +1123,22 @@ WEB_UI_HTML = r"""
     flex-direction: column;
     gap: 4px;
     min-height: 62px;
+    position: relative;
     transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   }
+  /* รูปตัวละครมุมขวาบน — combo หลายตัวจะซ้อนกันแบบไพ่ ไม่กินที่ */
+  .hero-imgs { position: absolute; top: 7px; right: 8px; display: flex; pointer-events: none; }
+  .hero-img {
+    width: 22px; height: 22px; object-fit: cover; border-radius: 50%;
+    border: 1px solid var(--border); background: var(--bg-secondary);
+    margin-left: -7px; box-shadow: 0 1px 4px rgba(0,0,0,.45);
+  }
+  .hero-img:first-child { margin-left: 0; }
+  .hero-img.more {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; color: var(--text-secondary);
+  }
+  .hero-card.with-img .hero-name { padding-right: 58px; }
   .hero-card:hover {
     border-color: var(--accent);
     transform: translateY(-2px);
@@ -1838,7 +1926,8 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
   })).sort((a, b) => (b.main - a.main) || b.count - a.count || a.name.localeCompare(b.name));
 
   const nameCards = names.length ? names.map(n => `
-    <div class="hero-card rg-card${n.main ? ' main-name' : ''}" data-name="${escHtml(n.name)}">
+    <div class="hero-card rg-card with-img${n.main ? ' main-name' : ''}" data-name="${escHtml(n.name)}">
+      ${heroImgs(n.name)}
       <div class="hero-name" title="${escHtml(n.name)}">${escHtml(n.name)}</div>
       <div class="hero-count">${n.count.toLocaleString()}</div>
       <div class="hero-sub">${n.combos} แบบ</div>
@@ -1846,7 +1935,8 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
 
   const comboCards = combos.length ? combos.map(c => {
     const parts = c.name.split('+').filter(Boolean);
-    return `<div class="hero-card rg-card${parts.length > 1 ? ' combo' : ''}" data-name="${escHtml(c.name)}">
+    return `<div class="hero-card rg-card with-img${parts.length > 1 ? ' combo' : ''}" data-name="${escHtml(c.name)}">
+      ${heroImgs(c.name)}
       <div class="hero-name" title="${escHtml(c.name)}">${escHtml(c.name)}</div>
       <div class="hero-count">${c.count.toLocaleString()}</div>
       <div class="hero-sub">${parts.length > 1 ? parts.length + ' ชื่อ/ไฟล์' : 'ชื่อเดียว'}</div>
@@ -1952,6 +2042,22 @@ async function openRangerFindDashboard(useCache) {
 
   _rfCache = { groupCombos, groupFiles, perAgent, machines: agents.length, onlineCount };
   renderRangerFind(_rfCache);
+}
+
+// รูปตัวละครตามชื่อ combo — "anya+kappa+radish" ได้ 3 รูปเรียงซ้อนกัน
+// ชื่อไหนไม่มีรูป (เช่นชื่อเกียร์) <img> จะลบตัวเองทิ้ง ไม่ขึ้นไอคอนรูปแตก
+function heroImgs(comboName) {
+  const parts = String(comboName || '').split('+').map(s => s.trim()).filter(Boolean);
+  if (!parts.length) return '';
+  // โชว์ได้มากสุด 3 วง เกินกว่านั้นใส่ +N แทน ไม่งั้นรูปกินที่จนชื่อถูกทับ
+  const MAX = 3;
+  const shown = parts.length > MAX ? parts.slice(0, MAX - 1) : parts;
+  const extra = parts.length - shown.length;
+  const imgs = shown.map(p =>
+    `<img class="hero-img" src="/hero-img/${encodeURIComponent(p)}" alt="" loading="lazy"
+          title="${escAttr(p)}" onerror="this.remove()">`).join('');
+  const more = extra ? `<span class="hero-img more" title="${escAttr(parts.join(' + '))}">+${extra}</span>` : '';
+  return `<div class="hero-imgs" title="${escAttr(parts.join(' + '))}">${imgs}${more}</div>`;
 }
 
 function rfGroupLabel(g) { return '📁 ' + g; }
@@ -2066,7 +2172,8 @@ function renderRangerFind(data) {
   }).join('');
 
   const nameCards = names.length ? names.map(n => `
-    <div class="hero-card rg-card${n.main ? ' main-name' : ''}" data-name="${escAttr(n.name)}">
+    <div class="hero-card rg-card with-img${n.main ? ' main-name' : ''}" data-name="${escAttr(n.name)}">
+      ${heroImgs(n.name)}
       <div class="hero-name" title="${escHtml(n.name)}">${escHtml(n.name)}</div>
       <div class="hero-count">${n.count.toLocaleString()}</div>
       <div class="hero-sub">${n.combos} แบบ</div>
@@ -2074,7 +2181,8 @@ function renderRangerFind(data) {
 
   const comboCards = combos.length ? combos.map(c => {
     const parts = c.name.split('+').filter(Boolean);
-    return `<div class="hero-card rg-card${parts.length > 1 ? ' combo' : ''}" data-name="${escAttr(c.name)}">
+    return `<div class="hero-card rg-card with-img${parts.length > 1 ? ' combo' : ''}" data-name="${escAttr(c.name)}">
+      ${heroImgs(c.name)}
       <div class="hero-name" title="${escHtml(c.name)}">${escHtml(c.name)}</div>
       <div class="hero-count">${c.count.toLocaleString()}</div>
       <div class="hero-sub">${parts.length > 1 ? parts.length + ' ชื่อ/ไฟล์' : 'ชื่อเดียว'}</div>
