@@ -504,6 +504,8 @@ WEB_UI_HTML = r"""
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
     position: sticky;
     top: 0;
     z-index: 100;
@@ -514,6 +516,8 @@ WEB_UI_HTML = r"""
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-shrink: 0;        /* ห้ามบีบชื่อจนตกบรรทัด — ให้แถวปุ่มตัดบรรทัดแทน */
+    white-space: nowrap;
   }
   .header h1 .icon { font-size: 24px; }
   .status-badge {
@@ -1181,19 +1185,121 @@ WEB_UI_HTML = r"""
     border-radius: 10px;
   }
 
-  /* ── RESPONSIVE ── */
-  @media (max-width: 768px) {
-    .main-layout { grid-template-columns: 1fr; }
+  /* ═══════════════ RESPONSIVE ═══════════════
+     กติกา: หน้าเว็บห้ามเลื่อนซ้าย-ขวา อะไรที่กว้างเกิน (ตาราง/แถบปุ่ม/breadcrumb)
+     ให้เลื่อนอยู่ในกล่องตัวเองแทน */
+  html, body { max-width: 100%; overflow-x: hidden; }
+  .content, .toolbar, .stat-row, .hero-grid, .machine-grid, .id-grid, .pc-grid, .mumu-grid { min-width: 0; }
+  .toolbar > * { min-width: 0; }
+  .file-table { width: 100%; }
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* แถบปุ่มบนหัวเว็บ: ปุ่มเยอะ พอจอแคบให้ตัดบรรทัดแทนล้นออกนอกจอ */
+  .header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; flex: 1 1 auto; }
+
+  /* จอกลาง — บีบ sidebar ให้เนื้อหาได้ที่มากขึ้น */
+  @media (max-width: 1400px) {
+    .main-layout { grid-template-columns: 240px 1fr; }
+    .header { padding: 14px 18px; }
+    .content { padding: 18px; }
+  }
+  @media (max-width: 1150px) {
+    .main-layout { grid-template-columns: 210px 1fr; }
+    .header { flex-wrap: wrap; gap: 10px; }
+    .header h1 { font-size: 18px; }
+    .header-actions { gap: 8px; }
+    .header-actions .btn { padding: 7px 11px; font-size: 12px; }
+    .dash-search { min-width: 160px; flex: 1; }
+    .stat-row { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .stat-tile { padding: 15px 16px; }
+    .stat-val { font-size: 26px; }
+  }
+
+  /* แท็บเล็ต — sidebar ย้ายขึ้นบนเป็นแถบแนวนอน */
+  @media (max-width: 900px) {
+    .main-layout { grid-template-columns: 1fr; min-height: auto; }
     .sidebar {
       border-right: none;
       border-bottom: 1px solid var(--border);
-      display: flex;
-      gap: 8px;
       padding: 12px;
-      overflow-x: auto;
+      max-height: 46vh;
+      overflow-y: auto;
     }
+    /* การ์ดเครื่องอยู่ใน #agentList — ต้องทำ flex ที่ตัวนี้ ไม่ใช่ที่ .sidebar
+       ไม่งั้น .sidebar มีลูกแค่ตัวเดียว การ์ดเลยเรียงลงล่างเป็นคอลัมน์เดียวเหลือที่ว่างข้างขวา */
+    #agentList { display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; }
     .sidebar-title { display: none; }
-    .agent-card { min-width: 160px; margin-bottom: 0; }
+    .agent-card { min-width: 150px; flex: 1 1 190px; max-width: 320px; margin-bottom: 0; padding: 10px 12px; }
+    .agent-card h3 { font-size: 13px; }
+    .agent-card .meta { font-size: 10px; }
+    /* ตัวแบ่งหน้าต้องกินเต็มบรรทัด ไม่งั้นโดนบีบอยู่ข้างการ์ด */
+    .agent-pager { width: 100%; flex: 1 0 100%; margin-bottom: 4px; padding-bottom: 8px; }
+    .no-agents { flex: 1 0 100%; }
+    /* ซูมเครื่องเดียวใน Live View — เผื่อความสูงให้พอดีจอเตี้ย */
+    .pc-grid.single .pc-shot { height: calc(100vh - 300px); min-height: 220px; }
+  }
+
+  /* มือถือ */
+  @media (max-width: 620px) {
+    .header { padding: 12px 14px; }
+    .header h1 { font-size: 16px; gap: 6px; }
+    .header h1 .icon { font-size: 20px; }
+    .header-actions { width: 100%; justify-content: flex-start; }
+    .header-actions .btn { padding: 7px 10px; font-size: 11px; }
+    .content { padding: 14px 12px; }
+    .sidebar { max-height: 40vh; }
+    .agent-card { min-width: 0; flex: 1 1 145px; max-width: none; }
+
+    .toolbar { gap: 8px; }
+    .toolbar h2 { font-size: 16px !important; width: 100%; }
+    .toolbar .btn, .toolbar .project-select { flex: 1 1 auto; justify-content: center; }
+    .dash-search { min-width: 0; width: 100%; flex: 1 0 100%; }
+    .breadcrumb { flex: 1 0 100%; font-size: 12px; padding: 7px 10px; }
+    .select-n { flex: 1 1 100%; }
+    .select-n input { flex: 1; width: auto; }
+
+    .stat-row { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 18px; }
+    .stat-tile { padding: 12px 13px; border-radius: 12px; }
+    .stat-label { font-size: 10px; }
+    .stat-val { font-size: 21px; }
+
+    .hero-grid { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 7px; }
+    .hero-count { font-size: 18px; }
+    .machine-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+    .mid-count { font-size: 28px; }
+    .id-grid { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); }
+    .mumu-grid { grid-template-columns: 1fr; }
+    .pc-grid { grid-template-columns: 1fr; }
+    .pc-grid.single .pc-shot { height: auto; aspect-ratio: 16/9; min-height: 0; }
+
+    /* ตารางไฟล์: ซ่อนคอลัมน์รอง เหลือ ชื่อ + ปุ่ม ให้อ่านง่ายบนจอแคบ */
+    .file-table th:nth-child(3), .file-table td:nth-child(3),
+    .file-table th:nth-child(4), .file-table td:nth-child(4) { display: none; }
+    .file-table th, .file-table td { padding: 9px 8px; font-size: 12px; }
+    .file-table th:nth-child(2) { width: auto; }
+    .file-name { word-break: break-word; }
+    .file-actions .btn { padding: 4px 7px; }
+
+    /* แถวสรุปรายเครื่อง: ชื่อกับตัวเลขคนละบรรทัด ไม่เบียดกัน */
+    .agent-stat { flex-direction: column; align-items: flex-start; gap: 5px; padding: 10px 12px; font-size: 12px; }
+
+    .modal { min-width: 0; width: 100%; padding: 20px 18px; border-radius: 14px; }
+    .modal-buttons { flex-wrap: wrap; }
+    .modal-buttons .btn { flex: 1 1 auto; justify-content: center; }
+    .upload-zone { padding: 26px 16px; }
+    .upload-zone .icon { font-size: 32px; }
+    .toast-container { left: 12px; right: 12px; bottom: 12px; }
+    .toast { width: auto; }
+  }
+
+  /* modal ต้องไม่ล้นจอเตี้ย/แคบ ไม่ว่าจะ breakpoint ไหน */
+  .modal-overlay { padding: 16px; }
+  .modal { max-height: calc(100vh - 32px); overflow-y: auto; }
+
+  /* จอสัมผัสไม่มี hover — ปุ่มที่ซ่อนรอ hover จะกดไม่ได้เลย ต้องโชว์ค้างไว้ */
+  @media (hover: none), (pointer: coarse), (max-width: 620px) {
+    .file-actions { opacity: 1; }
+    .agent-card .power-btn { opacity: 1; }
   }
 </style>
 </head>
@@ -1206,13 +1312,13 @@ WEB_UI_HTML = r"""
     Remote File Manager
     <span style="font-size:11px; font-weight:400; color:var(--text-dim); margin-left:10px" title="เวลาที่โค้ด server ถูกอัปเดตล่าสุด — ใช้เช็กว่า deploy โค้ดใหม่สำเร็จหรือยัง">build __APP_BUILD__</span>
   </h1>
-  <div style="display:flex; align-items:center; gap:12px">
+  <div class="header-actions">
     <button class="btn" onclick="openDashboard()">⚽ Dashboard PES</button>
     <button class="btn" onclick="openBackupDashboard()">🗄️ Dashboard Backup</button>
     <button class="btn" onclick="openInputIdDashboard()">📥 input-id รายเครื่อง</button>
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <button class="btn" onclick="openRangerDashboard()">🏹 Dashboard Line Ranger</button>
-    <button class="btn" onclick="openRangerFindDashboard()">🔎 หาตัว Line Ranger</button>
+    <button class="btn" onclick="openRangerFindDashboard()">🔎 Line Ranger-Find</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
     <button class="btn" onclick="openBroadcastBackup()">💾 ส่งเข้า backup (ทุกเครื่อง)</button>
     <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
@@ -1785,7 +1891,7 @@ async function openRangerFindDashboard(useCache) {
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">🔎 หาตัว Line Ranger — ${RANGER_CFG.label}</h2>
+      <h2 style="flex:1; font-size:18px">🔎 Line Ranger-Find — ${RANGER_CFG.label}</h2>
       <button class="btn btn-primary">🔄 รีเฟรช</button>
     </div>
     <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
@@ -1916,7 +2022,7 @@ function renderRangerFind(data) {
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">🔎 หาตัว Line Ranger</h2>
+      <h2 style="flex:1; font-size:18px">🔎 Line Ranger-Find</h2>
       <select class="btn project-select" onchange="_rfGroup=this.value; openRangerFindDashboard(true)" title="เลือกชุด (โฟลเดอร์ย่อยใน backup-id)">${groupOpts}</select>
       ${pcSelectHtml(_rfScope, '_rfScope=this.value; openRangerFindDashboard()')}
       <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อ / combo..." oninput="filterRangerCards(this.value)">
@@ -2947,6 +3053,7 @@ function renderFiles(files, path) {
       <span class="file-count sel-chip" id="selChip" style="display:none" title="จำนวนไฟล์ที่เลือกอยู่">✅ เลือก <b>0</b> ไฟล์</span>
     </div>
     ${files.length === 0 ? '<div class="empty-state"><div class="icon">📭</div><h3>โฟลเดอร์ว่าง</h3></div>' : `
+    <div class="table-scroll">
     <table class="file-table">
       <thead>
         <tr>
@@ -2982,6 +3089,7 @@ function renderFiles(files, path) {
         `).join('')}
       </tbody>
     </table>
+    </div>
     `}
   `;
   updateSelectedCount();
