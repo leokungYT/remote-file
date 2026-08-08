@@ -1139,6 +1139,24 @@ WEB_UI_HTML = r"""
     font-size: 10px; font-weight: 700; color: var(--text-secondary);
   }
   .hero-card.with-img .hero-name { padding-right: 58px; }
+
+  /* การ์ดใหญ่ — ชื่อ combo ยาวๆ จะได้ไม่โดนตัดเหลือ "kappa+kukuru+..." */
+  .hero-grid.big { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 11px; }
+  .hero-grid.big .hero-card { min-height: 86px; padding: 12px 14px; }
+  .hero-grid.big .hero-name { font-size: 13px; -webkit-line-clamp: 3; }
+  .hero-grid.big .hero-count { font-size: 25px; }
+  .hero-grid.big .hero-img { width: 25px; height: 25px; }
+  .hero-grid.big .hero-card.with-img .hero-name { padding-right: 64px; }
+  @media (max-width: 620px) {
+    .hero-grid.big { grid-template-columns: repeat(auto-fill, minmax(152px, 1fr)); gap: 8px; }
+    .hero-grid.big .hero-count { font-size: 20px; }
+  }
+
+  /* ตัวแบ่งหน้าของ grid การ์ด */
+  .grid-pager { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin: 0 0 10px; }
+  .grid-pager .btn { padding: 5px 10px; font-size: 12px; min-width: 30px; }
+  .grid-pager .btn.active { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 700; }
+  .grid-pager .gp-info { font-size: 12px; color: var(--text-dim); margin-left: auto; }
   .hero-card:hover {
     border-color: var(--accent);
     transform: translateY(-2px);
@@ -2100,6 +2118,39 @@ function rfComboPass(comboName) {
   return comboName.split('+').some(p => _rfPick.has(p.trim()));
 }
 
+// ── แบ่งหน้าการ์ด combo (ข้อมูลเยอะ เลื่อนยาวไม่ไหว) ──
+const RF_PER_PAGE = 40;
+let _rfComboPage = 0;
+let _rfQ = '';                 // คำค้นจากช่องค้นหาบนแถบเครื่องมือ
+
+function rfGoComboPage(p) { _rfComboPage = Math.max(0, p); openRangerFindDashboard(true); }
+function rfSetQuery(v) {
+  _rfQ = (v || '').trim().toLowerCase();
+  _rfComboPage = 0;
+  openRangerFindDashboard(true);
+}
+
+// แถบเลขหน้า: ‹ 1 2 3 › + บอกช่วงที่กำลังดู
+function gridPagerHtml(page, totalPages, total, perPage, fnName) {
+  if (totalPages <= 1) return '';
+  let nums = '';
+  const win = 9;                                    // โชว์ปุ่มเลขทีละ 9 หน้า กันปุ่มล้นตอนหน้าเยอะ
+  let from = Math.max(0, Math.min(page - Math.floor(win / 2), totalPages - win));
+  let to = Math.min(totalPages, from + win);
+  if (from > 0) nums += `<button class="btn" onclick="${fnName}(0)">1</button><span style="color:var(--text-dim)">…</span>`;
+  for (let i = from; i < to; i++) {
+    nums += `<button class="btn${i === page ? ' active' : ''}" onclick="${fnName}(${i})">${i + 1}</button>`;
+  }
+  if (to < totalPages) nums += `<span style="color:var(--text-dim)">…</span><button class="btn" onclick="${fnName}(${totalPages - 1})">${totalPages}</button>`;
+  const a = page * perPage + 1, b = Math.min((page + 1) * perPage, total);
+  return `<div class="grid-pager">
+    <button class="btn" onclick="${fnName}(${page - 1})" ${page === 0 ? 'disabled' : ''}>‹ ก่อนหน้า</button>
+    ${nums}
+    <button class="btn" onclick="${fnName}(${page + 1})" ${page >= totalPages - 1 ? 'disabled' : ''}>ถัดไป ›</button>
+    <span class="gp-info">${a}-${b} / ${total}</span>
+  </div>`;
+}
+
 function renderRangerFind(data) {
   const { groupCombos, groupFiles, perAgent, machines, onlineCount } = data;
   const content = document.getElementById('contentArea');
@@ -2132,7 +2183,9 @@ function renderRangerFind(data) {
     const src = groupCombos[g] || {};
     for (const k in src) if (rfComboPass(k)) combosMap[k] = (combosMap[k] || 0) + src[k];
   });
-  const combos = Object.keys(combosMap).map(k => ({ name: k, count: combosMap[k] }))
+  const combos = Object.keys(combosMap)
+    .filter(k => !_rfQ || k.toLowerCase().includes(_rfQ))     // ช่องค้นหาบนแถบเครื่องมือ
+    .map(k => ({ name: k, count: combosMap[k] }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 
   // รวมรายชื่อภายในชุดที่เลือก
@@ -2179,7 +2232,13 @@ function renderRangerFind(data) {
       <div class="hero-sub">${n.combos} แบบ</div>
     </div>`).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ชุดนี้ยังไม่มีชื่อฮีโร่</h3></div>';
 
-  const comboCards = combos.length ? combos.map(c => {
+  // แบ่งหน้า: ตัดเฉพาะการ์ดของหน้าปัจจุบันมาวาด
+  const comboPages = Math.max(1, Math.ceil(combos.length / RF_PER_PAGE));
+  if (_rfComboPage >= comboPages) _rfComboPage = comboPages - 1;
+  const comboSlice = combos.slice(_rfComboPage * RF_PER_PAGE, (_rfComboPage + 1) * RF_PER_PAGE);
+  const comboPager = gridPagerHtml(_rfComboPage, comboPages, combos.length, RF_PER_PAGE, 'rfGoComboPage');
+
+  const comboCards = comboSlice.length ? comboSlice.map(c => {
     const parts = c.name.split('+').filter(Boolean);
     return `<div class="hero-card rg-card with-img${parts.length > 1 ? ' combo' : ''}" data-name="${escAttr(c.name)}">
       ${heroImgs(c.name)}
@@ -2187,7 +2246,7 @@ function renderRangerFind(data) {
       <div class="hero-count">${c.count.toLocaleString()}</div>
       <div class="hero-sub">${parts.length > 1 ? parts.length + ' ชื่อ/ไฟล์' : 'ชื่อเดียว'}</div>
     </div>`;
-  }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ที่มีชื่อฮีโร่</h3></div>';
+  }).join('') : `<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>${_rfQ ? 'ไม่พบ combo ที่ตรงกับคำค้น' : 'ไม่พบไฟล์ที่มีชื่อฮีโร่'}</h3></div>`;
 
   // กล่องติ๊กเลือกชื่อตัว — รายการมาจากชื่อที่เจอจริงในข้อมูล เรียงตามจำนวนมาก→น้อย
   const pickChips = allNames.map(n => `
@@ -2199,7 +2258,7 @@ function renderRangerFind(data) {
     <div class="pick-panel">
       <div class="pick-head">
         <span class="pick-title">🎯 เลือกตัวที่จะแสดง ${_rfPick.size ? '<span style="color:var(--success)">(เลือกอยู่ ' + _rfPick.size + '/' + allNames.length + ')</span>' : '<span style="color:var(--text-dim)">(ไม่ได้เลือก = แสดงทั้งหมด ' + allNames.length + ' ตัว)</span>'}</span>
-        <input type="text" class="dash-search" style="min-width:170px; padding:6px 12px" placeholder="🔍 ค้นหาชื่อในรายการ" oninput="rfSetPickQ(this.value)">
+        <input type="text" class="dash-search" style="min-width:170px; padding:6px 12px" placeholder="🔍 ค้นหาชื่อในรายการ" value="${escAttr(_rfPickQ)}" oninput="rfSetPickQ(this.value)">
         <button class="btn" onclick="rfPickAllNames()">เลือกทั้งหมด</button>
         <button class="btn" onclick="rfClearPick()">ล้างตัวกรอง</button>
       </div>
@@ -2228,7 +2287,8 @@ function renderRangerFind(data) {
       <h2 style="flex:1; font-size:18px">🔎 Line Ranger-Find</h2>
       <select class="btn project-select" onchange="_rfGroup=this.value; openRangerFindDashboard(true)" title="เลือกชุด (โฟลเดอร์ย่อยใน backup-id)">${groupOpts}</select>
       ${pcSelectHtml(_rfScope, '_rfScope=this.value; openRangerFindDashboard()')}
-      <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อ / combo..." oninput="filterRangerCards(this.value)">
+      <input type="text" class="dash-search" id="rfSearch" placeholder="🔍 ค้นหาชื่อ / combo..." value="${escAttr(_rfQ)}"
+             oninput="rfSetQuery(this.value)">
       <button class="btn btn-primary" onclick="openRangerFindDashboard()">🔄 รีเฟรช</button>
     </div>
     ${legacy ? '<div style="margin-bottom:12px; padding:10px 14px; border-radius:8px; border:1px solid rgba(245,158,11,.4); background:rgba(245,158,11,.08); color:var(--warning); font-size:13px">⚠️ บางเครื่องยังเป็น agent เวอร์ชันเก่า ยังไม่ส่งข้อมูลแยกชุดมา — ของเครื่องนั้นจะถูกรวมไว้ใน "ชั้นนอก" ให้กด self-update agent ก่อน</div>' : ''}
@@ -2244,13 +2304,21 @@ function renderRangerFind(data) {
     <div class="hero-grid">${groupCards || '<div style="color:var(--text-dim); font-size:13px">ยังไม่มีโฟลเดอร์ย่อย</div>'}</div>
     ${pickPanel}
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ${_rfGroup === 'ALL' ? 'ทุกชุดรวมกัน' : 'เฉพาะชุด ' + escHtml(_rfGroup)}${_rfPick.size ? ' <span style="color:var(--success)">· กรองอยู่ ' + _rfPick.size + ' ตัว</span>' : ''}</h3>
-    <div class="hero-grid">${nameCards}</div>
+    <div class="hero-grid big">${nameCards}</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">แยกตามโฟลเดอร์ (combo) — 1 ไฟล์ในโฟลเดอร์ = 1 id · โฟลเดอร์ที่มี 2 ชื่อนับเป็นชุดเดียว เช่น kikoru+Kafka</h3>
-    <div class="hero-grid">${comboCards}</div>
-    <div id="rangerNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
+    ${comboPager}
+    <div class="hero-grid big">${comboCards}</div>
+    ${combos.length > RF_PER_PAGE ? comboPager : ''}
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — จำนวนไฟล์แต่ละชุด</h3>
     <div class="agent-stats">${agentRows}</div>
   `;
+
+  // พิมพ์ค้นหาแล้วหน้าถูกวาดใหม่ ช่องค้นหาจะเสียโฟกัส ต้องคืนโฟกัส+ตำแหน่งเคอร์เซอร์ให้พิมพ์ต่อได้
+  if (_rfQ) {
+    const box = document.getElementById('rfSearch');
+    if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+  }
+  if (_rfPickQ) rfSetPickQ(_rfPickQ);   // คงคำค้นในกล่องติ๊กไว้หลังวาดใหม่
 }
 
 function filterRangerCards(q) {
