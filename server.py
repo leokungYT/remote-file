@@ -853,9 +853,18 @@ WEB_UI_HTML = r"""
   /* ── LIVE VIEW / PC MONITOR ── */
   .pc-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
   }
+  /* จอกว้าง = 5 คอลัมน์ → 10 จอพอดี 2 แถวเต็มความกว้าง (ไม่เหลือที่ว่างข้างขวา)
+     .pc-grid.single มี 2 class เลย specificity สูงกว่า ทับ media query ตอนซูมเครื่องเดียวได้เอง */
+  @media (min-width: 1600px) { .pc-grid { grid-template-columns: repeat(5, 1fr); } }
+  @media (min-width: 1150px) and (max-width: 1599px) { .pc-grid { grid-template-columns: repeat(4, 1fr); } }
+  @media (min-width: 820px) and (max-width: 1149px) { .pc-grid { grid-template-columns: repeat(3, 1fr); } }
+  /* ปุ่มเลือกหน้าบนแถบบน — จะได้ไม่ต้องเลื่อนลงไปกดข้างล่างตอนเครื่องเยอะ */
+  .live-pages { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .live-page-btn { padding: 6px 11px; font-size: 12px; min-width: 34px; }
+  .live-page-btn.active { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 700; }
   /* zoom เครื่องเดียว: จัดกึ่งกลาง + จำกัดความกว้าง ให้ภาพพอดีความสูงจอ ไม่ต้องเลื่อน */
   .pc-grid.single { grid-template-columns: 1fr; max-width: 1500px; margin: 0 auto; }
   .pc-grid.single .pc-shot { aspect-ratio: auto; height: calc(100vh - 240px); min-height: 300px; }
@@ -2347,7 +2356,7 @@ async function updateSelectedAgents() {
 let liveScope = 'ALL';
 let livePage = 0;
 let liveGen = 0;              // generation กันมี loop ซ้อนกัน
-const LIVE_PAGE_SIZE = 6;
+const LIVE_PAGE_SIZE = 10;
 
 function liveFilteredAgents() {
   const all = agentsData || [];
@@ -2396,18 +2405,54 @@ function renderLiveView() {
     </div>`;
   }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">🖥️</div><h3>No PCs found</h3><p>ยังไม่มีเครื่องลูกออนไลน์</p></div>';
 
+  // ตอนซูมเครื่องเดียว ‹ › ให้เดินไปเครื่องถัดไป (เมื่อก่อนมันเทาค้างเพราะมีหน้าเดียว กดไม่ได้)
+  const zoomed = liveScope !== 'ALL';
+  const zi = zoomed ? (agentsData || []).findIndex(a => a.agent_id === liveScope) : -1;
+  const zTotal = (agentsData || []).length;
+  const pager = zoomed
+    ? `<button class="btn" onclick="liveStepPc(-1)" ${zTotal < 2 ? 'disabled' : ''}>‹</button>
+       <span>PC ${zi + 1} of ${zTotal}</span>
+       <button class="btn" onclick="liveStepPc(1)" ${zTotal < 2 ? 'disabled' : ''}>›</button>`
+    : `<button class="btn" onclick="liveGoPage(livePage-1)" ${livePage === 0 ? 'disabled' : ''}>‹</button>
+       <span>Page ${livePage + 1} of ${totalPages}</span>
+       <button class="btn" onclick="liveGoPage(livePage+1)" ${livePage >= totalPages - 1 ? 'disabled' : ''}>›</button>`;
+
   content.innerHTML = `
     <div class="toolbar">
       <h2 style="flex:1; font-size:18px">🖥️ PC Monitor — Live View
-        <span style="color:var(--text-dim); font-weight:400; font-size:13px">(${all.length} PCs)</span></h2>
+        <span style="color:var(--text-dim); font-weight:400; font-size:13px">(${all.length} PCs${zoomed ? '' : ` · ${LIVE_PAGE_SIZE}/หน้า`})</span></h2>
+      ${livePagerButtons(totalPages, zoomed)}
       <select class="btn project-select" onchange="liveScope=this.value; livePage=0; renderLiveView()">${options}</select>
     </div>
-    <div class="pc-grid${liveScope !== 'ALL' ? ' single' : ''}" id="pcGrid">${cards}</div>
-    <div class="pc-pager">
-      <button class="btn" onclick="livePage=Math.max(0,livePage-1); renderLiveView()" ${livePage === 0 ? 'disabled' : ''}>‹</button>
-      <span>Page ${livePage + 1} of ${totalPages}</span>
-      <button class="btn" onclick="livePage=Math.min(${totalPages - 1},livePage+1); renderLiveView()" ${livePage >= totalPages - 1 ? 'disabled' : ''}>›</button>
-    </div>`;
+    <div class="pc-grid${zoomed ? ' single' : ''}" id="pcGrid">${cards}</div>
+    <div class="pc-pager">${pager}</div>`;
+}
+
+// ปุ่มเลขหน้าบนแถบบนขวา — กดกระโดดหน้าได้เลย ไม่ต้องเลื่อนลงไปหาปุ่มข้างล่าง
+function livePagerButtons(totalPages, zoomed) {
+  if (zoomed || totalPages <= 1) return '';
+  let btns = '';
+  for (let i = 0; i < totalPages; i++) {
+    btns += `<button class="btn live-page-btn${i === livePage ? ' active' : ''}"
+              onclick="liveGoPage(${i})" title="หน้า ${i + 1}">${i + 1}</button>`;
+  }
+  return `<div class="live-pages">${btns}</div>`;
+}
+
+function liveGoPage(p) {
+  const totalPages = Math.max(1, Math.ceil(liveFilteredAgents().length / LIVE_PAGE_SIZE));
+  livePage = Math.min(Math.max(0, p), totalPages - 1);
+  renderLiveView();
+}
+
+// เดินไปเครื่องก่อนหน้า/ถัดไปตอนซูมอยู่ (วนกลับต้นเมื่อสุดทาง)
+function liveStepPc(delta) {
+  const all = agentsData || [];
+  if (all.length < 2) return;
+  const i = all.findIndex(a => a.agent_id === liveScope);
+  if (i < 0) return;
+  liveScope = all[(i + delta + all.length) % all.length].agent_id;
+  renderLiveView();
 }
 
 function liveToggleZoom(aid) {
