@@ -498,6 +498,7 @@ def handle_download(req_id, data):
     client = _current_client()
     if client is None:
         logger.warning("ไม่มี client ปัจจุบัน — ส่งไฟล์ไม่ได้")
+        send_response(req_id, {"error": "agent ไม่ได้เชื่อมต่อ server อยู่"})
         return
 
     try:
@@ -510,7 +511,12 @@ def handle_download(req_id, data):
                 chunk = f.read(CHUNK_SIZE)
                 if not chunk:
                     break
-                is_last = f.tell() >= file_size
+                # อ่านล่วงหน้า 1 ไบต์เพื่อรู้ว่าหมดไฟล์จริงไหม (ไฟล์อาจโตขึ้นระหว่างอ่าน
+                # แล้ว f.tell() >= file_size จะไม่มีวันจริง → ไม่มี chunk ไหนถูกมาร์ก is_last
+                # → ฝั่งเว็บรอจน timeout)
+                pos = f.tell()
+                is_last = not f.read(1)
+                f.seek(pos)
 
                 client.emit("file_chunk", {
                     "request_id": req_id,
@@ -521,6 +527,15 @@ def handle_download(req_id, data):
                 })
                 chunk_index += 1
                 time.sleep(0.01)  # ป้องกัน overwhelm
+
+            # ไฟล์ขนาด 0 ไบต์: ลูปข้างบนไม่ส่ง chunk เลย ฝั่งเว็บเลยไม่เคยได้ is_last
+            # ต้องส่ง chunk ว่างปิดท้ายให้ ไม่งั้นค้างรอจนหมดเวลา
+            if chunk_index == 0:
+                client.emit("file_chunk", {
+                    "request_id": req_id, "data": "", "chunk_index": 0,
+                    "is_last": True, "total_size": 0,
+                })
+                chunk_index = 1
 
         logger.info(f"  File sent: {chunk_index} chunks")
 

@@ -2860,15 +2860,18 @@ function downloadFile(filePath, fileName) {
         socket.off('file_chunk_' + data.request_id);
         return;
       }
-      chunks.push(chunk.data);
+      // ถอดทีละ chunk (ห้าม join ก่อน — base64 ของแต่ละ chunk มี '=' ปิดท้าย ต่อกันแล้ว atob พัง)
+      try {
+        chunks.push(b64ToBytes(chunk.data));
+      } catch (e) {
+        socket.off('file_chunk_' + data.request_id);
+        toast('ดาวน์โหลดล้มเหลว: ถอดรหัสไฟล์ไม่ได้', 'error');
+        return;
+      }
 
       if (chunk.is_last) {
         socket.off('file_chunk_' + data.request_id);
-        // Combine and download
-        const combined = chunks.join('');
-        const bytes = atob(combined);
-        const arr = new Uint8Array(bytes.length);
-        for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+        const arr = concatBytes(chunks);
         const blob = new Blob([arr]);
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -3334,6 +3337,23 @@ function bytesToBase64(bytes) {
   return btoa(bin);
 }
 
+// ── ถอด base64 หนึ่ง chunk เป็น bytes ──
+function b64ToBytes(b64) {
+  const bin = atob(b64 || '');
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}
+// ── ต่อ Uint8Array หลายก้อนเป็นก้อนเดียว ──
+function concatBytes(parts) {
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.length; }
+  return out;
+}
+
 // ดึง bytes ของไฟล์จากเครื่องที่ระบุ (เรียกทีละไฟล์เท่านั้น)
 function fetchFileBytesFrom(agentId, filePath) {
   return new Promise((resolve, reject) => {
@@ -3344,13 +3364,18 @@ function fetchFileBytesFrom(agentId, filePath) {
       let chunks = [];
       const onChunk = (chunk) => {
         if (chunk.error) { socket.off('file_chunk_' + rid, onChunk); finish(reject, new Error(chunk.error)); return; }
-        chunks.push(chunk.data);
+        // ต้องถอด base64 ทีละ chunk — ห้าม join ก่อน เพราะ CHUNK_SIZE (512KB) ไม่หารด้วย 3 ลงตัว
+        // แต่ละ chunk เลยมี '=' ปิดท้าย พอต่อกันจะกลายเป็น base64 ที่มี '=' อยู่กลาง = atob พัง
+        try {
+          chunks.push(b64ToBytes(chunk.data));
+        } catch (e) {
+          socket.off('file_chunk_' + rid, onChunk);
+          finish(reject, new Error('ถอดรหัสไฟล์ไม่ได้: ' + (e.message || e)));
+          return;
+        }
         if (chunk.is_last) {
           socket.off('file_chunk_' + rid, onChunk);
-          const bin = atob(chunks.join(''));
-          const arr = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-          finish(resolve, arr);
+          finish(resolve, concatBytes(chunks));
         }
       };
       socket.on('file_chunk_' + rid, onChunk);
