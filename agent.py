@@ -901,6 +901,9 @@ def handle_count_prefix_ids(req_id, data):
     subpath = data.get("subpath", "backup-id")
     match = (data.get("base_match") or "").strip().lower()
     exts = [str(e).lower() for e in (data.get("exts") or []) if str(e).strip()]
+    # by="filename" (ค่าเริ่มต้น) อ่านชื่อตัวจาก prefix หน้าชื่อไฟล์
+    # by="folder"   อ่านชื่อตัวจากชื่อโฟลเดอร์ที่อยู่ใต้ชุด เช่น backup-id\ranger\kikoru+Kafka\*.xml
+    by_folder = str(data.get("by") or "filename").strip().lower() == "folder"
 
     base = _resolve_game_base(match)
     if base is None:
@@ -921,13 +924,20 @@ def handle_count_prefix_ids(req_id, data):
                 rel_dir = os.path.relpath(root, folder)
                 if rel_dir == ".":
                     rel_dir = ""
-                top = rel_dir.replace("\\", "/").split("/")[0] if rel_dir else ""
+                segs = [s for s in rel_dir.replace("\\", "/").split("/") if s] if rel_dir else []
+                top = segs[0] if segs else ""
+                # โหมด folder: ชื่อตัว = โฟลเดอร์ที่อยู่ใต้ชุดอีกชั้น (backup-id\<ชุด>\<ชื่อตัว>\ไฟล์)
+                dir_combo = None
+                if by_folder and len(segs) >= 2:
+                    parts = [p.strip() for p in segs[1].split("+") if p.strip()]
+                    if parts:
+                        dir_combo = "+".join(parts)
                 for fn in filenames:
                     if exts and os.path.splitext(fn)[1].lower() not in exts:
                         continue
                     total_files += 1
                     group_totals[top] = group_totals.get(top, 0) + 1
-                    combo = _prefix_combo(fn, rel_dir)
+                    combo = dir_combo if by_folder else _prefix_combo(fn, rel_dir)
                     if combo:
                         matched_files += 1
                         combos[combo] = combos.get(combo, 0) + 1

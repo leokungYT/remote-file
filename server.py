@@ -266,6 +266,7 @@ def handle_count_prefix_ids(data):
         "subpath": data.get("subpath", "backup-id"),
         "base_match": data.get("base_match", "main"),
         "exts": data.get("exts", []),
+        "by": data.get("by", "filename"),
     }, request.sid)
     if req_id:
         emit("request_sent", {"request_id": req_id})
@@ -1628,7 +1629,7 @@ const RANGER_CFG = { subpath: 'backup-id', base: 'main', label: 'backup-id' };
 let _rangerScope = 'ALL';
 
 // นับ id ในโฟลเดอร์ main/backup-id ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
-function countRangerOnAgent(agentId) {
+function countRangerOnAgent(agentId, by) {
   return new Promise((resolve) => {
     let settled = false;
     socket.once('request_sent', (data) => {
@@ -1636,7 +1637,8 @@ function countRangerOnAgent(agentId) {
       socket.once('response_' + rid, (resp) => { settled = true; resolve(resp || {}); });
     });
     socket.emit('request_count_prefix_ids', {
-      agent_id: agentId, subpath: RANGER_CFG.subpath, base_match: RANGER_CFG.base, exts: ['.xml'],
+      agent_id: agentId, subpath: RANGER_CFG.subpath, base_match: RANGER_CFG.base,
+      exts: ['.xml'], by: by || 'filename',
     });
     setTimeout(() => { if (!settled) resolve({ error: 'timeout' }); }, 20000);
   });
@@ -1800,29 +1802,32 @@ async function openRangerFindDashboard(useCache) {
 
   for (const a of agents) {
     const name = a.name || a.hostname || a.agent_id;
-    const res = await countRangerOnAgent(a.agent_id);
+    // 'folder' = อ่านชื่อตัวจากชื่อโฟลเดอร์ (backup-id\<ชุด>\<ชื่อตัว>\) ไม่ใช่จากชื่อไฟล์
+    const res = await countRangerOnAgent(a.agent_id, 'folder');
     if (!res || res.error) { perAgent.push({ name, error: String((res && res.error) || 'ไม่ตอบกลับ') }); continue; }
     onlineCount++;
+    // นับเฉพาะไฟล์ที่อยู่ในโฟลเดอร์ย่อย — ไฟล์ที่วางไว้ชั้นนอกของ backup-id ไม่เอา (key '')
     const gt = res.group_totals || {};
-    // agent เวอร์ชันเก่ายังไม่ส่ง groups มา → ยัดทุกอย่างเป็นชุดเดียวไปก่อน จะได้ไม่ว่างเปล่า
-    const gc = res.groups || { '': res.combos || {} };
+    const gc = res.groups || {};
+    const myGroups = {};
+    for (const g in gt) if (g !== '') myGroups[g] = gt[g];
     perAgent.push({
       name, total: res.total_files || 0, matched: res.matched_files || 0,
-      exists: res.exists, groups: Object.keys(gt).length ? gt : { '': res.total_files || 0 },
-      legacy: !res.groups,
+      exists: res.exists, groups: myGroups, legacy: !res.groups,
     });
     for (const g in gc) {
+      if (g === '') continue;
       const dst = groupCombos[g] || (groupCombos[g] = {});
       for (const k in gc[g]) dst[k] = (dst[k] || 0) + gc[g][k];
     }
-    for (const g in gt) groupFiles[g] = (groupFiles[g] || 0) + gt[g];
+    for (const g in gt) if (g !== '') groupFiles[g] = (groupFiles[g] || 0) + gt[g];
   }
 
   _rfCache = { groupCombos, groupFiles, perAgent, machines: agents.length, onlineCount };
   renderRangerFind(_rfCache);
 }
 
-function rfGroupLabel(g) { return g === '' ? '📄 ไฟล์ชั้นนอก (ไม่อยู่ในโฟลเดอร์ย่อย)' : '📁 ' + g; }
+function rfGroupLabel(g) { return '📁 ' + g; }
 function rfPickGroup(g) { _rfGroup = g; openRangerFindDashboard(true); }
 function rfShowAll() { _rfGroup = 'ALL'; openRangerFindDashboard(true); }
 
@@ -1832,12 +1837,7 @@ function renderRangerFind(data) {
 
   // รายชื่อชุดทั้งหมด เรียง ranger, ranger(2), ranger(3) ตามเลขในวงเล็บ
   const groupNames = Object.keys(groupFiles).length ? Object.keys(groupFiles) : Object.keys(groupCombos);
-  groupNames.sort((a, b) => {
-    if (a === '') return -1;
-    if (b === '') return 1;
-    const na = _numIn(a), nb = _numIn(b);
-    return na - nb || a.localeCompare(b);
-  });
+  groupNames.sort((a, b) => _numIn(a) - _numIn(b) || a.localeCompare(b));
   if (_rfGroup !== 'ALL' && !groupNames.includes(_rfGroup)) _rfGroup = 'ALL';
 
   // รวม combo ของชุดที่เลือก (ALL = รวมทุกชุด)
@@ -1875,7 +1875,7 @@ function renderRangerFind(data) {
     return `<div class="hero-card rf-group${on ? ' main-name' : ''}" style="cursor:pointer"
                  onclick="rfPickGroup('${escAttr(g)}')"
                  title="กดเพื่อดูเฉพาะชุดนี้">
-      <div class="hero-name">${escHtml(g === '' ? 'ชั้นนอก' : g)}</div>
+      <div class="hero-name">${escHtml(g)}</div>
       <div class="hero-count">${cnt.toLocaleString()}</div>
       <div class="hero-sub">${kinds} combo · ${(groupFiles[g] || 0).toLocaleString()} ไฟล์</div>
     </div>`;
@@ -1905,8 +1905,8 @@ function renderRangerFind(data) {
     else {
       const gs = Object.keys(p.groups || {});
       const detail = gs.length
-        ? gs.sort((a, b) => _numIn(a) - _numIn(b)).map(g => (g === '' ? 'ชั้นนอก' : g) + ' ' + p.groups[g]).join(' · ')
-        : '-';
+        ? gs.sort((a, b) => _numIn(a) - _numIn(b)).map(g => g + ' ' + p.groups[g]).join(' · ')
+        : '<span style="color:var(--text-dim)">ไม่มีโฟลเดอร์ย่อย</span>';
       right = '<span title="ไฟล์ที่มีชื่อฮีโร่"><b style="color:var(--success)">' + p.matched.toLocaleString() + '</b> id</span>'
             + '<span style="color:var(--text-dim); margin:0 10px">·</span>'
             + '<span style="color:var(--text-secondary)">🗂️ ' + escHtml(detail) + '</span>';
@@ -1935,7 +1935,7 @@ function renderRangerFind(data) {
     <div class="hero-grid">${groupCards || '<div style="color:var(--text-dim); font-size:13px">ยังไม่มีโฟลเดอร์ย่อย</div>'}</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ${_rfGroup === 'ALL' ? 'ทุกชุดรวมกัน' : 'เฉพาะชุด ' + escHtml(_rfGroup === '' ? 'ชั้นนอก' : _rfGroup)}</h3>
     <div class="hero-grid">${nameCards}</div>
-    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">แยกตามไฟล์ (combo) — ไฟล์ที่มี 2 ชื่อนับเป็นชุดเดียว เช่น kikoru+Kafka</h3>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">แยกตามโฟลเดอร์ (combo) — 1 ไฟล์ในโฟลเดอร์ = 1 id · โฟลเดอร์ที่มี 2 ชื่อนับเป็นชุดเดียว เช่น kikoru+Kafka</h3>
     <div class="hero-grid">${comboCards}</div>
     <div id="rangerNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — จำนวนไฟล์แต่ละชุด</h3>
