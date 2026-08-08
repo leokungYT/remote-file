@@ -557,6 +557,26 @@ WEB_UI_HTML = r"""
     position: relative;
   }
   .agent-card:hover { border-color: var(--accent); background: var(--bg-hover); }
+  /* ตัวแบ่งหน้าของ sidebar — เครื่องเยอะจะได้ไม่ต้องเลื่อนยาว */
+  .agent-pager {
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+    margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+  }
+  .agent-pager .btn { padding: 5px 9px; font-size: 11px; min-width: 28px; }
+  .agent-pager .btn.active { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 700; }
+  .agent-pager .ap-info { font-size: 11px; color: var(--text-dim); margin-left: auto; }
+  /* ป้ายบอกว่าโปรเจกต์ถูกล็อกไว้ใช้กับทุกเครื่อง */
+  .proj-lock {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px; border-radius: 8px; font-size: 12px; font-weight: 600;
+    border: 1px solid rgba(16,185,129,0.45); background: rgba(16,185,129,0.08); color: var(--success);
+    white-space: nowrap;
+  }
+  .proj-lock button {
+    background: none; border: none; color: var(--text-dim); cursor: pointer;
+    font-size: 13px; padding: 0 2px; line-height: 1;
+  }
+  .proj-lock button:hover { color: var(--danger); }
   .agent-card.active {
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent), 0 0 20px var(--accent-glow);
@@ -2565,6 +2585,34 @@ function sortAgents(list) {
   });
 }
 
+// ── แบ่งหน้ารายชื่อเครื่องใน sidebar (เครื่องเยอะแล้วเลื่อนหายาว) ──
+const AGENT_PAGE_SIZE = 12;
+let agentPage = 0;
+
+function agentTotalPages() {
+  return Math.max(1, Math.ceil((agentsData || []).length / AGENT_PAGE_SIZE));
+}
+function goAgentPage(p) {
+  agentPage = Math.min(Math.max(0, p), agentTotalPages() - 1);
+  renderAgents(agentsData);
+}
+function agentPagerHtml() {
+  const total = agentTotalPages();
+  if (total <= 1) return '';
+  let nums = '';
+  for (let i = 0; i < total; i++) {
+    nums += `<button class="btn${i === agentPage ? ' active' : ''}" onclick="goAgentPage(${i})" title="หน้า ${i + 1}">${i + 1}</button>`;
+  }
+  const from = agentPage * AGENT_PAGE_SIZE + 1;
+  const to = Math.min((agentPage + 1) * AGENT_PAGE_SIZE, agentsData.length);
+  return `<div class="agent-pager">
+    <button class="btn" onclick="goAgentPage(agentPage-1)" ${agentPage === 0 ? 'disabled' : ''} title="หน้าก่อนหน้า">‹</button>
+    ${nums}
+    <button class="btn" onclick="goAgentPage(agentPage+1)" ${agentPage >= total - 1 ? 'disabled' : ''} title="หน้าถัดไป">›</button>
+    <span class="ap-info">${from}-${to} / ${agentsData.length}</span>
+  </div>`;
+}
+
 function renderAgents(agents) {
   agentsData = sortAgents(agents);   // เรียงตามเลขในชื่อ (มีผลกับ sidebar + dropdown + broadcast + live view)
   const el = document.getElementById('agentList');
@@ -2572,7 +2620,9 @@ function renderAgents(agents) {
     el.innerHTML = '<div class="no-agents">⏳<br>รอเครื่องลูกเชื่อมต่อ...<br><small>เปิด agent.py ที่เครื่องลูก</small></div>';
     return;
   }
-  el.innerHTML = agentsData.map(a => `
+  if (agentPage >= agentTotalPages()) agentPage = agentTotalPages() - 1;
+  const pageAgents = agentsData.slice(agentPage * AGENT_PAGE_SIZE, (agentPage + 1) * AGENT_PAGE_SIZE);
+  el.innerHTML = agentPagerHtml() + pageAgents.map(a => `
     <div class="agent-card ${currentAgent === a.agent_id ? 'active' : ''}"
          onclick="selectAgent('${a.agent_id}')">
       <div class="dot"></div>
@@ -2595,6 +2645,44 @@ function shutdownAgent(agentId, name) {
 // ═══════════════════════════════════════════════════════════
 //  AGENT SELECTION & BROWSING
 // ═══════════════════════════════════════════════════════════
+// ── ล็อกโปรเจกต์: เลือกครั้งเดียว แล้วทุกเครื่องที่กดต่อจากนี้เปิดโปรเจกต์เดียวกัน ──
+// เก็บเป็นชื่อโฟลเดอร์ท้ายสุด (เช่น 'main') เพราะ path เต็มของแต่ละเครื่องไม่เหมือนกัน
+// (C:\Users\Administrator\... กับ C:\Users\t\...) + จำไว้ใน localStorage ให้ข้ามการรีเฟรชได้
+let lockedProject = null;
+try { lockedProject = localStorage.getItem('lockedProject') || null; } catch (e) {}
+
+function setLockedProject(name) {
+  lockedProject = name ? String(name).toLowerCase() : null;
+  try {
+    if (lockedProject) localStorage.setItem('lockedProject', lockedProject);
+    else localStorage.removeItem('lockedProject');
+  } catch (e) {}
+}
+
+// เลือกโปรเจกต์จาก dropdown → ล็อกไว้ใช้กับทุกเครื่อง แล้วเปิดโฟลเดอร์นั้นของเครื่องปัจจุบัน
+function pickProject(fullPath) {
+  if (!fullPath) return;
+  setLockedProject(baseName(fullPath));
+  loadDir(fullPath);
+}
+
+function clearLockedProject() {
+  setLockedProject(null);
+  toast('ปลดล็อกโปรเจกต์แล้ว — กดเครื่องอื่นจะเปิดโฟลเดอร์แรกตามเดิม', 'success');
+  if (currentPath) loadDir(currentPath);
+}
+
+// โฟลเดอร์เริ่มต้นของเครื่องนั้น: ใช้โปรเจกต์ที่ล็อกไว้ก่อน ถ้าเครื่องนั้นไม่มีค่อยใช้ตัวแรก
+function agentStartPath(a) {
+  const allowed = (a && a.allowed_paths) || [];
+  if (!allowed.length) return '';
+  if (lockedProject) {
+    const hit = allowed.find(p => baseName(p).toLowerCase() === lockedProject);
+    if (hit) return hit;
+  }
+  return allowed[0];
+}
+
 function selectAgent(agentId) {
   currentAgent = agentId;
   currentPath = '';
@@ -2602,8 +2690,7 @@ function selectAgent(agentId) {
   event.currentTarget.classList.add('active');
   // ถ้าเครื่องลูกจำกัดโฟลเดอร์ไว้ → เข้าโฟลเดอร์นั้นตรงๆ (ข้ามหน้าเลือกไดรฟ์ที่อาจค้าง)
   const a = agentsData.find(x => x.agent_id === agentId);
-  const startPath = (a && a.allowed_paths && a.allowed_paths.length > 0) ? a.allowed_paths[0] : '';
-  loadDir(startPath);
+  loadDir(agentStartPath(a));
 }
 
 function loadDir(path) {
@@ -2645,9 +2732,15 @@ function renderFiles(files, path) {
 
   const breadcrumb = buildBreadcrumb(path);
   const projectSelect = allowed.length ? `
-      <select class="btn project-select" onchange="if(this.value) loadDir(this.value)" title="เลือกโปรเจกต์/โฟลเดอร์">
+      <select class="btn project-select" onchange="pickProject(this.value)" title="เลือกโปรเจกต์ — เลือกแล้วจะล็อกไว้ใช้กับทุกเครื่อง">
         ${allowed.map(p => `<option value="${escHtml(p)}" ${sameRoot(path, p) ? 'selected' : ''}>📁 ${escHtml(projectLabel(p))}</option>`).join('')}
       </select>` : '';
+  // ป้ายบอกว่าล็อกโปรเจกต์ไหนไว้ + ปุ่มปลดล็อก
+  const lockChip = lockedProject ? `
+      <span class="proj-lock" title="กดเครื่องไหนก็เปิดโปรเจกต์นี้ให้เลย (ถ้าเครื่องนั้นมีโฟลเดอร์นี้)">
+        🔒 ล็อก: ${escHtml(projectLabel(lockedProject))}
+        <button onclick="clearLockedProject()" title="ปลดล็อก">✕</button>
+      </span>` : '';
 
   // นับจำนวนไฟล์/โฟลเดอร์ที่เหลือในโฟลเดอร์นี้ (ไม่นับ ".." ที่เป็นปุ่มย้อนกลับ)
   const realItems = files.filter(f => f.name !== '..');
@@ -2657,6 +2750,7 @@ function renderFiles(files, path) {
   content.innerHTML = `
     <div class="toolbar">
       ${projectSelect}
+      ${lockChip}
       <div class="breadcrumb">${breadcrumb}</div>
       <button class="btn" id="btnDownloadSel" onclick="downloadSelected()">💾 โหลดที่เลือก</button>
       <button class="btn" id="btnTransfer" onclick="openTransfer()" title="ย้าย/คัดลอกไฟล์ที่เลือกไปเครื่องอื่น">📦 ย้ายไปเครื่องอื่น</button>
