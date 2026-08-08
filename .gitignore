@@ -1,0 +1,10 @@
+# ความลับ — ห้ามขึ้น git (repo นี้เป็น public)
+ngrok-token.txt
+
+# ไบนารีที่สคริปต์โหลดมาเองตอนรัน
+ngrok.exe
+cloudflared.exe
+ngrok.zip
+
+__pycache__/
+*.pyc
