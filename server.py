@@ -1211,6 +1211,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openInputIdDashboard()">📥 input-id รายเครื่อง</button>
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <button class="btn" onclick="openRangerDashboard()">🏹 Dashboard Line Ranger</button>
+    <button class="btn" onclick="openRangerFindDashboard()">🔎 หาตัว Line Ranger</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
     <button class="btn" onclick="openBroadcastBackup()">💾 ส่งเข้า backup (ทุกเครื่อง)</button>
     <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
@@ -1757,6 +1758,187 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
     <div class="hero-grid">${comboCards}</div>
     <div id="rangerNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — ${RANGER_CFG.label}</h3>
+    <div class="agent-stats">${agentRows}</div>
+  `;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  หาตัว LINE RANGER — เหมือน Dashboard Line Ranger แต่แยกตามโฟลเดอร์ย่อยใน backup-id
+//  backup-id\ranger, backup-id\ranger(2), ... เลือกดูทีละชุดจาก dropdown
+//  แต่ละชุดมี combo ของตัวเอง ไม่ปนกัน
+// ═══════════════════════════════════════════════════════════
+let _rfScope = 'ALL';      // เครื่องที่เลือก
+let _rfGroup = 'ALL';      // ชุด (ชื่อโฟลเดอร์ย่อย) ที่เลือก
+let _rfCache = null;       // ผลรอบล่าสุด กดเปลี่ยนชุดแล้วไม่ต้องยิงถามใหม่
+
+async function openRangerFindDashboard(useCache) {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const allAgents = agentsData || [];
+  if (_rfScope !== 'ALL' && !allAgents.some(a => a.agent_id === _rfScope)) _rfScope = 'ALL';
+  const agents = _rfScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _rfScope);
+
+  if (useCache && _rfCache) { renderRangerFind(_rfCache); return; }
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🔎 หาตัว Line Ranger — ${RANGER_CFG.label}</h2>
+      <button class="btn btn-primary">🔄 รีเฟรช</button>
+    </div>
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+
+  if (!allAgents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+
+  // groupCombos: ชื่อชุด -> { combo -> จำนวน }   groupFiles: ชื่อชุด -> จำนวนไฟล์ทั้งหมด
+  const groupCombos = {}, groupFiles = {};
+  const perAgent = [];
+  let onlineCount = 0;
+
+  for (const a of agents) {
+    const name = a.name || a.hostname || a.agent_id;
+    const res = await countRangerOnAgent(a.agent_id);
+    if (!res || res.error) { perAgent.push({ name, error: String((res && res.error) || 'ไม่ตอบกลับ') }); continue; }
+    onlineCount++;
+    const gt = res.group_totals || {};
+    // agent เวอร์ชันเก่ายังไม่ส่ง groups มา → ยัดทุกอย่างเป็นชุดเดียวไปก่อน จะได้ไม่ว่างเปล่า
+    const gc = res.groups || { '': res.combos || {} };
+    perAgent.push({
+      name, total: res.total_files || 0, matched: res.matched_files || 0,
+      exists: res.exists, groups: Object.keys(gt).length ? gt : { '': res.total_files || 0 },
+      legacy: !res.groups,
+    });
+    for (const g in gc) {
+      const dst = groupCombos[g] || (groupCombos[g] = {});
+      for (const k in gc[g]) dst[k] = (dst[k] || 0) + gc[g][k];
+    }
+    for (const g in gt) groupFiles[g] = (groupFiles[g] || 0) + gt[g];
+  }
+
+  _rfCache = { groupCombos, groupFiles, perAgent, machines: agents.length, onlineCount };
+  renderRangerFind(_rfCache);
+}
+
+function rfGroupLabel(g) { return g === '' ? '📄 ไฟล์ชั้นนอก (ไม่อยู่ในโฟลเดอร์ย่อย)' : '📁 ' + g; }
+function rfPickGroup(g) { _rfGroup = g; openRangerFindDashboard(true); }
+function rfShowAll() { _rfGroup = 'ALL'; openRangerFindDashboard(true); }
+
+function renderRangerFind(data) {
+  const { groupCombos, groupFiles, perAgent, machines, onlineCount } = data;
+  const content = document.getElementById('contentArea');
+
+  // รายชื่อชุดทั้งหมด เรียง ranger, ranger(2), ranger(3) ตามเลขในวงเล็บ
+  const groupNames = Object.keys(groupFiles).length ? Object.keys(groupFiles) : Object.keys(groupCombos);
+  groupNames.sort((a, b) => {
+    if (a === '') return -1;
+    if (b === '') return 1;
+    const na = _numIn(a), nb = _numIn(b);
+    return na - nb || a.localeCompare(b);
+  });
+  if (_rfGroup !== 'ALL' && !groupNames.includes(_rfGroup)) _rfGroup = 'ALL';
+
+  // รวม combo ของชุดที่เลือก (ALL = รวมทุกชุด)
+  const combosMap = {};
+  const picked = _rfGroup === 'ALL' ? groupNames : [_rfGroup];
+  picked.forEach(g => {
+    const src = groupCombos[g] || {};
+    for (const k in src) combosMap[k] = (combosMap[k] || 0) + src[k];
+  });
+  const combos = Object.keys(combosMap).map(k => ({ name: k, count: combosMap[k] }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  // รวมรายชื่อภายในชุดที่เลือก
+  const nameTotals = {}, nameCombos = {};
+  combos.forEach(c => c.name.split('+').map(s => s.trim()).filter(Boolean).forEach(n => {
+    nameTotals[n] = (nameTotals[n] || 0) + c.count;
+    nameCombos[n] = (nameCombos[n] || 0) + 1;
+  }));
+  const names = Object.keys(nameTotals).map(n => ({
+    name: n, count: nameTotals[n], combos: nameCombos[n],
+    main: RANGER_MAIN_NAMES.some(m => m.toLowerCase() === n.toLowerCase()),
+  })).sort((a, b) => (b.main - a.main) || b.count - a.count || a.name.localeCompare(b.name));
+
+  const filesInScope = picked.reduce((s, g) => s + (groupFiles[g] || 0), 0);
+  const idsInScope = combos.reduce((s, c) => s + c.count, 0);
+
+  const groupOpts = `<option value="ALL"${_rfGroup === 'ALL' ? ' selected' : ''}>🗂️ รวมทุกชุด (${groupNames.length})</option>` +
+    groupNames.map(g => `<option value="${escAttr(g)}"${_rfGroup === g ? ' selected' : ''}>${escHtml(rfGroupLabel(g))} — ${(groupFiles[g] || 0).toLocaleString()} ไฟล์</option>`).join('');
+
+  // การ์ดสรุปรายชุด กดเลือกชุดได้เลย ไม่ต้องไปกด dropdown
+  const groupCards = groupNames.map(g => {
+    const cnt = Object.values(groupCombos[g] || {}).reduce((s, v) => s + v, 0);
+    const kinds = Object.keys(groupCombos[g] || {}).length;
+    const on = (_rfGroup === g);
+    return `<div class="hero-card rf-group${on ? ' main-name' : ''}" style="cursor:pointer"
+                 onclick="rfPickGroup('${escAttr(g)}')"
+                 title="กดเพื่อดูเฉพาะชุดนี้">
+      <div class="hero-name">${escHtml(g === '' ? 'ชั้นนอก' : g)}</div>
+      <div class="hero-count">${cnt.toLocaleString()}</div>
+      <div class="hero-sub">${kinds} combo · ${(groupFiles[g] || 0).toLocaleString()} ไฟล์</div>
+    </div>`;
+  }).join('');
+
+  const nameCards = names.length ? names.map(n => `
+    <div class="hero-card rg-card${n.main ? ' main-name' : ''}" data-name="${escAttr(n.name)}">
+      <div class="hero-name" title="${escHtml(n.name)}">${escHtml(n.name)}</div>
+      <div class="hero-count">${n.count.toLocaleString()}</div>
+      <div class="hero-sub">${n.combos} แบบ</div>
+    </div>`).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ชุดนี้ยังไม่มีชื่อฮีโร่</h3></div>';
+
+  const comboCards = combos.length ? combos.map(c => {
+    const parts = c.name.split('+').filter(Boolean);
+    return `<div class="hero-card rg-card${parts.length > 1 ? ' combo' : ''}" data-name="${escAttr(c.name)}">
+      <div class="hero-name" title="${escHtml(c.name)}">${escHtml(c.name)}</div>
+      <div class="hero-count">${c.count.toLocaleString()}</div>
+      <div class="hero-sub">${parts.length > 1 ? parts.length + ' ชื่อ/ไฟล์' : 'ชื่อเดียว'}</div>
+    </div>`;
+  }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ที่มีชื่อฮีโร่</h3></div>';
+
+  const legacy = perAgent.some(p => p.legacy);
+  const agentRows = perAgent.map(p => {
+    let right;
+    if (p.error) right = '<span style="color:var(--danger)">' + escHtml(p.error) + '</span>';
+    else if (p.exists === false) right = '<span style="color:var(--warning)">ไม่พบโฟลเดอร์ ' + RANGER_CFG.label + '</span>';
+    else {
+      const gs = Object.keys(p.groups || {});
+      const detail = gs.length
+        ? gs.sort((a, b) => _numIn(a) - _numIn(b)).map(g => (g === '' ? 'ชั้นนอก' : g) + ' ' + p.groups[g]).join(' · ')
+        : '-';
+      right = '<span title="ไฟล์ที่มีชื่อฮีโร่"><b style="color:var(--success)">' + p.matched.toLocaleString() + '</b> id</span>'
+            + '<span style="color:var(--text-dim); margin:0 10px">·</span>'
+            + '<span style="color:var(--text-secondary)">🗂️ ' + escHtml(detail) + '</span>';
+    }
+    return '<div class="agent-stat"><span>🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
+  }).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🔎 หาตัว Line Ranger</h2>
+      <select class="btn project-select" onchange="_rfGroup=this.value; openRangerFindDashboard(true)" title="เลือกชุด (โฟลเดอร์ย่อยใน backup-id)">${groupOpts}</select>
+      ${pcSelectHtml(_rfScope, '_rfScope=this.value; openRangerFindDashboard()')}
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อ / combo..." oninput="filterRangerCards(this.value)">
+      <button class="btn btn-primary" onclick="openRangerFindDashboard()">🔄 รีเฟรช</button>
+    </div>
+    ${legacy ? '<div style="margin-bottom:12px; padding:10px 14px; border-radius:8px; border:1px solid rgba(245,158,11,.4); background:rgba(245,158,11,.08); color:var(--warning); font-size:13px">⚠️ บางเครื่องยังเป็น agent เวอร์ชันเก่า ยังไม่ส่งข้อมูลแยกชุดมา — ของเครื่องนั้นจะถูกรวมไว้ใน "ชั้นนอก" ให้กด self-update agent ก่อน</div>' : ''}
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${machines}</div></div>
+      <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
+      <div class="stat-tile"><div class="stat-label">จำนวนชุด</div><div class="stat-val">${groupNames.length}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ในชุดที่เลือก</div><div class="stat-val" style="color:var(--accent)">${filesInScope.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">id ที่มีชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${idsInScope.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">combo ในชุดนี้</div><div class="stat-val">${combos.length}</div></div>
+    </div>
+    <h3 style="margin:4px 0 12px; font-size:14px; color:var(--text-secondary)">ชุดทั้งหมดใน ${RANGER_CFG.label} — กดการ์ดเพื่อดูเฉพาะชุดนั้น ${_rfGroup === 'ALL' ? '' : '<button class="btn" style="padding:4px 10px; font-size:11px; margin-left:8px" onclick="rfShowAll()">↩ กลับไปดูรวมทุกชุด</button>'}</h3>
+    <div class="hero-grid">${groupCards || '<div style="color:var(--text-dim); font-size:13px">ยังไม่มีโฟลเดอร์ย่อย</div>'}</div>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ${_rfGroup === 'ALL' ? 'ทุกชุดรวมกัน' : 'เฉพาะชุด ' + escHtml(_rfGroup === '' ? 'ชั้นนอก' : _rfGroup)}</h3>
+    <div class="hero-grid">${nameCards}</div>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">แยกตามไฟล์ (combo) — ไฟล์ที่มี 2 ชื่อนับเป็นชุดเดียว เช่น kikoru+Kafka</h3>
+    <div class="hero-grid">${comboCards}</div>
+    <div id="rangerNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — จำนวนไฟล์แต่ละชุด</h3>
     <div class="agent-stats">${agentRows}</div>
   `;
 }

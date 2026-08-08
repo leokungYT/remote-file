@@ -880,11 +880,16 @@ def _prefix_combo(filename, rel_dir):
             parts = [p.strip() for p in head.split("+") if p.strip()]
             if parts:
                 return "+".join(parts)
+    # โฟลเดอร์ย่อยจะถือเป็นชื่อฮีโร่ ก็ต่อเมื่อชื่อมี '+' (login.py ตั้งชื่อแบบ hero1+hero2)
+    # โฟลเดอร์แบ่งชุดอย่าง ranger / ranger(2) ไม่มี '+' → เป็นแค่กล่องแบ่งชุด ไม่ใช่ชื่อตัว
+    # ไล่จากโฟลเดอร์ชั้นในสุดออกมา รองรับทั้ง backup-id/<combo>/ และ backup-id/ranger(3)/<combo>/
     if rel_dir:
-        top = rel_dir.replace("\\", "/").split("/")[0].strip()
-        parts = [p.strip() for p in top.split("+") if p.strip()]
-        if parts:
-            return "+".join(parts)
+        for seg in reversed(rel_dir.replace("\\", "/").split("/")):
+            seg = seg.strip()
+            if "+" in seg:
+                parts = [p.strip() for p in seg.split("+") if p.strip()]
+                if parts:
+                    return "+".join(parts)
     return None
 
 
@@ -904,7 +909,9 @@ def handle_count_prefix_ids(req_id, data):
         return
 
     folder = os.path.join(base, subpath)
-    combos = {}
+    combos = {}            # รวมทุกชุด (ของเดิม — Dashboard Line Ranger ใช้อยู่)
+    groups = {}            # แยกตามโฟลเดอร์ย่อยชั้นแรก: ranger / ranger(2) / ... ("" = ไฟล์ที่วางไว้ชั้นนอก)
+    group_totals = {}      # จำนวนไฟล์ทั้งหมดของแต่ละชุด (รวมไฟล์ที่แกะชื่อไม่ได้)
     total_files = 0
     matched_files = 0
     exists = os.path.isdir(folder)
@@ -914,21 +921,26 @@ def handle_count_prefix_ids(req_id, data):
                 rel_dir = os.path.relpath(root, folder)
                 if rel_dir == ".":
                     rel_dir = ""
+                top = rel_dir.replace("\\", "/").split("/")[0] if rel_dir else ""
                 for fn in filenames:
                     if exts and os.path.splitext(fn)[1].lower() not in exts:
                         continue
                     total_files += 1
+                    group_totals[top] = group_totals.get(top, 0) + 1
                     combo = _prefix_combo(fn, rel_dir)
                     if combo:
                         matched_files += 1
                         combos[combo] = combos.get(combo, 0) + 1
+                        g = groups.setdefault(top, {})
+                        g[combo] = g.get(combo, 0) + 1
         except Exception as e:
             send_response(req_id, {"error": str(e)})
             return
 
     logger.info(f"  count_prefix_ids: {total_files} files, {matched_files} matched, "
-                f"{len(combos)} combos in {folder} (exists={exists})")
-    send_response(req_id, {"success": True, "combos": combos, "total_files": total_files,
+                f"{len(combos)} combos, {len(group_totals)} groups in {folder} (exists={exists})")
+    send_response(req_id, {"success": True, "combos": combos, "groups": groups,
+                           "group_totals": group_totals, "total_files": total_files,
                            "matched_files": matched_files, "folder": folder, "exists": exists})
 
 
