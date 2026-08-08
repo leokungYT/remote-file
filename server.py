@@ -1083,6 +1083,27 @@ WEB_UI_HTML = r"""
   .hero-card.main-name .hero-count { color: var(--success); }
   .hero-sub { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
 
+  /* ── ตัวกรองชื่อตัว (ติ๊กเลือกจากชื่อที่เจอจริง) ── */
+  .pick-panel {
+    border: 1px solid var(--border); background: var(--bg-card);
+    border-radius: 12px; padding: 12px 14px; margin-bottom: 18px;
+  }
+  .pick-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .pick-head .btn { padding: 5px 11px; font-size: 12px; }
+  .pick-title { font-size: 13px; font-weight: 700; color: var(--text-secondary); margin-right: auto; }
+  .pick-list { display: flex; flex-wrap: wrap; gap: 6px; max-height: 190px; overflow-y: auto; }
+  .pick-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--border); background: var(--bg-secondary);
+    border-radius: 20px; padding: 5px 11px; font-size: 12px; cursor: pointer;
+    white-space: nowrap; user-select: none;
+  }
+  .pick-chip:hover { border-color: var(--accent); }
+  .pick-chip.on { border-color: var(--success); background: rgba(16,185,129,0.12); color: var(--success); font-weight: 700; }
+  .pick-chip .n { color: var(--text-dim); font-size: 11px; }
+  .pick-chip.on .n { color: var(--success); }
+  .pick-chip input { cursor: pointer; margin: 0; }
+
   /* ── MACHINE input-id cards (Dashboard input-id รายเครื่อง) ── */
   .machine-grid {
     display: grid;
@@ -1937,6 +1958,42 @@ function rfGroupLabel(g) { return '📁 ' + g; }
 function rfPickGroup(g) { _rfGroup = g; openRangerFindDashboard(true); }
 function rfShowAll() { _rfGroup = 'ALL'; openRangerFindDashboard(true); }
 
+// ── ตัวกรองชื่อตัว: ติ๊กเลือกจากชื่อที่ "เจอจริง" ในข้อมูล (เซ็ตว่าง = แสดงทั้งหมด) ──
+let _rfPick = new Set();
+let _rfPickQ = '';        // คำค้นในรายการติ๊ก
+try {
+  const saved = JSON.parse(localStorage.getItem('rfPick') || '[]');
+  if (Array.isArray(saved)) _rfPick = new Set(saved);
+} catch (e) {}
+
+function rfSavePick() {
+  try { localStorage.setItem('rfPick', JSON.stringify([..._rfPick])); } catch (e) {}
+}
+function rfTogglePick(n) {
+  if (_rfPick.has(n)) _rfPick.delete(n); else _rfPick.add(n);
+  rfSavePick(); openRangerFindDashboard(true);
+}
+// เลือกทั้งหมด = อ่านชื่อจากชิปในรายการ (เลี่ยงยัด JSON ลง attribute แล้วโดน quote ชนกัน)
+function rfPickAllNames() {
+  const chips = document.querySelectorAll('#rfPickList .pick-chip');
+  _rfPick = new Set([...chips].map(c => c.dataset.name));
+  rfSavePick(); openRangerFindDashboard(true);
+}
+function rfClearPick() { _rfPick.clear(); rfSavePick(); openRangerFindDashboard(true); }
+function rfSetPickQ(v) {
+  _rfPickQ = (v || '').trim().toLowerCase();
+  const list = document.getElementById('rfPickList');
+  if (!list) return;
+  list.querySelectorAll('.pick-chip').forEach(c => {
+    c.style.display = (!_rfPickQ || (c.dataset.name || '').toLowerCase().includes(_rfPickQ)) ? '' : 'none';
+  });
+}
+// combo ผ่านตัวกรองไหม — ไม่ได้เลือกอะไรเลย = ผ่านหมด, เลือกแล้ว = ต้องมีชื่อที่เลือกอยู่ใน combo
+function rfComboPass(comboName) {
+  if (!_rfPick.size) return true;
+  return comboName.split('+').some(p => _rfPick.has(p.trim()));
+}
+
 function renderRangerFind(data) {
   const { groupCombos, groupFiles, perAgent, machines, onlineCount } = data;
   const content = document.getElementById('contentArea');
@@ -1946,12 +2003,28 @@ function renderRangerFind(data) {
   groupNames.sort((a, b) => _numIn(a) - _numIn(b) || a.localeCompare(b));
   if (_rfGroup !== 'ALL' && !groupNames.includes(_rfGroup)) _rfGroup = 'ALL';
 
-  // รวม combo ของชุดที่เลือก (ALL = รวมทุกชุด)
+  // รายชื่อตัวทั้งหมดที่เจอ (ทุกชุดรวมกัน) — ใช้เป็นตัวเลือกในกล่องติ๊ก ไม่ผูกกับชุด/ตัวกรอง
+  const allNameCount = {};
+  groupNames.forEach(g => {
+    const src = groupCombos[g] || {};
+    for (const k in src) k.split('+').map(s => s.trim()).filter(Boolean).forEach(n => {
+      allNameCount[n] = (allNameCount[n] || 0) + src[k];
+    });
+  });
+  const allNames = Object.keys(allNameCount).sort((a, b) => allNameCount[b] - allNameCount[a] || a.localeCompare(b));
+  // ชื่อที่เคยติ๊กไว้แต่รอบนี้ไม่มีในข้อมูลแล้ว ตัดทิ้ง กันกรองจนว่างเปล่าแบบงงๆ
+  if (_rfPick.size) {
+    const before = _rfPick.size;
+    _rfPick = new Set([..._rfPick].filter(n => n in allNameCount));
+    if (_rfPick.size !== before) rfSavePick();
+  }
+
+  // รวม combo ของชุดที่เลือก (ALL = รวมทุกชุด) แล้วกรองตามชื่อที่ติ๊ก
   const combosMap = {};
   const picked = _rfGroup === 'ALL' ? groupNames : [_rfGroup];
   picked.forEach(g => {
     const src = groupCombos[g] || {};
-    for (const k in src) combosMap[k] = (combosMap[k] || 0) + src[k];
+    for (const k in src) if (rfComboPass(k)) combosMap[k] = (combosMap[k] || 0) + src[k];
   });
   const combos = Object.keys(combosMap).map(k => ({ name: k, count: combosMap[k] }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
@@ -1962,10 +2035,12 @@ function renderRangerFind(data) {
     nameTotals[n] = (nameTotals[n] || 0) + c.count;
     nameCombos[n] = (nameCombos[n] || 0) + 1;
   }));
-  const names = Object.keys(nameTotals).map(n => ({
-    name: n, count: nameTotals[n], combos: nameCombos[n],
-    main: RANGER_MAIN_NAMES.some(m => m.toLowerCase() === n.toLowerCase()),
-  })).sort((a, b) => (b.main - a.main) || b.count - a.count || a.name.localeCompare(b.name));
+  const names = Object.keys(nameTotals)
+    .filter(n => !_rfPick.size || _rfPick.has(n))     // ติ๊กแล้วโชว์เฉพาะที่ติ๊ก
+    .map(n => ({
+      name: n, count: nameTotals[n], combos: nameCombos[n],
+      main: RANGER_MAIN_NAMES.some(m => m.toLowerCase() === n.toLowerCase()),
+    })).sort((a, b) => (b.main - a.main) || b.count - a.count || a.name.localeCompare(b.name));
 
   const filesInScope = picked.reduce((s, g) => s + (groupFiles[g] || 0), 0);
   const idsInScope = combos.reduce((s, c) => s + c.count, 0);
@@ -1975,8 +2050,11 @@ function renderRangerFind(data) {
 
   // การ์ดสรุปรายชุด กดเลือกชุดได้เลย ไม่ต้องไปกด dropdown
   const groupCards = groupNames.map(g => {
-    const cnt = Object.values(groupCombos[g] || {}).reduce((s, v) => s + v, 0);
-    const kinds = Object.keys(groupCombos[g] || {}).length;
+    // การ์ดชุดนับตามตัวกรองด้วย จะได้ตรงกับตัวเลขข้างล่าง
+    const src = groupCombos[g] || {};
+    const keys = Object.keys(src).filter(rfComboPass);
+    const cnt = keys.reduce((s, k) => s + src[k], 0);
+    const kinds = keys.length;
     const on = (_rfGroup === g);
     return `<div class="hero-card rf-group${on ? ' main-name' : ''}" style="cursor:pointer"
                  onclick="rfPickGroup('${escAttr(g)}')"
@@ -2002,6 +2080,23 @@ function renderRangerFind(data) {
       <div class="hero-sub">${parts.length > 1 ? parts.length + ' ชื่อ/ไฟล์' : 'ชื่อเดียว'}</div>
     </div>`;
   }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ที่มีชื่อฮีโร่</h3></div>';
+
+  // กล่องติ๊กเลือกชื่อตัว — รายการมาจากชื่อที่เจอจริงในข้อมูล เรียงตามจำนวนมาก→น้อย
+  const pickChips = allNames.map(n => `
+    <label class="pick-chip${_rfPick.has(n) ? ' on' : ''}" data-name="${escAttr(n)}" title="${escHtml(n)} — ${allNameCount[n]} id">
+      <input type="checkbox" ${_rfPick.has(n) ? 'checked' : ''} onchange="rfTogglePick('${escAttr(n)}')">
+      ${escHtml(n)} <span class="n">${allNameCount[n]}</span>
+    </label>`).join('');
+  const pickPanel = allNames.length ? `
+    <div class="pick-panel">
+      <div class="pick-head">
+        <span class="pick-title">🎯 เลือกตัวที่จะแสดง ${_rfPick.size ? '<span style="color:var(--success)">(เลือกอยู่ ' + _rfPick.size + '/' + allNames.length + ')</span>' : '<span style="color:var(--text-dim)">(ไม่ได้เลือก = แสดงทั้งหมด ' + allNames.length + ' ตัว)</span>'}</span>
+        <input type="text" class="dash-search" style="min-width:170px; padding:6px 12px" placeholder="🔍 ค้นหาชื่อในรายการ" oninput="rfSetPickQ(this.value)">
+        <button class="btn" onclick="rfPickAllNames()">เลือกทั้งหมด</button>
+        <button class="btn" onclick="rfClearPick()">ล้างตัวกรอง</button>
+      </div>
+      <div class="pick-list" id="rfPickList">${pickChips}</div>
+    </div>` : '';
 
   const legacy = perAgent.some(p => p.legacy);
   const agentRows = perAgent.map(p => {
@@ -2039,7 +2134,8 @@ function renderRangerFind(data) {
     </div>
     <h3 style="margin:4px 0 12px; font-size:14px; color:var(--text-secondary)">ชุดทั้งหมดใน ${RANGER_CFG.label} — กดการ์ดเพื่อดูเฉพาะชุดนั้น ${_rfGroup === 'ALL' ? '' : '<button class="btn" style="padding:4px 10px; font-size:11px; margin-left:8px" onclick="rfShowAll()">↩ กลับไปดูรวมทุกชุด</button>'}</h3>
     <div class="hero-grid">${groupCards || '<div style="color:var(--text-dim); font-size:13px">ยังไม่มีโฟลเดอร์ย่อย</div>'}</div>
-    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ${_rfGroup === 'ALL' ? 'ทุกชุดรวมกัน' : 'เฉพาะชุด ' + escHtml(_rfGroup === '' ? 'ชั้นนอก' : _rfGroup)}</h3>
+    ${pickPanel}
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ${_rfGroup === 'ALL' ? 'ทุกชุดรวมกัน' : 'เฉพาะชุด ' + escHtml(_rfGroup)}${_rfPick.size ? ' <span style="color:var(--success)">· กรองอยู่ ' + _rfPick.size + ' ตัว</span>' : ''}</h3>
     <div class="hero-grid">${nameCards}</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">แยกตามโฟลเดอร์ (combo) — 1 ไฟล์ในโฟลเดอร์ = 1 id · โฟลเดอร์ที่มี 2 ชื่อนับเป็นชุดเดียว เช่น kikoru+Kafka</h3>
     <div class="hero-grid">${comboCards}</div>
