@@ -2425,14 +2425,22 @@ function rfShowAll() { _rfGroup = 'ALL'; openRangerFindDashboard(true); }
 let _rfPick = new Set();
 let _rfFav = new Set();   // ตัวโปรด (ติดดาว) — ขึ้นก่อนเสมอ
 let _rfPickQ = '';        // คำค้นในรายการติ๊ก
-let _rfMatchAll = true;   // true = ต้องมีครบทุกตัวที่เลือก (ปนตัวอื่นได้), false = มีตัวใดตัวหนึ่งก็พอ
+// เงื่อนไขจับคู่ combo กับชื่อที่ติ๊ก
+//   only = combo ประกอบจากชื่อที่เลือกเท่านั้น ไม่ปนตัวอื่น  (ค่าเริ่มต้น)
+//   all  = ต้องมีชื่อที่เลือกครบทุกตัว (ปนตัวอื่นได้)
+//   any  = มีตัวใดตัวหนึ่งที่เลือกก็พอ
+let _rfMode = 'only';
 try {
   const saved = JSON.parse(localStorage.getItem('rfPick') || '[]');
   if (Array.isArray(saved)) _rfPick = new Set(saved);
   const fav = JSON.parse(localStorage.getItem('rfFav') || '[]');
   if (Array.isArray(fav)) _rfFav = new Set(fav);
-  const m = localStorage.getItem('rfMatchAll');
-  if (m !== null) _rfMatchAll = (m === '1');
+  const mode = localStorage.getItem('rfMode');
+  if (mode) _rfMode = mode;
+  else {
+    const old = localStorage.getItem('rfMatchAll');   // ค่าเก่าจากเวอร์ชันก่อน
+    if (old !== null) _rfMode = (old === '1') ? 'all' : 'any';
+  }
 } catch (e) {}
 
 function rfSavePick() {
@@ -2451,9 +2459,9 @@ function rfPickFavs() {                                    // เลือกเ
   _rfPick = new Set(_rfFav);
   rfSavePick(); _rfComboPage = 0; openRangerFindDashboard(true);
 }
-function rfSetMatchAll(v) {
-  _rfMatchAll = !!v;
-  try { localStorage.setItem('rfMatchAll', _rfMatchAll ? '1' : '0'); } catch (e) {}
+function rfSetMode(m) {
+  _rfMode = m;
+  try { localStorage.setItem('rfMode', m); } catch (e) {}
   _rfComboPage = 0; openRangerFindDashboard(true);
 }
 function rfTogglePick(n) {
@@ -2476,13 +2484,15 @@ function rfSetPickQ(v) {
   });
 }
 // combo ผ่านตัวกรองไหม — ไม่ได้เลือกอะไรเลย = ผ่านหมด
-//   โหมด "ครบทุกตัว" : ต้องมีชื่อที่เลือก "ครบทุกตัว" อยู่ใน combo (มีตัวอื่นปนได้ ไม่ว่ากัน)
-//   โหมด "ตัวใดก็ได้" : มีตัวใดตัวหนึ่งก็พอ
+//   only : ทุกชื่อใน combo ต้องอยู่ในกลุ่มที่เลือก (ได้ combo ที่ประกอบจากกลุ่มนี้ล้วนๆ)
+//   all  : ต้องมีชื่อที่เลือกครบทุกตัว (ปนตัวอื่นได้)
+//   any  : มีตัวใดตัวหนึ่งก็พอ
 function rfComboPass(comboName) {
   if (!_rfPick.size) return true;
-  const parts = comboName.split('+').map(s => s.trim());
-  return _rfMatchAll ? [..._rfPick].every(n => parts.includes(n))
-                     : parts.some(p => _rfPick.has(p));
+  const parts = comboName.split('+').map(s => s.trim()).filter(Boolean);
+  if (_rfMode === 'all') return [..._rfPick].every(n => parts.includes(n));
+  if (_rfMode === 'any') return parts.some(p => _rfPick.has(p));
+  return parts.every(p => _rfPick.has(p));      // only
 }
 
 // ── แบ่งหน้าการ์ด combo (ข้อมูลเยอะ เลื่อนยาวไม่ไหว) ──
@@ -2640,13 +2650,17 @@ function renderRangerFind(data) {
       <div class="pick-head" style="margin-bottom:8px">
         <span style="font-size:12px; color:var(--text-dim)">เงื่อนไข:</span>
         <div class="seg">
-          <button class="btn${_rfMatchAll ? ' on' : ''}" onclick="rfSetMatchAll(true)"
-                  title="แสดงเฉพาะโฟลเดอร์ที่มีตัวที่เลือกครบทุกตัว (มีตัวอื่นปนได้)">มีครบทุกตัวที่เลือก</button>
-          <button class="btn${_rfMatchAll ? '' : ' on'}" onclick="rfSetMatchAll(false)"
-                  title="แสดงโฟลเดอร์ที่มีตัวใดตัวหนึ่งที่เลือก">มีตัวใดก็ได้</button>
+          <button class="btn${_rfMode === 'only' ? ' on' : ''}" onclick="rfSetMode('only')"
+                  title="ได้ combo ที่ประกอบจากชื่อในกลุ่มที่เลือกล้วนๆ ไม่มีตัวอื่นปน">เฉพาะกลุ่มที่เลือก</button>
+          <button class="btn${_rfMode === 'all' ? ' on' : ''}" onclick="rfSetMode('all')"
+                  title="ต้องมีชื่อที่เลือกครบทุกตัว (มีตัวอื่นปนได้)">มีครบทุกตัว</button>
+          <button class="btn${_rfMode === 'any' ? ' on' : ''}" onclick="rfSetMode('any')"
+                  title="มีตัวใดตัวหนึ่งที่เลือกก็พอ">มีตัวใดก็ได้</button>
         </div>
-        ${_rfPick.size > 1 ? `<span style="font-size:12px; color:${_rfMatchAll ? 'var(--success)' : 'var(--text-dim)'}">
-          ${_rfMatchAll ? 'กำลังหาโฟลเดอร์ที่มี <b>' + [..._rfPick].map(escHtml).join(' + ') + '</b> ครบทุกตัว' : 'มีตัวใดตัวหนึ่งใน ' + _rfPick.size + ' ตัวที่เลือก'}</span>` : ''}
+        ${_rfPick.size ? `<span style="font-size:12px; color:var(--success)">${
+          _rfMode === 'only' ? 'combo ที่ประกอบจาก <b>' + [..._rfPick].map(escHtml).join(' / ') + '</b> เท่านั้น'
+          : _rfMode === 'all' ? 'ต้องมี <b>' + [..._rfPick].map(escHtml).join(' + ') + '</b> ครบทุกตัว'
+          : 'มีตัวใดตัวหนึ่งใน ' + _rfPick.size + ' ตัวที่เลือก'}</span>` : ''}
       </div>
       <div class="pick-list" id="rfPickList">${pickChips}</div>
     </div>` : '';
