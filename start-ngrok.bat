@@ -11,16 +11,33 @@ cd /d "%~dp0"
 :: ----- authtoken: อ่านจากไฟล์ ngrok-token.txt (ไม่ขึ้น git) ห้ามพิมพ์ token ลงไฟล์นี้ -----
 :: repo นี้เป็น public — token ที่อยู่ในไฟล์นี้จะโดน push ขึ้นเว็บให้คนทั้งโลกเห็น
 :: ใส่ token บรรทัดเดียวใน ngrok-token.txt แทน (รันครั้งแรกครั้งเดียว ngrok จะจำเอง แล้วลบไฟล์ทิ้งได้)
+:: static domain ที่จองไว้ในบัญชี ngrok — URL จะไม่เปลี่ยนทุกครั้งที่เปิดใหม่
+:: ปล่อยว่าง = ใช้ URL สุ่มของแผนฟรี
+set "NGROK_DOMAIN=subspiral-unsearchingly-wilbur.ngrok-free.dev"
+
 set "NGROK_TOKEN="
 if exist "ngrok-token.txt" set /p NGROK_TOKEN=<ngrok-token.txt
+
+:: ไม่มีไฟล์ token = หยุดตรงนี้เลย ห้ามปล่อยผ่าน
+:: ไม่งั้น ngrok จะไปใช้ token ของบัญชีอื่นที่ค้างอยู่ในเครื่อง แล้วไปยึดโดเมนผิดบัญชี
+:: (อาการ: ขึ้น ERR_NGROK_334 บอกว่าโดเมนที่เราไม่ได้ตั้งไว้ 'already online')
+if "%NGROK_TOKEN%"=="" (
+    echo.
+    echo [ERROR] ไม่พบไฟล์ ngrok-token.txt ในโฟลเดอร์นี้
+    echo.
+    echo   ไฟล์นี้ไม่ได้อยู่ใน git ^(gitignore ไว้กัน token หลุด^) เครื่องใหม่เลยไม่มีติดมาด้วย
+    echo   วิธีแก้: สร้างไฟล์ ngrok-token.txt แล้วใส่ authtoken บรรทัดเดียว
+    echo            เอา token จาก https://dashboard.ngrok.com/get-started/your-authtoken
+    echo            ^(ต้องเป็นบัญชีที่จองโดเมน %NGROK_DOMAIN% ไว้^)
+    echo.
+    pause
+    exit /b 1
+)
 :: ------------------------------------------------------------
 
 set "NG=ngrok.exe"
 set "PORT=5000"
 set "ZIP=ngrok.zip"
-:: static domain ที่จองไว้ในบัญชี ngrok — URL จะไม่เปลี่ยนทุกครั้งที่เปิดใหม่
-:: ปล่อยว่าง = ใช้ URL สุ่มของแผนฟรี
-set "NGROK_DOMAIN=subspiral-unsearchingly-wilbur.ngrok-free.dev"
 set "NG_URL=https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
 
 :: ----- [1/3] ดาวน์โหลด ngrok ถ้ายังไม่มี (ครั้งเดียว) -----
@@ -69,12 +86,28 @@ echo   * อย่าปิดหน้าต่างนี้ (ปิด = tun
 echo ================================================================
 echo.
 
+:: โชว์คำสั่งจริงที่กำลังจะรัน — เวลาพังจะได้รู้ทันทีว่ามันยิงโดเมนไหน
 if not "%NGROK_DOMAIN%"=="" (
+    echo [RUN] %NG% http --url=%NGROK_DOMAIN% %PORT%
+    echo.
     "%NG%" http --url=%NGROK_DOMAIN% %PORT%
 ) else (
+    echo [RUN] %NG% http %PORT%
+    echo.
     "%NG%" http %PORT%
 )
 
 echo.
-echo (tunnel ปิดแล้ว)
+echo ================================================================
+echo   (tunnel ปิดแล้ว)
+echo.
+echo   ถ้าเจอ ERR_NGROK_334 "already online":
+echo     มี ngrok อีกตัวเปิดโดเมนนี้ค้างอยู่ (เครื่องนี้หรือเครื่องอื่นก็ได้)
+echo     แผนฟรีเปิดได้ทีละ 1 เครื่อง - ไปกด Stop ที่
+echo     https://dashboard.ngrok.com/agents  แล้วรันใหม่
+echo.
+echo   ถ้าเจอ ERR_NGROK_320 "reserved for another account":
+echo     token ใน ngrok-token.txt เป็นคนละบัญชีกับเจ้าของโดเมน
+echo     เอา token ของบัญชีที่จองโดเมนนี้ไว้มาใส่แทน
+echo ================================================================
 pause
