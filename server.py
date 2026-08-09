@@ -2459,6 +2459,32 @@ function rfPickFavs() {                                    // เลือกเ
   _rfPick = new Set(_rfFav);
   rfSavePick(); _rfComboPage = 0; openRangerFindDashboard(true);
 }
+// ── การเรียงลำดับการ์ด ──
+const RF_SORTS = {
+  count_desc: { label: 'จำนวน: มาก → น้อย', fn: (a, b) => b.count - a.count || a.name.localeCompare(b.name) },
+  count_asc:  { label: 'จำนวน: น้อย → มาก', fn: (a, b) => a.count - b.count || a.name.localeCompare(b.name) },
+  name_asc:   { label: 'ชื่อ: ก → ฮ (A → Z)', fn: (a, b) => a.name.localeCompare(b.name) },
+  name_desc:  { label: 'ชื่อ: ฮ → ก (Z → A)', fn: (a, b) => b.name.localeCompare(a.name) },
+  parts_asc:  { label: 'จำนวนชื่อใน combo: น้อย → มาก', fn: (a, b) => a.parts - b.parts || b.count - a.count || a.name.localeCompare(b.name) },
+  parts_desc: { label: 'จำนวนชื่อใน combo: มาก → น้อย', fn: (a, b) => b.parts - a.parts || b.count - a.count || a.name.localeCompare(b.name) },
+};
+let _rfSort = 'count_desc';
+try { const s = localStorage.getItem('rfSort'); if (s && RF_SORTS[s]) _rfSort = s; } catch (e) {}
+
+function rfSetSort(s) {
+  if (!RF_SORTS[s]) return;
+  _rfSort = s;
+  try { localStorage.setItem('rfSort', s); } catch (e) {}
+  _rfComboPage = 0; openRangerFindDashboard(true);
+}
+function rfSortSelectHtml() {
+  return `<select class="btn project-select" style="padding:5px 10px; font-size:12px"
+                  onchange="rfSetSort(this.value)" title="เรียงลำดับการ์ด">` +
+    Object.keys(RF_SORTS).map(k =>
+      `<option value="${k}"${_rfSort === k ? ' selected' : ''}>↕ ${escHtml(RF_SORTS[k].label)}</option>`).join('') +
+    `</select>`;
+}
+
 function rfSetMode(m) {
   _rfMode = m;
   try { localStorage.setItem('rfMode', m); } catch (e) {}
@@ -2562,8 +2588,8 @@ function renderRangerFind(data) {
   });
   const combos = Object.keys(combosMap)
     .filter(k => !_rfQ || k.toLowerCase().includes(_rfQ))     // ช่องค้นหาบนแถบเครื่องมือ
-    .map(k => ({ name: k, count: combosMap[k] }))
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    .map(k => ({ name: k, count: combosMap[k], parts: k.split('+').filter(Boolean).length }))
+    .sort(RF_SORTS[_rfSort].fn);
 
   // รวมรายชื่อภายในชุดที่เลือก
   const nameTotals = {}, nameCombos = {};
@@ -2574,9 +2600,10 @@ function renderRangerFind(data) {
   const names = Object.keys(nameTotals)
     .filter(n => !_rfPick.size || _rfPick.has(n))     // ติ๊กแล้วโชว์เฉพาะที่ติ๊ก
     .map(n => ({
-      name: n, count: nameTotals[n], combos: nameCombos[n], fav: rfIsFav(n),
+      name: n, count: nameTotals[n], combos: nameCombos[n], fav: rfIsFav(n), parts: 1,
       main: RANGER_MAIN_NAMES.some(m => m.toLowerCase() === n.toLowerCase()),
-    })).sort((a, b) => (b.fav - a.fav) || (b.main - a.main) || b.count - a.count || a.name.localeCompare(b.name));
+    // ตัวโปรดขึ้นก่อนเสมอ ที่เหลือเรียงตามที่เลือกไว้
+    })).sort((a, b) => (b.fav - a.fav) || RF_SORTS[_rfSort].fn(a, b));
 
   const filesInScope = picked.reduce((s, g) => s + (groupFiles[g] || 0), 0);
   const idsInScope = combos.reduce((s, c) => s + c.count, 0);
@@ -2705,7 +2732,10 @@ function renderRangerFind(data) {
     ${pickPanel}
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ${_rfGroup === 'ALL' ? 'ทุกชุดรวมกัน' : 'เฉพาะชุด ' + escHtml(_rfGroup)}${_rfPick.size ? ' <span style="color:var(--success)">· กรองอยู่ ' + _rfPick.size + ' ตัว</span>' : ''}</h3>
     <div class="hero-grid big">${nameCards}</div>
-    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">แยกตามโฟลเดอร์ (combo) — 1 ไฟล์ในโฟลเดอร์ = 1 id · โฟลเดอร์ที่มี 2 ชื่อนับเป็นชุดเดียว เช่น kikoru+Kafka</h3>
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:24px 0 12px">
+      <h3 style="margin:0; font-size:14px; color:var(--text-secondary); flex:1">แยกตามโฟลเดอร์ (combo) — 1 ไฟล์ในโฟลเดอร์ = 1 id · โฟลเดอร์ที่มี 2 ชื่อนับเป็นชุดเดียว เช่น kikoru+Kafka</h3>
+      ${rfSortSelectHtml()}
+    </div>
     ${comboPager}
     <div class="hero-grid big">${comboCards}</div>
     ${combos.length > RF_PER_PAGE ? comboPager : ''}
