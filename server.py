@@ -1354,6 +1354,18 @@ WEB_UI_HTML = r"""
   .pick-chip .n { color: var(--text-dim); font-size: 11px; }
   .pick-chip.on .n { color: var(--success); }
   .pick-chip input { cursor: pointer; margin: 0; }
+  /* ดาวตัวโปรด */
+  .pick-chip .star { color: var(--text-dim); font-size: 13px; line-height: 1; cursor: pointer; }
+  .pick-chip .star:hover { color: var(--warning); transform: scale(1.2); }
+  .pick-chip.fav { border-color: rgba(245,158,11,.5); background: rgba(245,158,11,.10); }
+  .pick-chip.fav .star { color: var(--warning); }
+  /* ปุ่มสลับเงื่อนไข (ครบทุกตัว / ตัวใดก็ได้) */
+  .seg { display: inline-flex; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+  .seg .btn { border: none; border-radius: 0; padding: 5px 11px; font-size: 12px; }
+  .seg .btn + .btn { border-left: 1px solid var(--border); }
+  .seg .btn.on { background: var(--accent); color: #fff; font-weight: 700; }
+  /* ดาวบนการ์ดชื่อตัว */
+  .hero-card .fav-star { position: absolute; left: 8px; bottom: 6px; font-size: 12px; color: var(--warning); }
 
   /* ── MACHINE input-id cards (Dashboard input-id รายเครื่อง) ── */
   .machine-grid {
@@ -2411,14 +2423,38 @@ function rfShowAll() { _rfGroup = 'ALL'; openRangerFindDashboard(true); }
 
 // ── ตัวกรองชื่อตัว: ติ๊กเลือกจากชื่อที่ "เจอจริง" ในข้อมูล (เซ็ตว่าง = แสดงทั้งหมด) ──
 let _rfPick = new Set();
+let _rfFav = new Set();   // ตัวโปรด (ติดดาว) — ขึ้นก่อนเสมอ
 let _rfPickQ = '';        // คำค้นในรายการติ๊ก
+let _rfMatchAll = true;   // true = ต้องมีครบทุกตัวที่เลือก (ปนตัวอื่นได้), false = มีตัวใดตัวหนึ่งก็พอ
 try {
   const saved = JSON.parse(localStorage.getItem('rfPick') || '[]');
   if (Array.isArray(saved)) _rfPick = new Set(saved);
+  const fav = JSON.parse(localStorage.getItem('rfFav') || '[]');
+  if (Array.isArray(fav)) _rfFav = new Set(fav);
+  const m = localStorage.getItem('rfMatchAll');
+  if (m !== null) _rfMatchAll = (m === '1');
 } catch (e) {}
 
 function rfSavePick() {
   try { localStorage.setItem('rfPick', JSON.stringify([..._rfPick])); } catch (e) {}
+}
+function rfSaveFav() {
+  try { localStorage.setItem('rfFav', JSON.stringify([..._rfFav])); } catch (e) {}
+}
+function rfIsFav(n) { return _rfFav.has(n); }
+function rfToggleFav(n, ev) {
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }   // กดดาวต้องไม่ไปติ๊ก checkbox
+  if (_rfFav.has(n)) _rfFav.delete(n); else _rfFav.add(n);
+  rfSaveFav(); openRangerFindDashboard(true);
+}
+function rfPickFavs() {                                    // เลือกเฉพาะตัวโปรดรวดเดียว
+  _rfPick = new Set(_rfFav);
+  rfSavePick(); _rfComboPage = 0; openRangerFindDashboard(true);
+}
+function rfSetMatchAll(v) {
+  _rfMatchAll = !!v;
+  try { localStorage.setItem('rfMatchAll', _rfMatchAll ? '1' : '0'); } catch (e) {}
+  _rfComboPage = 0; openRangerFindDashboard(true);
 }
 function rfTogglePick(n) {
   if (_rfPick.has(n)) _rfPick.delete(n); else _rfPick.add(n);
@@ -2439,10 +2475,14 @@ function rfSetPickQ(v) {
     c.style.display = (!_rfPickQ || (c.dataset.name || '').toLowerCase().includes(_rfPickQ)) ? '' : 'none';
   });
 }
-// combo ผ่านตัวกรองไหม — ไม่ได้เลือกอะไรเลย = ผ่านหมด, เลือกแล้ว = ต้องมีชื่อที่เลือกอยู่ใน combo
+// combo ผ่านตัวกรองไหม — ไม่ได้เลือกอะไรเลย = ผ่านหมด
+//   โหมด "ครบทุกตัว" : ต้องมีชื่อที่เลือก "ครบทุกตัว" อยู่ใน combo (มีตัวอื่นปนได้ ไม่ว่ากัน)
+//   โหมด "ตัวใดก็ได้" : มีตัวใดตัวหนึ่งก็พอ
 function rfComboPass(comboName) {
   if (!_rfPick.size) return true;
-  return comboName.split('+').some(p => _rfPick.has(p.trim()));
+  const parts = comboName.split('+').map(s => s.trim());
+  return _rfMatchAll ? [..._rfPick].every(n => parts.includes(n))
+                     : parts.some(p => _rfPick.has(p));
 }
 
 // ── แบ่งหน้าการ์ด combo (ข้อมูลเยอะ เลื่อนยาวไม่ไหว) ──
@@ -2524,9 +2564,9 @@ function renderRangerFind(data) {
   const names = Object.keys(nameTotals)
     .filter(n => !_rfPick.size || _rfPick.has(n))     // ติ๊กแล้วโชว์เฉพาะที่ติ๊ก
     .map(n => ({
-      name: n, count: nameTotals[n], combos: nameCombos[n],
+      name: n, count: nameTotals[n], combos: nameCombos[n], fav: rfIsFav(n),
       main: RANGER_MAIN_NAMES.some(m => m.toLowerCase() === n.toLowerCase()),
-    })).sort((a, b) => (b.main - a.main) || b.count - a.count || a.name.localeCompare(b.name));
+    })).sort((a, b) => (b.fav - a.fav) || (b.main - a.main) || b.count - a.count || a.name.localeCompare(b.name));
 
   const filesInScope = picked.reduce((s, g) => s + (groupFiles[g] || 0), 0);
   const idsInScope = combos.reduce((s, c) => s + c.count, 0);
@@ -2554,6 +2594,7 @@ function renderRangerFind(data) {
   const nameCards = names.length ? names.map(n => `
     <div class="hero-card rg-card clickable with-img${n.main ? ' main-name' : ''}" data-name="${escAttr(n.name)}"
          onclick="rfOpenDetail('name', '${escAttr(n.name)}')" title="กดดูข้อมูลเต็มของ ${escAttr(n.name)}">
+      ${n.fav ? '<span class="fav-star" title="ตัวโปรด">★</span>' : ''}
       ${heroImgs(n.name)}
       <div class="hero-name" title="${escHtml(n.name)}">${escHtml(n.name)}</div>
       <div class="hero-count">${n.count.toLocaleString()}</div>
@@ -2578,18 +2619,34 @@ function renderRangerFind(data) {
   }).join('') : `<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>${_rfQ ? 'ไม่พบ combo ที่ตรงกับคำค้น' : 'ไม่พบไฟล์ที่มีชื่อฮีโร่'}</h3></div>`;
 
   // กล่องติ๊กเลือกชื่อตัว — รายการมาจากชื่อที่เจอจริงในข้อมูล เรียงตามจำนวนมาก→น้อย
-  const pickChips = allNames.map(n => `
-    <label class="pick-chip${_rfPick.has(n) ? ' on' : ''}" data-name="${escAttr(n)}" title="${escHtml(n)} — ${allNameCount[n]} id">
+  // ตัวโปรดขึ้นก่อน แล้วค่อยเรียงตามจำนวน
+  const sortedPick = allNames.slice().sort((a, b) =>
+    (rfIsFav(b) - rfIsFav(a)) || (allNameCount[b] - allNameCount[a]) || a.localeCompare(b));
+  const pickChips = sortedPick.map(n => `
+    <label class="pick-chip${_rfPick.has(n) ? ' on' : ''}${rfIsFav(n) ? ' fav' : ''}" data-name="${escAttr(n)}" title="${escHtml(n)} — ${allNameCount[n]} id">
       <input type="checkbox" ${_rfPick.has(n) ? 'checked' : ''} onchange="rfTogglePick('${escAttr(n)}')">
+      <span class="star" onclick="rfToggleFav('${escAttr(n)}', event)" title="ติดดาวเป็นตัวโปรด">${rfIsFav(n) ? '★' : '☆'}</span>
       ${escHtml(n)} <span class="n">${allNameCount[n]}</span>
     </label>`).join('');
   const pickPanel = allNames.length ? `
     <div class="pick-panel">
       <div class="pick-head">
         <span class="pick-title">🎯 เลือกตัวที่จะแสดง ${_rfPick.size ? '<span style="color:var(--success)">(เลือกอยู่ ' + _rfPick.size + '/' + allNames.length + ')</span>' : '<span style="color:var(--text-dim)">(ไม่ได้เลือก = แสดงทั้งหมด ' + allNames.length + ' ตัว)</span>'}</span>
-        <input type="text" class="dash-search" style="min-width:170px; padding:6px 12px" placeholder="🔍 ค้นหาชื่อในรายการ" value="${escAttr(_rfPickQ)}" oninput="rfSetPickQ(this.value)">
+        <input type="text" class="dash-search" style="min-width:150px; padding:6px 12px" placeholder="🔍 ค้นหาชื่อในรายการ" value="${escAttr(_rfPickQ)}" oninput="rfSetPickQ(this.value)">
+        <button class="btn${_rfFav.size ? '' : ' '}" onclick="rfPickFavs()" ${_rfFav.size ? '' : 'disabled'} title="เลือกเฉพาะตัวที่ติดดาวไว้">★ ตัวโปรด (${_rfFav.size})</button>
         <button class="btn" onclick="rfPickAllNames()">เลือกทั้งหมด</button>
         <button class="btn" onclick="rfClearPick()">ล้างตัวกรอง</button>
+      </div>
+      <div class="pick-head" style="margin-bottom:8px">
+        <span style="font-size:12px; color:var(--text-dim)">เงื่อนไข:</span>
+        <div class="seg">
+          <button class="btn${_rfMatchAll ? ' on' : ''}" onclick="rfSetMatchAll(true)"
+                  title="แสดงเฉพาะโฟลเดอร์ที่มีตัวที่เลือกครบทุกตัว (มีตัวอื่นปนได้)">มีครบทุกตัวที่เลือก</button>
+          <button class="btn${_rfMatchAll ? '' : ' on'}" onclick="rfSetMatchAll(false)"
+                  title="แสดงโฟลเดอร์ที่มีตัวใดตัวหนึ่งที่เลือก">มีตัวใดก็ได้</button>
+        </div>
+        ${_rfPick.size > 1 ? `<span style="font-size:12px; color:${_rfMatchAll ? 'var(--success)' : 'var(--text-dim)'}">
+          ${_rfMatchAll ? 'กำลังหาโฟลเดอร์ที่มี <b>' + [..._rfPick].map(escHtml).join(' + ') + '</b> ครบทุกตัว' : 'มีตัวใดตัวหนึ่งใน ' + _rfPick.size + ' ตัวที่เลือก'}</span>` : ''}
       </div>
       <div class="pick-list" id="rfPickList">${pickChips}</div>
     </div>` : '';
