@@ -11,7 +11,7 @@ cd /d "%~dp0"
 ::  EDIT ONCE: paste your Tailscale REUSABLE auth key below
 ::  (get it from https://login.tailscale.com/admin/settings/keys - use the Copy button)
 :: =====================================================================
-set "AUTHKEY=tskey-auth-kdx5YEnuKP11CNTRL-uQLvVKF3fn16nnvuAYjwm163PVE1V1VL"
+set "AUTHKEY=tskey-auth-kp7xKNvxMp11CNTRL-ehkrQGtb9rWoKRjAzNu4rWkwzYUZkQPTQ"
 :: =====================================================================
 
 set "TS=C:\Program Files\Tailscale\tailscale.exe"

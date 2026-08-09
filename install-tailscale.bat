@@ -12,7 +12,7 @@ cd /d "%~dp0"
 ::   3) Paste it below after AUTHKEY=  (keep the AUTHKEY= part!)
 :: ================================================================
 
-set "AUTHKEY=tskey-auth-kdx5YEnuKP11CNTRL-uQLvVKF3fn16nnvuAYjwm163PVE1V1VL"
+set "AUTHKEY=tskey-auth-kp7xKNvxMp11CNTRL-ehkrQGtb9rWoKRjAzNu4rWkwzYUZkQPTQ"
 
 :: full path to tailscale (PATH is not refreshed in this window right after install)
 set "TS=C:\Program Files\Tailscale\tailscale.exe"
@@ -68,7 +68,7 @@ if not exist "%TS%" (
 echo [2/2] Joining Tailscale network ...
 "%TS%" up --authkey %AUTHKEY% --unattended
 if errorlevel 1 (
-    echo [ERROR] Join failed - check the AUTHKEY (maybe expired/invalid).
+    echo [ERROR] Join failed - check the AUTHKEY ^(maybe expired/invalid^).
     pause
     exit /b 1
 )
