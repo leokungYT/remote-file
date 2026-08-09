@@ -1129,24 +1129,20 @@ WEB_UI_HTML = r"""
   /* รูปตัวละครมุมขวาบน — combo หลายตัวจะซ้อนกันแบบไพ่ ไม่กินที่ */
   .hero-imgs { position: absolute; top: 7px; right: 8px; display: flex; pointer-events: none; }
   .hero-img {
-    width: 22px; height: 22px; object-fit: cover; border-radius: 50%;
+    width: 25px; height: 25px; object-fit: cover; border-radius: 50%;
     border: 1px solid var(--border); background: var(--bg-secondary);
-    margin-left: -7px; box-shadow: 0 1px 4px rgba(0,0,0,.45);
+    box-shadow: 0 1px 4px rgba(0,0,0,.45);
+    position: relative;      /* ให้ z-index ที่ตั้งจาก JS ทำงาน รูปซ้ายทับรูปขวา */
+    flex: 0 0 auto;
   }
-  .hero-img:first-child { margin-left: 0; }
-  .hero-img.more {
-    display: inline-flex; align-items: center; justify-content: center;
-    font-size: 10px; font-weight: 700; color: var(--text-secondary);
-  }
-  .hero-card.with-img .hero-name { padding-right: 58px; }
+  .hero-card.with-img .hero-name { padding-right: 80px; }
 
   /* การ์ดใหญ่ — ชื่อ combo ยาวๆ จะได้ไม่โดนตัดเหลือ "kappa+kukuru+..." */
   .hero-grid.big { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 11px; }
   .hero-grid.big .hero-card { min-height: 86px; padding: 12px 14px; }
   .hero-grid.big .hero-name { font-size: 13px; -webkit-line-clamp: 3; }
   .hero-grid.big .hero-count { font-size: 25px; }
-  .hero-grid.big .hero-img { width: 25px; height: 25px; }
-  .hero-grid.big .hero-card.with-img .hero-name { padding-right: 64px; }
+  .hero-grid.big .hero-card.with-img .hero-name { padding-right: 82px; }
   @media (max-width: 620px) {
     .hero-grid.big { grid-template-columns: repeat(auto-fill, minmax(152px, 1fr)); gap: 8px; }
     .hero-grid.big .hero-count { font-size: 20px; }
@@ -1990,9 +1986,9 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${combos.length}</div></div>
     </div>
     <h3 style="margin:4px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ทุกเครื่อง (ชื่อเดียวกันคนละ combo บวกรวมกัน)</h3>
-    <div class="hero-grid">${nameCards}</div>
+    <div class="hero-grid big">${nameCards}</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">แยกตามไฟล์ (combo) — ไฟล์ที่มี 2 ชื่อจะนับเป็นชุดเดียว เช่น kikoru+Kafka</h3>
-    <div class="hero-grid">${comboCards}</div>
+    <div class="hero-grid big">${comboCards}</div>
     <div id="rangerNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — ${RANGER_CFG.label}</h3>
     <div class="agent-stats">${agentRows}</div>
@@ -2067,15 +2063,17 @@ async function openRangerFindDashboard(useCache) {
 function heroImgs(comboName) {
   const parts = String(comboName || '').split('+').map(s => s.trim()).filter(Boolean);
   if (!parts.length) return '';
-  // โชว์ได้มากสุด 3 วง เกินกว่านั้นใส่ +N แทน ไม่งั้นรูปกินที่จนชื่อถูกทับ
-  const MAX = 3;
-  const shown = parts.length > MAX ? parts.slice(0, MAX - 1) : parts;
-  const extra = parts.length - shown.length;
-  const imgs = shown.map(p =>
+  // โชว์ครบทุกตัว ไม่ตัดเป็น +N — ยิ่งหลายตัวยิ่งซ้อนกันถี่ขึ้น
+  // ความกว้างรวมคงที่ ~SPAN px ไม่ว่าจะกี่รูป ชื่อบนการ์ดเลยไม่โดนทับ
+  const n = parts.length;
+  const SIZE = 25, SPAN = 74;
+  const step = n <= 1 ? SIZE : Math.max(6, Math.min(19, Math.round((SPAN - SIZE) / (n - 1))));
+  const overlap = SIZE - step;
+  const imgs = parts.map((p, i) =>
     `<img class="hero-img" src="/hero-img/${encodeURIComponent(p)}" alt="" loading="lazy"
+          style="${i ? 'margin-left:-' + overlap + 'px;' : ''}z-index:${n - i}"
           title="${escAttr(p)}" onerror="this.remove()">`).join('');
-  const more = extra ? `<span class="hero-img more" title="${escAttr(parts.join(' + '))}">+${extra}</span>` : '';
-  return `<div class="hero-imgs" title="${escAttr(parts.join(' + '))}">${imgs}${more}</div>`;
+  return `<div class="hero-imgs" title="${escAttr(parts.join(' + '))}">${imgs}</div>`;
 }
 
 function rfGroupLabel(g) { return '📁 ' + g; }
