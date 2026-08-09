@@ -320,6 +320,8 @@ def _dispatch_command(data):
             handle_count_heroes(req_id, payload)
         elif action == "count_prefix_ids":
             handle_count_prefix_ids(req_id, payload)
+        elif action == "export_folder":
+            handle_export_folder(req_id, payload)
         elif action == "list_ids":
             handle_list_ids(req_id, payload)
         elif action == "rename_file":
@@ -952,6 +954,139 @@ def handle_count_prefix_ids(req_id, data):
     send_response(req_id, {"success": True, "combos": combos, "groups": groups,
                            "group_totals": group_totals, "total_files": total_files,
                            "matched_files": matched_files, "folder": folder, "exists": exists})
+
+
+def _export_match(folder_name, mode, key):
+    """โฟลเดอร์ชื่อนี้ตรงกับที่ขอไหม
+       mode=combo : ต้องเป็นชุดเดียวกันเป๊ะ (kikoru+Kafka)
+       mode=name  : ขอแค่มีชื่อนั้นอยู่ในชุด (kikoru อยู่ใน kikoru+Kafka ก็เอา)"""
+    parts = [p.strip() for p in folder_name.split("+") if p.strip()]
+    if not parts:
+        return False
+    if mode == "name":
+        return key in parts
+    return "+".join(parts) == key
+
+
+def handle_export_folder(req_id, data):
+    """zip โฟลเดอร์ที่ตรงกับที่ขอ (backup-id/<ชุด>/<ชื่อตัว>/) แล้วอัปขึ้น server
+       ตั้งชื่อไฟล์ใน zip เป็น <ชุด>/<ชื่อตัว>/<ไฟล์> ตามโครงเดิม
+       move=True จะลบต้นทางหลังอัปสำเร็จเท่านั้น (อัปไม่ผ่าน = ไม่ลบ)"""
+    import zipfile
+    import tempfile
+
+    subpath = data.get("subpath", "backup-id")
+    match = (data.get("base_match") or "main").strip().lower()
+    group = data.get("group") or "ALL"
+    mode = (data.get("mode") or "combo").strip().lower()
+    key = (data.get("key") or "").strip()
+    job = str(data.get("job") or "").strip()
+    move = bool(data.get("move"))
+    upload_url = (data.get("upload_url") or "").strip()
+
+    if not key or not job:
+        send_response(req_id, {"error": "ข้อมูลไม่ครบ (key/job)"})
+        return
+
+    base = _resolve_game_base(match)
+    root = os.path.join(base, subpath) if base else None
+    if not root or not os.path.isdir(root):
+        send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": False})
+        return
+
+    # หาโฟลเดอร์เป้าหมายทั้งหมด
+    targets = []          # (ชื่อชุด, ชื่อโฟลเดอร์, path เต็ม)
+    try:
+        for set_name in sorted(os.listdir(root)):
+            set_dir = os.path.join(root, set_name)
+            if not os.path.isdir(set_dir):
+                continue
+            if group != "ALL" and set_name != group:
+                continue
+            for fld in sorted(os.listdir(set_dir)):
+                d = os.path.join(set_dir, fld)
+                if os.path.isdir(d) and _export_match(fld, mode, key):
+                    targets.append((set_name, fld, d))
+    except Exception as e:
+        send_response(req_id, {"error": str(e)})
+        return
+
+    if not targets:
+        send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": True})
+        return
+
+    tmp = tempfile.NamedTemporaryFile(prefix="export_", suffix=".zip", delete=False)
+    tmp.close()
+    packed = []           # path จริงที่ใส่ zip แล้ว (ไว้ลบตอน move)
+    n_files = 0
+    try:
+        with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+            for set_name, fld, d in targets:
+                for cur, _dirs, files in os.walk(d):
+                    rel_in = os.path.relpath(cur, d)
+                    for fn in files:
+                        full = os.path.join(cur, fn)
+                        arc_parts = [set_name, fld]
+                        if rel_in != ".":
+                            arc_parts += rel_in.replace("\\", "/").split("/")
+                        arc_parts.append(fn)
+                        zf.write(full, "/".join(arc_parts))
+                        packed.append(full)
+                        n_files += 1
+        size = os.path.getsize(tmp.name)
+
+        if n_files == 0:
+            os.remove(tmp.name)
+            send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": True})
+            return
+
+        # อัปขึ้น server (ลองทุก URL จนกว่าจะสำเร็จ)
+        import requests
+        urls = [upload_url] if upload_url else [u.rstrip("/") + "/export-upload" for u in SERVER_URLS]
+        last_err = None
+        ok = False
+        for u in urls:
+            try:
+                with open(tmp.name, "rb") as f:
+                    r = requests.post(u, params={"job": job, "agent": AGENT_NAME, "secret": AGENT_SECRET},
+                                      data=f, headers={"Content-Type": "application/zip"}, timeout=600)
+                r.raise_for_status()
+                ok = True
+                break
+            except Exception as e:
+                last_err = e
+        if not ok:
+            send_response(req_id, {"error": f"อัปโหลด zip ไม่สำเร็จ: {last_err}"})
+            return
+
+        # ลบต้นทางเฉพาะตอนสั่ง "ย้าย" และอัปสำเร็จแล้วเท่านั้น
+        deleted = 0
+        if move:
+            for full in packed:
+                try:
+                    os.remove(full)
+                    deleted += 1
+                except Exception:
+                    pass
+            for _set_name, _fld, d in targets:       # เก็บกวาดโฟลเดอร์ที่ว่างแล้ว
+                for cur, dirs, files in os.walk(d, topdown=False):
+                    if not os.listdir(cur):
+                        try:
+                            os.rmdir(cur)
+                        except Exception:
+                            pass
+
+        logger.info(f"  export_folder: {n_files} ไฟล์ ({size} bytes) จาก {len(targets)} โฟลเดอร์"
+                    + (f" · ลบต้นทาง {deleted}" if move else ""))
+        send_response(req_id, {"success": True, "files": n_files, "bytes": size,
+                               "folders": len(targets), "deleted": deleted, "exists": True})
+    except Exception as e:
+        send_response(req_id, {"error": str(e)})
+    finally:
+        try:
+            os.remove(tmp.name)
+        except Exception:
+            pass
 
 
 def _reply_ids(req_id, folder):

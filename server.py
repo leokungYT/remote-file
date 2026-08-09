@@ -10,6 +10,7 @@ import sys
 import json
 import time
 import uuid
+import shutil
 import base64
 import hashlib
 import logging  
@@ -511,6 +512,126 @@ def serve_hero_img_list():
     if not folder:
         return jsonify({"folder": None, "names": []})
     return jsonify({"folder": folder, "names": sorted(_hero_img_index(folder).values())})
+
+
+# ═══════════════════════════════════════════════════════════
+#  EXPORT — รวม zip จากหลายเครื่องเป็นไฟล์เดียวให้โหลด
+#  เครื่องลูก zip โฟลเดอร์ที่ตรงแล้ว POST มาที่ /export-upload
+#  พอครบ (หรือหมดเวลา) ค่อยรวมเป็น zip เดียวที่ /export-download/<job>
+# ═══════════════════════════════════════════════════════════
+EXPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_exports")
+export_jobs = {}          # job_id -> {"agents": {name: {...}}, "expect": n, "created": ts, "label": str}
+
+
+def _export_job_dir(job):
+    return os.path.join(EXPORT_DIR, os.path.basename(str(job)))
+
+
+@app.route("/export-upload", methods=["POST"])
+def export_upload():
+    """รับ zip จากเครื่องลูก (ไฟล์เดียวต่อเครื่อง)"""
+    job = request.args.get("job", "")
+    agent = request.args.get("agent", "") or "unknown"
+    if request.args.get("secret") != AGENT_SECRET:
+        return jsonify({"error": "bad secret"}), 403
+    if not job or job not in export_jobs:
+        return jsonify({"error": "unknown job"}), 404
+
+    d = _export_job_dir(job)
+    os.makedirs(d, exist_ok=True)
+    safe = "".join(ch for ch in agent if ch.isalnum() or ch in "-_") or "pc"
+    path = os.path.join(d, safe + ".zip")
+    with open(path, "wb") as f:
+        f.write(request.get_data())
+    export_jobs[job]["agents"][agent] = {"file": path, "bytes": os.path.getsize(path)}
+    logger.info(f"📦 export {job}: รับ zip จาก {agent} ({os.path.getsize(path)} bytes)")
+    return jsonify({"ok": True})
+
+
+@app.route("/export-download/<job>")
+def export_download(job):
+    """รวม zip ของทุกเครื่องเป็นไฟล์เดียวแล้วส่งให้โหลด"""
+    import zipfile
+    info = export_jobs.get(job)
+    d = _export_job_dir(job)
+    if not info or not os.path.isdir(d):
+        return ("ไม่พบงาน export นี้ (อาจหมดอายุแล้ว)", 404)
+
+    merged = os.path.join(d, "_merged.zip")
+    if not os.path.isfile(merged):
+        seen = {}
+        with zipfile.ZipFile(merged, "w", zipfile.ZIP_DEFLATED) as out:
+            for agent, meta in sorted(info["agents"].items()):
+                try:
+                    with zipfile.ZipFile(meta["file"], "r") as src:
+                        for item in src.infolist():
+                            if item.is_dir():
+                                continue
+                            name = item.filename
+                            # ชื่อชนกันข้ามเครื่อง → เติมชื่อเครื่องต่อท้าย ไม่ให้ไฟล์หาย
+                            if name in seen:
+                                stem, ext = os.path.splitext(name)
+                                name = f"{stem}__{agent}{ext}"
+                                k = 2
+                                while name in seen:
+                                    name = f"{stem}__{agent}_{k}{ext}"
+                                    k += 1
+                            seen[name] = True
+                            out.writestr(name, src.read(item.filename))
+                except Exception as e:
+                    logger.warning(f"  export merge: ข้าม {meta['file']}: {e}")
+    label = info.get("label") or "export"
+    return send_file(merged, as_attachment=True, download_name=f"{label}.zip",
+                     mimetype="application/zip")
+
+
+@app.route("/export-status/<job>")
+def export_status(job):
+    info = export_jobs.get(job)
+    if not info:
+        return jsonify({"error": "unknown job"}), 404
+    return jsonify({"done": len(info["agents"]), "expect": info["expect"],
+                    "bytes": sum(a["bytes"] for a in info["agents"].values())})
+
+
+def _export_cleanup(keep=6):
+    """เก็บงานล่าสุดไว้ไม่กี่งาน ที่เหลือลบทิ้ง กันดิสก์บวม"""
+    try:
+        olds = sorted(export_jobs.items(), key=lambda kv: kv[1]["created"])[:-keep]
+        for job, _info in olds:
+            shutil.rmtree(_export_job_dir(job), ignore_errors=True)
+            export_jobs.pop(job, None)
+    except Exception:
+        pass
+
+
+@socketio.on("request_export")
+def handle_request_export(data):
+    """เริ่มงาน export: สั่งทุกเครื่องที่เลือก zip โฟลเดอร์ที่ตรงแล้วส่งกลับมา"""
+    agent_ids = data.get("agent_ids") or []
+    job = uuid.uuid4().hex[:12]
+    label = str(data.get("label") or "export").replace("+", "_")
+    label = "".join(ch for ch in label if ch.isalnum() or ch in "-_")[:60] or "export"
+
+    export_jobs[job] = {"agents": {}, "expect": len(agent_ids), "created": time.time(), "label": label}
+    os.makedirs(_export_job_dir(job), exist_ok=True)
+    _export_cleanup()
+
+    sent = 0
+    for aid in agent_ids:
+        rid = send_to_agent(aid, "export_folder", {
+            "subpath": data.get("subpath", "backup-id"),
+            "base_match": data.get("base_match", "main"),
+            "group": data.get("group", "ALL"),
+            "mode": data.get("mode", "combo"),
+            "key": data.get("key", ""),
+            "move": bool(data.get("move")),
+            "job": job,
+        }, request.sid)
+        if rid:
+            sent += 1
+    export_jobs[job]["expect"] = sent
+    emit("export_started", {"job": job, "expect": sent})
 
 
 @app.route("/agent.py")
@@ -2160,8 +2281,72 @@ function rfOpenDetail(kind, key) {
     ${isName ? `<h3 style="font-size:13px; color:var(--text-secondary); margin:16px 0 8px">อยู่ในโฟลเดอร์ไหนบ้าง (${Object.keys(byCombo).length} แบบ)</h3>${rows(byCombo, '🧩')}` : ''}
     <h3 style="font-size:13px; color:var(--text-secondary); margin:16px 0 8px">แยกตามเครื่อง</h3>
     ${rows(byPc, '🖥️')}
+
+    <h3 style="font-size:13px; color:var(--text-secondary); margin:18px 0 8px">โหลดไฟล์ออกมาเป็น .zip</h3>
+    <div style="border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--bg-card)">
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-bottom:10px">
+        <input type="checkbox" id="rfExportMove" style="width:auto">
+        <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
+      </label>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
+        <button class="btn btn-primary" id="rfExportBtn"
+                onclick="rfExport('${escAttr(kind)}', '${escAttr(key)}')">📦 โหลด .zip (${total.toLocaleString()} id จาก ${Object.keys(byPc).length} เครื่อง)</button>
+        <span id="rfExportMsg" style="font-size:12px; color:var(--text-dim)"></span>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        โครงในไฟล์ zip: <code>${escHtml(Object.keys(bySet)[0] || 'ranger')}/${escHtml(isName ? (Object.keys(byCombo)[0] || key) : key)}/…</code>
+        · รวมจากทุกเครื่องเป็นไฟล์เดียว
+      </div>
+    </div>
   `;
   document.getElementById('rfDetailModal').classList.add('show');
+}
+
+// สั่ง export: ทุกเครื่อง zip โฟลเดอร์ที่ตรง → ส่งขึ้น server → รวมเป็นไฟล์เดียวแล้วโหลด
+async function rfExport(kind, key) {
+  const move = !!(document.getElementById('rfExportMove') || {}).checked;
+  const btn = document.getElementById('rfExportBtn');
+  const msg = document.getElementById('rfExportMsg');
+  const allAgents = agentsData || [];
+  const agents = _rfScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _rfScope);
+  if (!agents.length) { toast('ไม่มีเครื่องออนไลน์', 'error'); return; }
+  if (move && !confirm(`⚠️ ย้ายไฟล์ของ "${key}" ออกจาก ${agents.length} เครื่อง ?\n\nไฟล์ต้นทางจะถูกลบหลังส่งขึ้น server สำเร็จ (กู้คืนไม่ได้)`)) return;
+
+  btn.disabled = true;
+  const setMsg = (t) => { if (msg) msg.textContent = t; };
+  setMsg(`กำลังสั่ง ${agents.length} เครื่องบีบไฟล์...`);
+
+  const job = await new Promise((resolve) => {
+    let done = false;
+    socket.once('export_started', (d) => { done = true; resolve(d); });
+    socket.emit('request_export', {
+      agent_ids: agents.map(a => a.agent_id),
+      subpath: RANGER_CFG.subpath, base_match: RANGER_CFG.base,
+      group: _rfGroup, mode: kind, key: key, move: move,
+      label: (move ? 'move_' : '') + key,
+    });
+    setTimeout(() => { if (!done) resolve(null); }, 20000);
+  });
+  if (!job || !job.job) { setMsg('เริ่มงานไม่สำเร็จ'); btn.disabled = false; return; }
+
+  // รอเครื่องลูกทยอยส่ง zip เข้ามา (ถามสถานะเป็นระยะ)
+  const t0 = Date.now();
+  let last = -1, stableFor = 0;
+  while (Date.now() - t0 < 15 * 60 * 1000) {
+    await _sleep(1500);
+    let st;
+    try { st = await (await fetch('/export-status/' + job.job)).json(); } catch (e) { continue; }
+    setMsg(`ได้แล้ว ${st.done}/${st.expect} เครื่อง · ${(st.bytes / 1048576).toFixed(1)} MB`);
+    if (st.done >= st.expect) break;
+    stableFor = (st.done === last) ? stableFor + 1 : 0;   // เครื่องที่ไม่มีไฟล์จะไม่ส่งอะไรมา
+    last = st.done;
+    if (stableFor >= 20) break;                          // นิ่งมา ~30 วิ ถือว่าจบเท่าที่ได้
+  }
+
+  setMsg('กำลังรวมไฟล์...');
+  window.location.href = '/export-download/' + job.job;   // เบราว์เซอร์เด้งโหลดไฟล์เอง
+  setTimeout(() => { setMsg('เริ่มดาวน์โหลดแล้ว'); btn.disabled = false; }, 2500);
+  toast(move ? 'ย้ายไฟล์ออกมาแล้ว' : 'กำลังดาวน์โหลด .zip', 'success');
 }
 
 function rfGroupLabel(g) { return '📁 ' + g; }

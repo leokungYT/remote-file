@@ -8,3 +8,4 @@ ngrok.zip
 
 __pycache__/
 *.pyc
+_exports/
