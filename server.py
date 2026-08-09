@@ -117,6 +117,16 @@ def handle_agent_response(data):
     req_id = data.get("request_id")
     # เอา request ออกจากคิวเลยหลังตอบ (กัน pending_requests บวมจาก live view/คำสั่งถี่ๆ)
     req = pending_requests.pop(req_id, None)
+    # งาน export: เครื่องที่ "ไม่มีโฟลเดอร์ตรง" จะไม่อัป zip มาเลย ถ้ารอแต่ไฟล์จะค้างตลอด
+    # เลยนับจากคำตอบของ agent แทน — ตอบแล้วถือว่าเครื่องนั้นจบงาน
+    job = export_reqs.pop(req_id, None)
+    if job and job in export_jobs:
+        info = export_jobs[job]
+        info["replied"] += 1
+        if data.get("error"):
+            info["errors"].append(str(data.get("error"))[:120])
+        else:
+            info["files"] += int(data.get("files") or 0)
     if req:
         web_sid = req.get("web_sid")
         if web_sid:
@@ -520,7 +530,8 @@ def serve_hero_img_list():
 #  พอครบ (หรือหมดเวลา) ค่อยรวมเป็น zip เดียวที่ /export-download/<job>
 # ═══════════════════════════════════════════════════════════
 EXPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_exports")
-export_jobs = {}          # job_id -> {"agents": {name: {...}}, "expect": n, "created": ts, "label": str}
+export_jobs = {}          # job_id -> {"agents": {name: {...}}, "expect": n, "replied": n, ...}
+export_reqs = {}          # request_id -> job_id (ไว้รู้ว่าเครื่องไหนตอบงาน export ไหนแล้ว)
 
 
 def _export_job_dir(job):
@@ -590,8 +601,15 @@ def export_status(job):
     info = export_jobs.get(job)
     if not info:
         return jsonify({"error": "unknown job"}), 404
-    return jsonify({"done": len(info["agents"]), "expect": info["expect"],
-                    "bytes": sum(a["bytes"] for a in info["agents"].values())})
+    return jsonify({
+        "done": len(info["agents"]),            # เครื่องที่ส่ง zip มาแล้ว
+        "replied": info["replied"],             # เครื่องที่ตอบแล้ว (รวมพวกที่ไม่มีไฟล์)
+        "expect": info["expect"],
+        "files": info["files"],
+        "bytes": sum(a["bytes"] for a in info["agents"].values()),
+        "finished": info["replied"] >= info["expect"],
+        "errors": info["errors"][:5],
+    })
 
 
 def _export_cleanup(keep=6):
@@ -613,7 +631,8 @@ def handle_request_export(data):
     label = str(data.get("label") or "export").replace("+", "_")
     label = "".join(ch for ch in label if ch.isalnum() or ch in "-_")[:60] or "export"
 
-    export_jobs[job] = {"agents": {}, "expect": len(agent_ids), "created": time.time(), "label": label}
+    export_jobs[job] = {"agents": {}, "expect": len(agent_ids), "replied": 0, "files": 0,
+                        "errors": [], "created": time.time(), "label": label}
     os.makedirs(_export_job_dir(job), exist_ok=True)
     _export_cleanup()
 
@@ -630,6 +649,7 @@ def handle_request_export(data):
         }, request.sid)
         if rid:
             sent += 1
+            export_reqs[rid] = job
     export_jobs[job]["expect"] = sent
     emit("export_started", {"job": job, "expect": sent})
 
@@ -2291,7 +2311,13 @@ function rfOpenDetail(kind, key) {
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
         <button class="btn btn-primary" id="rfExportBtn"
                 onclick="rfExport('${escAttr(kind)}', '${escAttr(key)}')">📦 โหลด .zip (${total.toLocaleString()} id จาก ${Object.keys(byPc).length} เครื่อง)</button>
-        <span id="rfExportMsg" style="font-size:12px; color:var(--text-dim)"></span>
+      </div>
+      <div id="rfExportProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="rfExportMsg" style="color:var(--text-secondary)"></span>
+          <span id="rfExportPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="rfExportBar" style="width:0%"></div></div>
       </div>
       <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
         โครงในไฟล์ zip: <code>${escHtml(Object.keys(bySet)[0] || 'ranger')}/${escHtml(isName ? (Object.keys(byCombo)[0] || key) : key)}/…</code>
@@ -2313,8 +2339,16 @@ async function rfExport(kind, key) {
   if (move && !confirm(`⚠️ ย้ายไฟล์ของ "${key}" ออกจาก ${agents.length} เครื่อง ?\n\nไฟล์ต้นทางจะถูกลบหลังส่งขึ้น server สำเร็จ (กู้คืนไม่ได้)`)) return;
 
   btn.disabled = true;
-  const setMsg = (t) => { if (msg) msg.textContent = t; };
-  setMsg(`กำลังสั่ง ${agents.length} เครื่องบีบไฟล์...`);
+  const prog = document.getElementById('rfExportProg');
+  const bar = document.getElementById('rfExportBar');
+  const pct = document.getElementById('rfExportPct');
+  if (prog) prog.style.display = 'block';
+  const setMsg = (t, p) => {
+    if (msg) msg.textContent = t;
+    if (p != null && bar) { bar.style.width = Math.round(p) + '%'; }
+    if (p != null && pct) { pct.textContent = Math.round(p) + '%'; }
+  };
+  setMsg(`กำลังสั่ง ${agents.length} เครื่องบีบไฟล์...`, 0);
 
   const job = await new Promise((resolve) => {
     let done = false;
@@ -2329,24 +2363,46 @@ async function rfExport(kind, key) {
   });
   if (!job || !job.job) { setMsg('เริ่มงานไม่สำเร็จ'); btn.disabled = false; return; }
 
-  // รอเครื่องลูกทยอยส่ง zip เข้ามา (ถามสถานะเป็นระยะ)
+  // รอจนทุกเครื่อง "ตอบกลับ" (ไม่ใช่รอแต่ไฟล์ — เครื่องที่ไม่มีโฟลเดอร์ตรงจะไม่ส่ง zip มาเลย)
   const t0 = Date.now();
-  let last = -1, stableFor = 0;
-  while (Date.now() - t0 < 15 * 60 * 1000) {
-    await _sleep(1500);
-    let st;
+  let st = null;
+  while (Date.now() - t0 < 20 * 60 * 1000) {
+    await _sleep(1200);
     try { st = await (await fetch('/export-status/' + job.job)).json(); } catch (e) { continue; }
-    setMsg(`ได้แล้ว ${st.done}/${st.expect} เครื่อง · ${(st.bytes / 1048576).toFixed(1)} MB`);
-    if (st.done >= st.expect) break;
-    stableFor = (st.done === last) ? stableFor + 1 : 0;   // เครื่องที่ไม่มีไฟล์จะไม่ส่งอะไรมา
-    last = st.done;
-    if (stableFor >= 20) break;                          // นิ่งมา ~30 วิ ถือว่าจบเท่าที่ได้
+    setMsg(`ตอบแล้ว ${st.replied}/${st.expect} เครื่อง · มีไฟล์ ${st.done} เครื่อง · ${st.files.toLocaleString()} ไฟล์ · ${(st.bytes / 1048576).toFixed(1)} MB`,
+           st.expect ? (st.replied / st.expect) * 90 : 0);
+    if (st.finished) break;
   }
 
-  setMsg('กำลังรวมไฟล์...');
-  window.location.href = '/export-download/' + job.job;   // เบราว์เซอร์เด้งโหลดไฟล์เอง
-  setTimeout(() => { setMsg('เริ่มดาวน์โหลดแล้ว'); btn.disabled = false; }, 2500);
-  toast(move ? 'ย้ายไฟล์ออกมาแล้ว' : 'กำลังดาวน์โหลด .zip', 'success');
+  if (!st || !st.files) {
+    setMsg(st && st.errors && st.errors.length ? ('ไม่ได้ไฟล์: ' + st.errors[0]) : 'ไม่พบไฟล์ที่ตรงในเครื่องไหนเลย', 100);
+    toast('ไม่มีไฟล์ให้โหลด', 'error');
+    btn.disabled = false;
+    return;
+  }
+
+  // ดึงไฟล์ที่รวมแล้วมาเป็น blob (จะได้รู้ว่าเสร็จจริงตอนไหน แทนการเด้ง URL แล้วเงียบ)
+  setMsg(`กำลังรวม ${st.files.toLocaleString()} ไฟล์ที่ server...`, 93);
+  try {
+    const resp = await fetch('/export-download/' + job.job);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    setMsg('กำลังดาวน์โหลด...', 97);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (move ? 'move_' : '') + key.replace(/\+/g, '_') + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    setMsg(`เสร็จแล้ว · ${st.files.toLocaleString()} ไฟล์ · ${(blob.size / 1048576).toFixed(1)} MB`, 100);
+    toast(move ? `ย้ายออกมาแล้ว ${st.files} ไฟล์` : `โหลดแล้ว ${st.files} ไฟล์`, 'success');
+  } catch (e) {
+    setMsg('ดาวน์โหลดล้มเหลว: ' + (e.message || e), 100);
+    toast('ดาวน์โหลดล้มเหลว', 'error');
+  }
+  btn.disabled = false;
 }
 
 function rfGroupLabel(g) { return '📁 ' + g; }
