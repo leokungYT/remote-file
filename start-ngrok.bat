@@ -35,7 +35,9 @@ if "%NGROK_TOKEN%"=="" (
 )
 :: ------------------------------------------------------------
 
-set "NG=ngrok.exe"
+:: ใช้ path เต็มเสมอ — บางเครื่องปิดการรัน exe จากโฟลเดอร์ปัจจุบัน
+:: (NoDefaultCurrentDirectoryInExePath) เรียกด้วยชื่อเปล่าจะขึ้น "is not recognized"
+set "NG=%~dp0ngrok.exe"
 set "PORT=5000"
 set "ZIP=ngrok.zip"
 set "NG_URL=https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
