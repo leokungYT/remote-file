@@ -1136,6 +1136,14 @@ WEB_UI_HTML = r"""
     flex: 0 0 auto;
   }
   .hero-card.with-img .hero-name { padding-right: 80px; }
+  /* การ์ดที่กดดูรายละเอียดได้ */
+  .hero-card.clickable { cursor: pointer; }
+  .hero-card.clickable:active { transform: translateY(0) scale(0.985); }
+  .hero-card.clickable::after {
+    content: '›'; position: absolute; right: 9px; bottom: 5px;
+    font-size: 15px; color: var(--text-dim); opacity: 0; transition: opacity .15s;
+  }
+  .hero-card.clickable:hover::after { opacity: 1; }
 
   /* การ์ดใหญ่ — ชื่อ combo ยาวๆ จะได้ไม่โดนตัดเหลือ "kappa+kukuru+..." */
   .hero-grid.big { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 11px; }
@@ -1469,6 +1477,16 @@ WEB_UI_HTML = r"""
       <div class="icon">🖥️</div>
       <h3>เลือกเครื่องลูกเพื่อเริ่มต้น</h3>
       <p>เลือกเครื่องลูกจากแถบด้านซ้ายเพื่อดูไฟล์</p>
+    </div>
+  </div>
+</div>
+
+<!-- RANGER DETAIL MODAL (กดการ์ดแล้วดูข้อมูลเต็ม) -->
+<div class="modal-overlay" id="rfDetailModal" onclick="if(event.target===this)closeModal('rfDetailModal')">
+  <div class="modal" style="min-width:min(560px,100%); max-width:640px">
+    <div id="rfDetailBody"></div>
+    <div class="modal-buttons" style="margin-top:16px">
+      <button class="btn btn-primary" onclick="closeModal('rfDetailModal')">ปิด</button>
     </div>
   </div>
 </div>
@@ -2045,6 +2063,7 @@ async function openRangerFindDashboard(useCache) {
     perAgent.push({
       name, total: res.total_files || 0, matched: res.matched_files || 0,
       exists: res.exists, groups: myGroups, legacy: !res.groups,
+      byGroup: gc,          // เก็บ combo รายเครื่องไว้ ให้หน้ารายละเอียดแจกแจงได้ว่าเครื่องไหนมีเท่าไหร่
     });
     for (const g in gc) {
       if (g === '') continue;
@@ -2074,6 +2093,75 @@ function heroImgs(comboName) {
           style="${i ? 'margin-left:-' + overlap + 'px;' : ''}z-index:${n - i}"
           title="${escAttr(p)}" onerror="this.remove()">`).join('');
   return `<div class="hero-imgs" title="${escAttr(parts.join(' + '))}">${imgs}</div>`;
+}
+
+// ── กดการ์ดแล้วเปิดดูข้อมูลเต็ม ──
+// kind='combo' ดูโฟลเดอร์ combo นั้น | kind='name' ดูตัวละครตัวเดียว (รวมทุก combo ที่มีชื่อนี้)
+function rfOpenDetail(kind, key) {
+  const c = _rfCache;
+  if (!c) return;
+  const inScope = _rfGroup === 'ALL' ? Object.keys(c.groupCombos) : [_rfGroup];
+  const isName = (kind === 'name');
+  const hit = (combo) => isName
+    ? combo.split('+').map(s => s.trim()).includes(key)
+    : combo === key;
+
+  // แจกแจงตามชุด + เก็บ combo ที่เกี่ยวข้อง (กรณีดูรายตัว)
+  const bySet = {}, byCombo = {};
+  let total = 0;
+  inScope.forEach(g => {
+    const src = c.groupCombos[g] || {};
+    for (const k in src) if (hit(k)) {
+      bySet[g] = (bySet[g] || 0) + src[k];
+      byCombo[k] = (byCombo[k] || 0) + src[k];
+      total += src[k];
+    }
+  });
+
+  // แจกแจงรายเครื่อง
+  const byPc = {};
+  (c.perAgent || []).forEach(p => {
+    const gm = p.byGroup || {};
+    let n = 0;
+    for (const g in gm) {
+      if (g === '' || (_rfGroup !== 'ALL' && g !== _rfGroup)) continue;
+      for (const k in gm[g]) if (hit(k)) n += gm[g][k];
+    }
+    if (n) byPc[p.name] = n;
+  });
+
+  const rows = (obj, icon) => {
+    const keys = Object.keys(obj).sort((a, b) => obj[b] - obj[a] || a.localeCompare(b));
+    if (!keys.length) return '<div style="color:var(--text-dim); font-size:13px">— ไม่มี —</div>';
+    return '<div class="agent-stats">' + keys.map(k =>
+      `<div class="agent-stat"><span>${icon} ${escHtml(k)}</span><span><b style="color:var(--accent)">${obj[k].toLocaleString()}</b> id</span></div>`
+    ).join('') + '</div>';
+  };
+
+  const parts = key.split('+').map(s => s.trim()).filter(Boolean);
+  const scopeTxt = _rfGroup === 'ALL' ? 'ทุกชุด' : 'ชุด ' + escHtml(_rfGroup);
+  document.getElementById('rfDetailBody').innerHTML = `
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px">
+      <div style="display:flex">${parts.map(p =>
+        `<img class="hero-img" style="width:46px; height:46px; margin-left:${parts.length > 4 ? -18 : -10}px"
+              src="/hero-img/${encodeURIComponent(p)}" title="${escAttr(p)}" onerror="this.remove()">`).join('')}</div>
+      <h2 style="margin:0; font-size:17px; word-break:break-word">${escHtml(key)}</h2>
+    </div>
+    <div style="color:var(--text-dim); font-size:12px; margin-bottom:14px">
+      ${isName ? 'ตัวละคร' : parts.length + ' ชื่อในโฟลเดอร์เดียว'} · นับจาก ${scopeTxt} · ${_rfScope === 'ALL' ? 'ทุกเครื่อง' : 'เฉพาะเครื่องที่เลือก'}
+    </div>
+    <div class="stat-row" style="margin-bottom:16px">
+      <div class="stat-tile"><div class="stat-label">id ทั้งหมด</div><div class="stat-val" style="color:var(--success)">${total.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">อยู่ในชุด</div><div class="stat-val">${Object.keys(bySet).length}</div></div>
+      <div class="stat-tile"><div class="stat-label">พบในเครื่อง</div><div class="stat-val">${Object.keys(byPc).length}</div></div>
+    </div>
+    <h3 style="font-size:13px; color:var(--text-secondary); margin:0 0 8px">แยกตามชุด</h3>
+    ${rows(bySet, '📁')}
+    ${isName ? `<h3 style="font-size:13px; color:var(--text-secondary); margin:16px 0 8px">อยู่ในโฟลเดอร์ไหนบ้าง (${Object.keys(byCombo).length} แบบ)</h3>${rows(byCombo, '🧩')}` : ''}
+    <h3 style="font-size:13px; color:var(--text-secondary); margin:16px 0 8px">แยกตามเครื่อง</h3>
+    ${rows(byPc, '🖥️')}
+  `;
+  document.getElementById('rfDetailModal').classList.add('show');
 }
 
 function rfGroupLabel(g) { return '📁 ' + g; }
@@ -2223,7 +2311,8 @@ function renderRangerFind(data) {
   }).join('');
 
   const nameCards = names.length ? names.map(n => `
-    <div class="hero-card rg-card with-img${n.main ? ' main-name' : ''}" data-name="${escAttr(n.name)}">
+    <div class="hero-card rg-card clickable with-img${n.main ? ' main-name' : ''}" data-name="${escAttr(n.name)}"
+         onclick="rfOpenDetail('name', '${escAttr(n.name)}')" title="กดดูข้อมูลเต็มของ ${escAttr(n.name)}">
       ${heroImgs(n.name)}
       <div class="hero-name" title="${escHtml(n.name)}">${escHtml(n.name)}</div>
       <div class="hero-count">${n.count.toLocaleString()}</div>
@@ -2238,7 +2327,8 @@ function renderRangerFind(data) {
 
   const comboCards = comboSlice.length ? comboSlice.map(c => {
     const parts = c.name.split('+').filter(Boolean);
-    return `<div class="hero-card rg-card with-img${parts.length > 1 ? ' combo' : ''}" data-name="${escAttr(c.name)}">
+    return `<div class="hero-card rg-card clickable with-img${parts.length > 1 ? ' combo' : ''}" data-name="${escAttr(c.name)}"
+      onclick="rfOpenDetail('combo', '${escAttr(c.name)}')" title="กดดูข้อมูลเต็มของ ${escAttr(c.name)}">
       ${heroImgs(c.name)}
       <div class="hero-name" title="${escHtml(c.name)}">${escHtml(c.name)}</div>
       <div class="hero-count">${c.count.toLocaleString()}</div>
