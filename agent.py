@@ -1076,7 +1076,26 @@ def handle_export_folder(req_id, data):
 
     # หาโฟลเดอร์เป้าหมายทั้งหมด
     targets = []          # (ชื่อชุด, ชื่อโฟลเดอร์, path เต็ม) — ว่างทั้งคู่ = เอาทั้งโฟลเดอร์
-    if mode == "flat":
+    file_targets = []     # (ชื่อใน zip, path จริง) — ใช้ตอนคัดเป็นรายไฟล์ (found-hero)
+    if mode == "file":
+        # ชื่อฮีโร่อยู่ใน "ชื่อไฟล์" ไม่ใช่ชื่อโฟลเดอร์ (pes/found-hero/hero1/<ชื่อ>+ASCV...dat)
+        nmap = {n.strip().lower(): n.strip() for n in _read_hero_list(base) if n and n.strip()}
+        submode = (data.get("submode") or "combo").strip().lower()
+        try:
+            for cur, _dirs, fns in os.walk(root):
+                rel = os.path.relpath(cur, root)
+                for fn in fns:
+                    combo = _hero_combo(fn, nmap)
+                    if not combo:
+                        continue
+                    hit = (key in combo.split("+")) if submode == "name" else (combo == key)
+                    if hit:
+                        arc = fn if rel == "." else rel.replace("\\", "/") + "/" + fn
+                        file_targets.append((arc, os.path.join(cur, fn)))
+        except Exception as e:
+            send_response(req_id, {"error": str(e)})
+            return
+    elif mode == "flat":
         # โฟลเดอร์แบนๆ (fast-random / input-id / backup) เอาทุกไฟล์ในนั้นเลย
         targets = [("", "", root)]
     else:
@@ -1098,7 +1117,7 @@ def handle_export_folder(req_id, data):
             send_response(req_id, {"error": str(e)})
             return
 
-    if not targets:
+    if not targets and not file_targets:
         send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": True})
         return
 
@@ -1108,6 +1127,10 @@ def handle_export_folder(req_id, data):
     n_files = 0
     try:
         with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+            for arc, full in file_targets:          # โหมดคัดรายไฟล์
+                zf.write(full, arc)
+                packed.append(full)
+                n_files += 1
             for set_name, fld, d in targets:
                 for cur, _dirs, files in os.walk(d):
                     rel_in = os.path.relpath(cur, d)

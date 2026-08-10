@@ -648,6 +648,7 @@ def handle_request_export(data):
             "groups": data.get("groups"),
             "names": data.get("names") or [],
             "match": data.get("match", "only"),
+            "submode": data.get("submode", "combo"),
             "move": bool(data.get("move")),
             "job": job,
         }, request.sid)
@@ -1816,6 +1817,7 @@ async function openHeroDash(kind) {
 
   const comboTotals = {};
   const folderTotals = {};
+  const pesGroupCombos = {}, pesPerAgent = [];
   let grandTotal = 0, onlineCount = 0, matchedTotal = 0;
   const perAgent = [];
 
@@ -1838,10 +1840,18 @@ async function openHeroDash(kind) {
       const gt = res.group_totals || {};
       for (const g in gt) folderTotals[g] = (folderTotals[g] || 0) + gt[g];
       matchedTotal += res.matched_files || 0;
+      // เก็บไว้ให้หน้ารายละเอียด (กดการ์ด) ใช้ — โครงเดียวกับหน้า Line Ranger
+      const gc = res.groups || {};
+      for (const g in gc) {
+        const dst = pesGroupCombos[g] || (pesGroupCombos[g] = {});
+        for (const k in gc[g]) dst[k] = (dst[k] || 0) + gc[g][k];
+      }
+      pesPerAgent.push({ name: a.name || a.hostname || a.agent_id, byGroup: gc });
     } catch (e) {
       perAgent.push({ name: a.name || a.hostname || a.agent_id, error: String(e.message || e) });
     }
   }
+  _pesCache = { groupCombos: pesGroupCombos, groupFiles: folderTotals, perAgent: pesPerAgent };
   renderHeroDash(kind, comboTotals, grandTotal, perAgent, agents.length, onlineCount, folderTotals, matchedTotal);
 }
 
@@ -1864,7 +1874,8 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
     .map(k => ({ name: k, count: comboTotals[k] }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   const cards = sorted.length ? sorted.map(h => `
-    <div class="hero-card${h.name.includes('+') ? ' combo' : ''}" data-name="${escHtml(h.name)}">
+    <div class="hero-card clickable${h.name.includes('+') ? ' combo' : ''}" data-name="${escHtml(h.name)}"
+         onclick="rfOpenDetail('combo', '${escAttr(h.name)}', 'pes')" title="กดดูข้อมูลเต็ม + โหลดไฟล์">
       <div class="hero-name" title="${escHtml(h.name)}">${escHtml(h.name)}</div>
       <div class="hero-count">${h.count}</div>
     </div>`).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ที่ตรงกับชื่อฮีโร่</h3></div>';
@@ -1879,7 +1890,8 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
     .map(n => ({ name: n, count: nameTotals[n], combos: nameCombos[n] }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   const nameCards = nameList.length ? nameList.map(n => `
-    <div class="hero-card main-name" data-name="${escHtml(n.name)}">
+    <div class="hero-card clickable main-name" data-name="${escHtml(n.name)}"
+         onclick="rfOpenDetail('name', '${escAttr(n.name)}', 'pes')" title="กดดูข้อมูลเต็ม + โหลดไฟล์">
       <div class="hero-name" title="${escHtml(n.name)}">${escHtml(n.name)}</div>
       <div class="hero-count">${n.count.toLocaleString()}</div>
       <div class="hero-sub">${n.combos} แบบ</div>
@@ -2335,10 +2347,23 @@ function heroImgs(comboName) {
 
 // ── กดการ์ดแล้วเปิดดูข้อมูลเต็ม ──
 // kind='combo' ดูโฟลเดอร์ combo นั้น | kind='name' ดูตัวละครตัวเดียว (รวมทุก combo ที่มีชื่อนี้)
-function rfOpenDetail(kind, key) {
-  const c = _rfCache;
+let _pesCache = null;
+const DETAIL_SRC = {
+  ranger: { cfg: () => RANGER_CFG, mode: 'combo', nameMode: 'name', scope: () => _rfScope,
+            group: () => _rfGroup, cache: () => _rfCache, unit: 'ชุด' },
+  pes:    { cfg: () => ({ subpath: 'found-hero', base: 'pes', label: 'found-hero' }),
+            mode: 'file', nameMode: 'file', scope: () => 'ALL',
+            group: () => 'ALL', cache: () => _pesCache, unit: 'โฟลเดอร์' },
+};
+let _detailSrc = 'ranger';
+
+function rfOpenDetail(kind, key, src) {
+  _detailSrc = src || 'ranger';
+  const S = DETAIL_SRC[_detailSrc];
+  const c = S.cache();
   if (!c) return;
-  const inScope = _rfGroup === 'ALL' ? Object.keys(c.groupCombos) : [_rfGroup];
+  const grp = S.group();
+  const inScope = grp === 'ALL' ? Object.keys(c.groupCombos) : [grp];
   const isName = (kind === 'name');
   const hit = (combo) => isName
     ? combo.split('+').map(s => s.trim()).includes(key)
@@ -2362,7 +2387,7 @@ function rfOpenDetail(kind, key) {
     const gm = p.byGroup || {};
     let n = 0;
     for (const g in gm) {
-      if (g === '' || (_rfGroup !== 'ALL' && g !== _rfGroup)) continue;
+      if ((_detailSrc === 'ranger' && g === '') || (grp !== 'ALL' && g !== grp)) continue;
       for (const k in gm[g]) if (hit(k)) n += gm[g][k];
     }
     if (n) byPc[p.name] = n;
@@ -2377,7 +2402,7 @@ function rfOpenDetail(kind, key) {
   };
 
   const parts = key.split('+').map(s => s.trim()).filter(Boolean);
-  const scopeTxt = _rfGroup === 'ALL' ? 'ทุกชุด' : 'ชุด ' + escHtml(_rfGroup);
+  const scopeTxt = grp === 'ALL' ? ('ทุก' + S.unit) : (S.unit + ' ' + escHtml(grp));
   document.getElementById('rfDetailBody').innerHTML = `
     <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px">
       <div style="display:flex">${parts.map(p =>
@@ -2393,7 +2418,7 @@ function rfOpenDetail(kind, key) {
       <div class="stat-tile"><div class="stat-label">อยู่ในชุด</div><div class="stat-val">${Object.keys(bySet).length}</div></div>
       <div class="stat-tile"><div class="stat-label">พบในเครื่อง</div><div class="stat-val">${Object.keys(byPc).length}</div></div>
     </div>
-    <h3 style="font-size:13px; color:var(--text-secondary); margin:0 0 8px">แยกตามชุด</h3>
+    <h3 style="font-size:13px; color:var(--text-secondary); margin:0 0 8px">แยกตาม${S.unit}</h3>
     ${rows(bySet, '📁')}
     ${isName ? `<h3 style="font-size:13px; color:var(--text-secondary); margin:16px 0 8px">อยู่ในโฟลเดอร์ไหนบ้าง (${Object.keys(byCombo).length} แบบ)</h3>${rows(byCombo, '🧩')}` : ''}
     <h3 style="font-size:13px; color:var(--text-secondary); margin:16px 0 8px">แยกตามเครื่อง</h3>
@@ -2407,7 +2432,7 @@ function rfOpenDetail(kind, key) {
       </label>
       <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center">
         <button class="btn btn-primary" id="rfExportBtn"
-                onclick="rfExport('${escAttr(kind)}', '${escAttr(key)}')">📦 โหลด .zip (${total.toLocaleString()} id จาก ${Object.keys(byPc).length} เครื่อง)</button>
+                onclick="rfExport('${escAttr(kind)}', '${escAttr(key)}', '${escAttr(_detailSrc)}')">📦 โหลด .zip (${total.toLocaleString()} id จาก ${Object.keys(byPc).length} เครื่อง)</button>
       </div>
       <div id="rfExportProg" style="display:none; margin-top:10px">
         <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
@@ -2426,11 +2451,17 @@ function rfOpenDetail(kind, key) {
 }
 
 // สั่ง export จากการ์ดตัวเดียว (ในหน้าต่างรายละเอียด)
-function rfExport(kind, key) {
+function rfExport(kind, key, src) {
+  const S = DETAIL_SRC[src || 'ranger'];
+  const cfg = S.cfg();
   const move = !!(document.getElementById('rfExportMove') || {}).checked;
   return rfRunExport({
-    mode: kind, key: key, move: move,
-    group: _rfGroup, label: (move ? 'move_' : '') + key,
+    // หน้า PES คัดเป็นรายไฟล์ (ชื่ออยู่ในชื่อไฟล์) ส่วน Line Ranger คัดเป็นโฟลเดอร์
+    mode: (src === 'pes') ? 'file' : kind,
+    submode: (kind === 'name') ? 'name' : 'combo',
+    key: key, move: move,
+    subpath: cfg.subpath, base: cfg.base, scope: S.scope(),
+    group: S.group(), label: (move ? 'move_' : '') + key,
     fileName: (move ? 'move_' : '') + key.replace(/\+/g, '_') + '.zip',
     confirmText: `⚠️ ย้ายไฟล์ของ "${key}" ออกจากทุกเครื่องที่เลือก ?`,
     ui: { btn: 'rfExportBtn', prog: 'rfExportProg', msg: 'rfExportMsg', bar: 'rfExportBar', pct: 'rfExportPct' },
@@ -2484,6 +2515,7 @@ async function rfRunExport(o) {
       subpath: o.subpath || RANGER_CFG.subpath, base_match: o.base || RANGER_CFG.base,
       group: o.group || 'ALL', mode: o.mode, key: o.key || '',
       groups: o.groups || null, names: o.names || [], match: o.match || 'only',
+      submode: o.submode || 'combo',
       move: move, label: o.label,
     });
     setTimeout(() => { if (!done) resolve(null); }, 20000);
