@@ -644,6 +644,9 @@ def handle_request_export(data):
             "group": data.get("group", "ALL"),
             "mode": data.get("mode", "combo"),
             "key": data.get("key", ""),
+            "groups": data.get("groups"),
+            "names": data.get("names") or [],
+            "match": data.get("match", "only"),
             "move": bool(data.get("move")),
             "job": job,
         }, request.sid)
@@ -1364,6 +1367,9 @@ WEB_UI_HTML = r"""
   .seg .btn { border: none; border-radius: 0; padding: 5px 11px; font-size: 12px; }
   .seg .btn + .btn { border-left: 1px solid var(--border); }
   .seg .btn.on { background: var(--accent); color: #fff; font-weight: 700; }
+  /* ช่องติ๊กเลือกชุดบนการ์ด */
+  .set-tick { position: absolute; left: 9px; top: 9px; z-index: 2; cursor: pointer; }
+  .set-tick input { cursor: pointer; width: 14px; height: 14px; }
   /* ดาวบนการ์ดชื่อตัว */
   .hero-card .fav-star { position: absolute; left: 8px; bottom: 6px; font-size: 12px; color: var(--warning); }
 
@@ -2340,20 +2346,48 @@ function rfOpenDetail(kind, key) {
   document.getElementById('rfDetailModal').classList.add('show');
 }
 
-// สั่ง export: ทุกเครื่อง zip โฟลเดอร์ที่ตรง → ส่งขึ้น server → รวมเป็นไฟล์เดียวแล้วโหลด
-async function rfExport(kind, key) {
+// สั่ง export จากการ์ดตัวเดียว (ในหน้าต่างรายละเอียด)
+function rfExport(kind, key) {
   const move = !!(document.getElementById('rfExportMove') || {}).checked;
-  const btn = document.getElementById('rfExportBtn');
-  const msg = document.getElementById('rfExportMsg');
+  return rfRunExport({
+    mode: kind, key: key, move: move,
+    group: _rfGroup, label: (move ? 'move_' : '') + key,
+    fileName: (move ? 'move_' : '') + key.replace(/\+/g, '_') + '.zip',
+    confirmText: `⚠️ ย้ายไฟล์ของ "${key}" ออกจากทุกเครื่องที่เลือก ?`,
+    ui: { btn: 'rfExportBtn', prog: 'rfExportProg', msg: 'rfExportMsg', bar: 'rfExportBar', pct: 'rfExportPct' },
+  });
+}
+
+// สั่ง export ทุกชุดที่ติ๊กไว้ + ตามตัวกรองชื่อที่ตั้งอยู่ (ปุ่มโหลดทั้งหมด)
+function rfExportAll() {
+  const sets = [..._rfSets];
+  if (!sets.length) { toast('ยังไม่ได้ติ๊กชุดที่จะโหลด', 'error'); return; }
+  const move = !!(document.getElementById('rfAllMove') || {}).checked;
+  const names = [..._rfPick];
+  const tag = names.length ? names.slice(0, 3).join('_') + (names.length > 3 ? '_etc' : '') : 'all';
+  return rfRunExport({
+    mode: 'multi', key: '', groups: sets, names: names, match: _rfMode, move: move,
+    label: (move ? 'move_' : '') + tag,
+    fileName: (move ? 'move_' : '') + 'backup-id_' + tag + '.zip',
+    confirmText: `⚠️ ย้ายไฟล์จาก ${sets.length} ชุด ออกจากทุกเครื่องที่เลือก ?`,
+    ui: { btn: 'rfAllBtn', prog: 'rfAllProg', msg: 'rfAllMsg', bar: 'rfAllBar', pct: 'rfAllPct' },
+  });
+}
+
+// ตัวรันจริง: ทุกเครื่อง zip โฟลเดอร์ที่ตรง → ส่งขึ้น server → รวมเป็นไฟล์เดียวแล้วโหลด
+async function rfRunExport(o) {
+  const move = !!o.move;
+  const btn = document.getElementById(o.ui.btn);
+  const msg = document.getElementById(o.ui.msg);
   const allAgents = agentsData || [];
   const agents = _rfScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _rfScope);
   if (!agents.length) { toast('ไม่มีเครื่องออนไลน์', 'error'); return; }
-  if (move && !confirm(`⚠️ ย้ายไฟล์ของ "${key}" ออกจาก ${agents.length} เครื่อง ?\n\nไฟล์ต้นทางจะถูกลบหลังส่งขึ้น server สำเร็จ (กู้คืนไม่ได้)`)) return;
+  if (move && !confirm(`${o.confirmText}\n\n(${agents.length} เครื่อง) ไฟล์ต้นทางจะถูกลบหลังส่งขึ้น server สำเร็จ — กู้คืนไม่ได้`)) return;
 
-  btn.disabled = true;
-  const prog = document.getElementById('rfExportProg');
-  const bar = document.getElementById('rfExportBar');
-  const pct = document.getElementById('rfExportPct');
+  if (btn) btn.disabled = true;
+  const prog = document.getElementById(o.ui.prog);
+  const bar = document.getElementById(o.ui.bar);
+  const pct = document.getElementById(o.ui.pct);
   if (prog) prog.style.display = 'block';
   const setMsg = (t, p) => {
     if (msg) msg.textContent = t;
@@ -2368,12 +2402,13 @@ async function rfExport(kind, key) {
     socket.emit('request_export', {
       agent_ids: agents.map(a => a.agent_id),
       subpath: RANGER_CFG.subpath, base_match: RANGER_CFG.base,
-      group: _rfGroup, mode: kind, key: key, move: move,
-      label: (move ? 'move_' : '') + key,
+      group: o.group || 'ALL', mode: o.mode, key: o.key || '',
+      groups: o.groups || null, names: o.names || [], match: o.match || 'only',
+      move: move, label: o.label,
     });
     setTimeout(() => { if (!done) resolve(null); }, 20000);
   });
-  if (!job || !job.job) { setMsg('เริ่มงานไม่สำเร็จ'); btn.disabled = false; return; }
+  if (!job || !job.job) { setMsg('เริ่มงานไม่สำเร็จ'); if (btn) btn.disabled = false; return; }
 
   // รอจนทุกเครื่อง "ตอบกลับ" (ไม่ใช่รอแต่ไฟล์ — เครื่องที่ไม่มีโฟลเดอร์ตรงจะไม่ส่ง zip มาเลย)
   const t0 = Date.now();
@@ -2389,7 +2424,7 @@ async function rfExport(kind, key) {
   if (!st || !st.files) {
     setMsg(st && st.errors && st.errors.length ? ('ไม่ได้ไฟล์: ' + st.errors[0]) : 'ไม่พบไฟล์ที่ตรงในเครื่องไหนเลย', 100);
     toast('ไม่มีไฟล์ให้โหลด', 'error');
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
     return;
   }
 
@@ -2403,7 +2438,7 @@ async function rfExport(kind, key) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = (move ? 'move_' : '') + key.replace(/\+/g, '_') + '.zip';
+    a.download = o.fileName;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -2414,7 +2449,21 @@ async function rfExport(kind, key) {
     setMsg('ดาวน์โหลดล้มเหลว: ' + (e.message || e), 100);
     toast('ดาวน์โหลดล้มเหลว', 'error');
   }
-  btn.disabled = false;
+  if (btn) btn.disabled = false;
+}
+
+// ── ชุดที่ติ๊กไว้สำหรับปุ่มโหลดทั้งหมด (ว่าง = ยังไม่เคยตั้ง → ติ๊กทุกชุดให้เอง) ──
+let _rfSets = new Set();
+let _rfSetsInit = false;
+function rfToggleSet(g, ev) {
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }   // อย่าให้ไปสลับ "ดูเฉพาะชุดนี้"
+  if (_rfSets.has(g)) _rfSets.delete(g); else _rfSets.add(g);
+  openRangerFindDashboard(true);
+}
+function rfSetsAll(on) {
+  const names = (_rfCache && _rfCache.groupFiles) ? Object.keys(_rfCache.groupFiles) : [];
+  _rfSets = on ? new Set(names) : new Set();
+  openRangerFindDashboard(true);
 }
 
 function rfGroupLabel(g) { return '📁 ' + g; }
@@ -2611,6 +2660,10 @@ function renderRangerFind(data) {
   const groupOpts = `<option value="ALL"${_rfGroup === 'ALL' ? ' selected' : ''}>🗂️ รวมทุกชุด (${groupNames.length})</option>` +
     groupNames.map(g => `<option value="${escAttr(g)}"${_rfGroup === g ? ' selected' : ''}>${escHtml(rfGroupLabel(g))} — ${(groupFiles[g] || 0).toLocaleString()} ไฟล์</option>`).join('');
 
+  // ครั้งแรกที่มีข้อมูล → ติ๊กทุกชุดไว้ก่อน (ปุ่มโหลดทั้งหมดจะได้พร้อมใช้ทันที)
+  if (!_rfSetsInit && groupNames.length) { _rfSets = new Set(groupNames); _rfSetsInit = true; }
+  _rfSets = new Set([..._rfSets].filter(g => groupNames.includes(g)));   // ตัดชุดที่หายไปแล้วออก
+
   // การ์ดสรุปรายชุด กดเลือกชุดได้เลย ไม่ต้องไปกด dropdown
   const groupCards = groupNames.map(g => {
     // การ์ดชุดนับตามตัวกรองด้วย จะได้ตรงกับตัวเลขข้างล่าง
@@ -2622,7 +2675,10 @@ function renderRangerFind(data) {
     return `<div class="hero-card rf-group${on ? ' main-name' : ''}" style="cursor:pointer"
                  onclick="rfPickGroup('${escAttr(g)}')"
                  title="กดเพื่อดูเฉพาะชุดนี้">
-      <div class="hero-name">${escHtml(g)}</div>
+      <label class="set-tick" onclick="rfToggleSet('${escAttr(g)}', event)" title="ติ๊กเพื่อรวมชุดนี้ตอนกดโหลดทั้งหมด">
+        <input type="checkbox" ${_rfSets.has(g) ? 'checked' : ''} onclick="rfToggleSet('${escAttr(g)}', event)">
+      </label>
+      <div class="hero-name" style="padding-left:20px">${escHtml(g)}</div>
       <div class="hero-count">${cnt.toLocaleString()}</div>
       <div class="hero-sub">${kinds} combo · ${(groupFiles[g] || 0).toLocaleString()} ไฟล์</div>
     </div>`;
@@ -2729,6 +2785,33 @@ function renderRangerFind(data) {
     </div>
     <h3 style="margin:4px 0 12px; font-size:14px; color:var(--text-secondary)">ชุดทั้งหมดใน ${RANGER_CFG.label} — กดการ์ดเพื่อดูเฉพาะชุดนั้น ${_rfGroup === 'ALL' ? '' : '<button class="btn" style="padding:4px 10px; font-size:11px; margin-left:8px" onclick="rfShowAll()">↩ กลับไปดูรวมทุกชุด</button>'}</h3>
     <div class="hero-grid">${groupCards || '<div style="color:var(--text-dim); font-size:13px">ยังไม่มีโฟลเดอร์ย่อย</div>'}</div>
+    ${groupNames.length ? `
+    <div class="pick-panel" style="margin-top:12px">
+      <div class="pick-head">
+        <span class="pick-title">📦 โหลดทั้งหมดเป็น .zip ไฟล์เดียว
+          <span style="color:var(--text-dim); font-weight:400">— ติ๊กชุดที่จะเอา (เลือกอยู่ ${_rfSets.size}/${groupNames.length} ชุด${_rfPick.size ? ` · กรองชื่อ ${_rfPick.size} ตัว` : ' · ทุกชื่อ'})</span></span>
+        <button class="btn" onclick="rfSetsAll(true)">ติ๊กทุกชุด</button>
+        <button class="btn" onclick="rfSetsAll(false)">เอาออกทั้งหมด</button>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer">
+          <input type="checkbox" id="rfAllMove" style="width:auto">
+          <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
+        </label>
+        <button class="btn btn-primary" id="rfAllBtn" onclick="rfExportAll()" ${_rfSets.size ? '' : 'disabled'}>
+          📦 โหลดทั้งหมด (${[..._rfSets].reduce((s, g) => s + (groupFiles[g] || 0), 0).toLocaleString()} ไฟล์)</button>
+      </div>
+      <div id="rfAllProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="rfAllMsg" style="color:var(--text-secondary)"></span>
+          <span id="rfAllPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="rfAllBar" style="width:0%"></div></div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        โครงในไฟล์ zip: <code>&lt;ชุด&gt;/&lt;ชื่อตัว&gt;/…</code> เช่น <code>ranger/kappa/…</code>, <code>ranger(2)/anya+yor/…</code> — รวมทุกชุดทุกเครื่องไว้ในไฟล์เดียว
+      </div>
+    </div>` : ''}
     ${pickPanel}
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ${_rfGroup === 'ALL' ? 'ทุกชุดรวมกัน' : 'เฉพาะชุด ' + escHtml(_rfGroup)}${_rfPick.size ? ' <span style="color:var(--success)">· กรองอยู่ ' + _rfPick.size + ' ตัว</span>' : ''}</h3>
     <div class="hero-grid big">${nameCards}</div>

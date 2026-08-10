@@ -956,13 +956,28 @@ def handle_count_prefix_ids(req_id, data):
                            "matched_files": matched_files, "folder": folder, "exists": exists})
 
 
-def _export_match(folder_name, mode, key):
+def _export_match(folder_name, mode, key, names=None, match="only"):
     """โฟลเดอร์ชื่อนี้ตรงกับที่ขอไหม
+
+    โหมดเจาะจงตัวเดียว (จากการ์ดในหน้าเว็บ):
        mode=combo : ต้องเป็นชุดเดียวกันเป๊ะ (kikoru+Kafka)
-       mode=name  : ขอแค่มีชื่อนั้นอยู่ในชุด (kikoru อยู่ใน kikoru+Kafka ก็เอา)"""
+       mode=name  : ขอแค่มีชื่อนั้นอยู่ในชุด (kikoru อยู่ใน kikoru+Kafka ก็เอา)
+    โหมดหลายชื่อ (ปุ่มโหลดทั้งหมด) — names ว่าง = เอาทุกโฟลเดอร์:
+       match=only : ทุกชื่อในโฟลเดอร์ต้องอยู่ในรายการที่เลือก
+       match=all  : ต้องมีชื่อที่เลือกครบทุกตัว
+       match=any  : มีตัวใดตัวหนึ่งก็พอ
+    """
     parts = [p.strip() for p in folder_name.split("+") if p.strip()]
     if not parts:
         return False
+    if mode == "multi":
+        if not names:
+            return True
+        if match == "all":
+            return all(n in parts for n in names)
+        if match == "any":
+            return any(p in names for p in parts)
+        return all(p in names for p in parts)      # only
     if mode == "name":
         return key in parts
     return "+".join(parts) == key
@@ -983,8 +998,13 @@ def handle_export_folder(req_id, data):
     job = str(data.get("job") or "").strip()
     move = bool(data.get("move"))
     upload_url = (data.get("upload_url") or "").strip()
+    # โหมดหลายชื่อ/หลายชุด (ปุ่มโหลดทั้งหมด)
+    groups = data.get("groups")                 # list ของชื่อชุด (None/ว่าง = ทุกชุด)
+    names = [str(n).strip() for n in (data.get("names") or []) if str(n).strip()]
+    # ห้ามตั้งชื่อ match — ชนกับ match ที่ใช้หาโฟลเดอร์เกมด้านบน (base_match)
+    name_match = (data.get("match") or "only").strip().lower()
 
-    if not key or not job:
+    if not job or (mode != "multi" and not key):
         send_response(req_id, {"error": "ข้อมูลไม่ครบ (key/job)"})
         return
 
@@ -1001,11 +1021,14 @@ def handle_export_folder(req_id, data):
             set_dir = os.path.join(root, set_name)
             if not os.path.isdir(set_dir):
                 continue
-            if group != "ALL" and set_name != group:
+            if groups:                                   # เลือกหลายชุด (ปุ่มโหลดทั้งหมด)
+                if set_name not in groups:
+                    continue
+            elif group != "ALL" and set_name != group:   # เลือกชุดเดียว (จากการ์ด)
                 continue
             for fld in sorted(os.listdir(set_dir)):
                 d = os.path.join(set_dir, fld)
-                if os.path.isdir(d) and _export_match(fld, mode, key):
+                if os.path.isdir(d) and _export_match(fld, mode, key, names, name_match):
                     targets.append((set_name, fld, d))
     except Exception as e:
         send_response(req_id, {"error": str(e)})
