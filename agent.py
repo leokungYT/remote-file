@@ -11,6 +11,7 @@
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -828,42 +829,101 @@ def handle_move(req_id, data):
         send_response(req_id, {"error": str(e)})
 
 
+_ID_SEG = re.compile(r"\d{4,}")          # โค้ดท้ายไฟล์อย่าง ASCV188565062-[10] มีตัวเลขยาว ชื่อคนไม่มี
+
+
+def _read_hero_list(base):
+    """อ่านรายชื่อฮีโร่จาก list_find_hero ในไฟล์ config ของเกม (เช่น pes\\config.py)
+       คืน [] ถ้าไม่เจอ — ผู้เรียกจะ fallback ไปใช้ลิสต์ที่ server ส่งมาแทน"""
+    for fn in ("config.py", "config.json", "configmain.json"):
+        p = os.path.join(base, fn)
+        if not os.path.isfile(p):
+            continue
+        try:
+            txt = io_open_text(p)
+        except Exception:
+            continue
+        m = re.search(r"list_find_hero\s*=\s*\[(.*?)\]", txt, re.S)
+        if not m:
+            continue
+        names = re.findall(r'["\']([^"\']+)["\']', m.group(1))
+        if names:
+            logger.info(f"  อ่าน list_find_hero จาก {fn}: {len(names)} ชื่อ")
+            return names
+    return []
+
+
+def io_open_text(path):
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read()
+
+
+def _hero_combo(filename, names_map):
+    """แกะชื่อฮีโร่จากชื่อไฟล์ เช่น
+         Lionel Messi+ASCV188565062-[10].dat        -> "Lionel Messi"
+         Kevin De Bruyne+Lionel Messi+ASCV1885.dat  -> "Kevin De Bruyne+Lionel Messi"
+       ตัดเฉพาะท่อนที่เป็นโค้ด (มีเลขติดกัน 4 ตัวขึ้นไป) ที่เหลือถือเป็นชื่อฮีโร่ทั้งหมด
+       ชื่อที่อยู่ในลิสต์ config จะถูกแก้ตัวพิมพ์ให้ตรงลิสต์ ส่วนชื่อที่ไม่มีในลิสต์ก็ยังนับให้"""
+    stem = os.path.splitext(filename)[0]
+    out = []
+    for p in stem.split("+"):
+        p = p.strip()
+        if not p or _ID_SEG.search(p):
+            continue
+        out.append(names_map.get(p.lower(), p))
+    return "+".join(out) if out else None
+
+
 def handle_count_heroes(req_id, data):
-    """นับจำนวนไฟล์ตามชื่อฮีโร่ในโฟลเดอร์ (เช่น found-hero)"""
+    """นับจำนวนไฟล์ตามชื่อฮีโร่ในโฟลเดอร์ (เช่น found-hero) — เดินเข้าโฟลเดอร์ย่อยด้วย"""
     names = data.get("names", [])
     subpath = data.get("subpath", "found-hero")
+    match = (data.get("base_match") or "").strip().lower()
 
-    # หา base folder จาก ALLOWED_PATHS (เช่น ...\Desktop\pes) แล้วต่อด้วย subpath
-    if ALLOWED_PATHS:
-        base = os.path.abspath(ALLOWED_PATHS[0].strip())
-    else:
-        base = os.path.join(os.path.expanduser("~"), "Desktop", "pes")
+    base = _resolve_game_base(match) if match else None
+    if base is None:
+        base = (os.path.abspath(ALLOWED_PATHS[0].strip()) if ALLOWED_PATHS
+                else os.path.join(os.path.expanduser("~"), "Desktop", "pes"))
     folder = os.path.join(base, subpath)
 
-    # map ชื่อฮีโร่ (ตัวเล็ก) -> ชื่อจริง เพื่อใช้ระบุ segment ที่เป็นฮีโร่ (ตัดโค้ดท้ายไฟล์ทิ้ง)
+    # รายชื่อฮีโร่: ยึด list_find_hero ในไฟล์ config ของเครื่องนั้นเป็นหลัก
+    # ถ้าอ่านไม่ได้ค่อยใช้ลิสต์ที่ server ส่งมา
+    cfg_names = _read_hero_list(base)
+    if cfg_names:
+        names = cfg_names
+
+    # map ชื่อฮีโร่ (ตัวเล็ก) -> ชื่อจริงตามลิสต์ ไว้แก้ตัวพิมพ์ให้ตรงกัน
     names_map = {n.strip().lower(): n.strip() for n in names if n and n.strip()}
-    combos = {}        # "hero1+hero2+hero3" -> จำนวนไฟล์ (1 ไฟล์ = 1 id)
-    total_files = 0
+    known = set(names_map.values())
+    combos = {}            # "hero1+hero2" -> จำนวนไฟล์ (1 ไฟล์ = 1 id)
+    groups = {}            # โฟลเดอร์ย่อยชั้นแรก (hero1/hero2) -> {combo: จำนวน}
+    group_totals = {}
+    total_files = matched_files = 0
     exists = os.path.isdir(folder)
     if exists:
         try:
-            # เดินทุกโฟลเดอร์ย่อย (hero1, hero2, ...) แล้วจัดกลุ่มตาม combo ของฮีโร่
             for root, dirs, filenames in os.walk(folder):
+                rel = os.path.relpath(root, folder)
+                top = "" if rel == "." else rel.replace("\\", "/").split("/")[0]
                 for fn in filenames:
                     total_files += 1
-                    stem = os.path.splitext(fn)[0]                       # ตัด .dat
-                    parts = [p.strip() for p in stem.split("+") if p.strip()]
-                    heroes = [names_map[p.lower()] for p in parts if p.lower() in names_map]
-                    if heroes:
-                        combo = "+".join(heroes)                         # เก็บเป็นชุดเดียว ไม่แยก
+                    group_totals[top] = group_totals.get(top, 0) + 1
+                    combo = _hero_combo(fn, names_map)
+                    if combo:
+                        matched_files += 1
                         combos[combo] = combos.get(combo, 0) + 1
+                        g = groups.setdefault(top, {})
+                        g[combo] = g.get(combo, 0) + 1
         except Exception as e:
             send_response(req_id, {"error": str(e)})
             return
 
-    logger.info(f"  count_heroes: {total_files} files, {len(combos)} combos in {folder} (exists={exists})")
-    send_response(req_id, {"success": True, "combos": combos,
-                           "total_files": total_files, "folder": folder, "exists": exists})
+    logger.info(f"  count_heroes: {total_files} files, {matched_files} matched, "
+                f"{len(combos)} combos, {len(group_totals)} groups in {folder} (exists={exists})")
+    send_response(req_id, {"success": True, "combos": combos, "groups": groups,
+                           "group_totals": group_totals, "known": sorted(known),
+                           "total_files": total_files, "matched_files": matched_files,
+                           "folder": folder, "exists": exists})
 
 
 def _prefix_combo(filename, rel_dir):

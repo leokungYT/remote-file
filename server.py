@@ -263,6 +263,7 @@ def handle_count_heroes(data):
     req_id = send_to_agent(data["agent_id"], "count_heroes", {
         "names": data.get("names", []),
         "subpath": data.get("subpath", "found-hero"),
+        "base_match": data.get("base_match", "pes"),
     }, request.sid)
     if req_id:
         emit("request_sent", {"request_id": req_id})
@@ -1765,7 +1766,7 @@ function countHeroesOnAgent(agentId, subpath) {
         if (resp.error) reject(new Error(resp.error)); else resolve(resp);
       });
     });
-    socket.emit('request_count_heroes', { agent_id: agentId, names: HERO_LIST, subpath: subpath || 'found-hero' });
+    socket.emit('request_count_heroes', { agent_id: agentId, names: HERO_LIST, subpath: subpath || 'found-hero', base_match: 'pes' });
     setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 20000);
   });
 }
@@ -1814,7 +1815,8 @@ async function openHeroDash(kind) {
   }
 
   const comboTotals = {};
-  let grandTotal = 0, onlineCount = 0;
+  const folderTotals = {};
+  let grandTotal = 0, onlineCount = 0, matchedTotal = 0;
   const perAgent = [];
 
   for (const a of agents) {
@@ -1832,11 +1834,15 @@ async function openHeroDash(kind) {
       });
       const combos = res.combos || {};
       for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
+      // แยกตามโฟลเดอร์ย่อย (hero1 / hero2 / ...) เอาไว้โชว์ว่าไฟล์อยู่โฟลเดอร์ไหน
+      const gt = res.group_totals || {};
+      for (const g in gt) folderTotals[g] = (folderTotals[g] || 0) + gt[g];
+      matchedTotal += res.matched_files || 0;
     } catch (e) {
       perAgent.push({ name: a.name || a.hostname || a.agent_id, error: String(e.message || e) });
     }
   }
-  renderHeroDash(kind, comboTotals, grandTotal, perAgent, agents.length, onlineCount);
+  renderHeroDash(kind, comboTotals, grandTotal, perAgent, agents.length, onlineCount, folderTotals, matchedTotal);
 }
 
 function filterHeroCards(q) {
@@ -1851,18 +1857,43 @@ function filterHeroCards(q) {
   if (noRes) noRes.style.display = shown === 0 ? '' : 'none';
 }
 
-function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, onlineCount) {
+function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, onlineCount, folderTotals, matchedTotal) {
   const cfg = DASH_KINDS[kind];
   const content = document.getElementById('contentArea');
   const sorted = Object.keys(comboTotals)
     .map(k => ({ name: k, count: comboTotals[k] }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-  const matchedTotal = sorted.reduce((s, h) => s + h.count, 0);
   const cards = sorted.length ? sorted.map(h => `
     <div class="hero-card${h.name.includes('+') ? ' combo' : ''}" data-name="${escHtml(h.name)}">
       <div class="hero-name" title="${escHtml(h.name)}">${escHtml(h.name)}</div>
       <div class="hero-count">${h.count}</div>
     </div>`).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ที่ตรงกับชื่อฮีโร่</h3></div>';
+
+  // รวมรายชื่อ — ชื่อเดียวกันที่อยู่คนละ combo บวกกัน (เหมือนหน้า Line Ranger)
+  const nameTotals = {}, nameCombos = {};
+  sorted.forEach(c => c.name.split('+').map(s => s.trim()).filter(Boolean).forEach(n => {
+    nameTotals[n] = (nameTotals[n] || 0) + c.count;
+    nameCombos[n] = (nameCombos[n] || 0) + 1;
+  }));
+  const nameList = Object.keys(nameTotals)
+    .map(n => ({ name: n, count: nameTotals[n], combos: nameCombos[n] }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  const nameCards = nameList.length ? nameList.map(n => `
+    <div class="hero-card main-name" data-name="${escHtml(n.name)}">
+      <div class="hero-name" title="${escHtml(n.name)}">${escHtml(n.name)}</div>
+      <div class="hero-count">${n.count.toLocaleString()}</div>
+      <div class="hero-sub">${n.combos} แบบ</div>
+    </div>`).join('') : '';
+
+  // แยกตามโฟลเดอร์ย่อยใน found-hero (hero1 / hero2 / ...)
+  const fT = folderTotals || {};
+  const folderKeys = Object.keys(fT).sort((a, b) => (fT[b] - fT[a]) || a.localeCompare(b));
+  const folderCards = folderKeys.map(g => `
+    <div class="hero-card" data-name="${escHtml(g || 'ชั้นนอก')}">
+      <div class="hero-name">📁 ${escHtml(g || 'ชั้นนอก')}</div>
+      <div class="hero-count">${fT[g].toLocaleString()}</div>
+      <div class="hero-sub">ไฟล์</div>
+    </div>`).join('');
   const inputIdTotal = perAgent.reduce((s, p) => s + (p.inputId || 0), 0);
   const agentRows = perAgent.map(p => {
     let right;
@@ -1898,7 +1929,12 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
       <div class="stat-tile"><div class="stat-label">id ที่ตรงชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
     </div>
-    <div class="hero-grid">${cards}</div>
+    ${folderCards ? `<h3 style="margin:4px 0 10px; font-size:14px; color:var(--text-secondary)">แยกตามโฟลเดอร์ใน ${cfg.label}</h3>
+    <div class="hero-grid">${folderCards}</div>` : ''}
+    ${nameCards ? `<h3 style="margin:22px 0 10px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อที่เจอ — ทุกเครื่องรวมกัน (ชื่อเดียวกันคนละ combo บวกรวมกัน)</h3>
+    <div class="hero-grid big">${nameCards}</div>` : ''}
+    <h3 style="margin:22px 0 10px; font-size:14px; color:var(--text-secondary)">แยกตามไฟล์ (combo) — ไฟล์ที่มี 2 ชื่อนับเป็นชุดเดียว</h3>
+    <div class="hero-grid big">${cards}</div>
     <div id="dashNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — input-id ที่เหลือ + ${cfg.label}</h3>
     <div class="agent-stats">${agentRows}</div>
