@@ -1004,7 +1004,7 @@ def handle_export_folder(req_id, data):
     # ห้ามตั้งชื่อ match — ชนกับ match ที่ใช้หาโฟลเดอร์เกมด้านบน (base_match)
     name_match = (data.get("match") or "only").strip().lower()
 
-    if not job or (mode != "multi" and not key):
+    if not job or (mode not in ("multi", "flat") and not key):
         send_response(req_id, {"error": "ข้อมูลไม่ครบ (key/job)"})
         return
 
@@ -1015,24 +1015,28 @@ def handle_export_folder(req_id, data):
         return
 
     # หาโฟลเดอร์เป้าหมายทั้งหมด
-    targets = []          # (ชื่อชุด, ชื่อโฟลเดอร์, path เต็ม)
-    try:
-        for set_name in sorted(os.listdir(root)):
-            set_dir = os.path.join(root, set_name)
-            if not os.path.isdir(set_dir):
-                continue
-            if groups:                                   # เลือกหลายชุด (ปุ่มโหลดทั้งหมด)
-                if set_name not in groups:
+    targets = []          # (ชื่อชุด, ชื่อโฟลเดอร์, path เต็ม) — ว่างทั้งคู่ = เอาทั้งโฟลเดอร์
+    if mode == "flat":
+        # โฟลเดอร์แบนๆ (fast-random / input-id / backup) เอาทุกไฟล์ในนั้นเลย
+        targets = [("", "", root)]
+    else:
+        try:
+            for set_name in sorted(os.listdir(root)):
+                set_dir = os.path.join(root, set_name)
+                if not os.path.isdir(set_dir):
                     continue
-            elif group != "ALL" and set_name != group:   # เลือกชุดเดียว (จากการ์ด)
-                continue
-            for fld in sorted(os.listdir(set_dir)):
-                d = os.path.join(set_dir, fld)
-                if os.path.isdir(d) and _export_match(fld, mode, key, names, name_match):
-                    targets.append((set_name, fld, d))
-    except Exception as e:
-        send_response(req_id, {"error": str(e)})
-        return
+                if groups:                                   # เลือกหลายชุด (ปุ่มโหลดทั้งหมด)
+                    if set_name not in groups:
+                        continue
+                elif group != "ALL" and set_name != group:   # เลือกชุดเดียว (จากการ์ด)
+                    continue
+                for fld in sorted(os.listdir(set_dir)):
+                    d = os.path.join(set_dir, fld)
+                    if os.path.isdir(d) and _export_match(fld, mode, key, names, name_match):
+                        targets.append((set_name, fld, d))
+        except Exception as e:
+            send_response(req_id, {"error": str(e)})
+            return
 
     if not targets:
         send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": True})
@@ -1049,7 +1053,7 @@ def handle_export_folder(req_id, data):
                     rel_in = os.path.relpath(cur, d)
                     for fn in files:
                         full = os.path.join(cur, fn)
-                        arc_parts = [set_name, fld]
+                        arc_parts = [p for p in (set_name, fld) if p]   # flat = ไม่มีชั้นชุด/ชื่อตัว
                         if rel_in != ".":
                             arc_parts += rel_in.replace("\\", "/").split("/")
                         arc_parts.append(fn)

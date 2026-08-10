@@ -1609,6 +1609,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <button class="btn" onclick="openRangerDashboard()">🏹 Dashboard Line Ranger</button>
     <button class="btn" onclick="openRangerFindDashboard()">🔎 Line Ranger-Find</button>
+    <button class="btn" onclick="openFastRandomDashboard()">🎲 fast-random</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
     <button class="btn" onclick="openBroadcastBackup()">💾 ส่งเข้า backup (ทุกเครื่อง)</button>
     <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
@@ -1910,11 +1911,13 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
 const FOLDER_DASH = {
   inputid: { subpath: 'input-id', base: 'pes', title: '📥 Dashboard input-id — ไฟล์ที่เหลือรายเครื่อง', label: 'input-id', reopen: 'openInputIdDashboard' },
   backup:  { subpath: 'backup',   base: 'main', title: '🗄️ Dashboard Backup — ไฟล์ backup รายเครื่อง (Line Ranger)', label: 'backup', reopen: 'openBackupDashboard' },
+  fastrandom: { subpath: 'fast-random', base: 'pes', title: '🎲 Dashboard fast-random — รวมทุกเครื่อง', label: 'fast-random', reopen: 'openFastRandomDashboard' },
 };
-let _folderScope = { inputid: 'ALL', backup: 'ALL' };
+let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL' };
 
 function openInputIdDashboard() { return openFolderDash('inputid'); }
 function openBackupDashboard() { return openFolderDash('backup'); }
+function openFastRandomDashboard() { return openFolderDash('fastrandom'); }
 
 // นับไฟล์ในโฟลเดอร์ <base>/<subpath> ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
 function countFolderOnAgent(agentId, subpath, base) {
@@ -2009,7 +2012,47 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
     </div>
     <div class="machine-grid">${cards}</div>
     <div id="midNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบเครื่องที่ค้นหา</div>
+
+    <div class="pick-panel" style="margin-top:18px">
+      <div class="pick-head">
+        <span class="pick-title">📦 โหลด ${escHtml(cfg.label)} ทั้งหมดเป็น .zip ไฟล์เดียว
+          <span style="color:var(--text-dim); font-weight:400">— รวมจาก ${onlineCount} เครื่อง · ${total.toLocaleString()} ไฟล์</span></span>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer">
+          <input type="checkbox" id="fdMove" style="width:auto">
+          <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
+        </label>
+        <button class="btn btn-primary" id="fdBtn" onclick="fdExport('${kind}')" ${total ? '' : 'disabled'}>
+          📦 โหลดทั้งหมด (${total.toLocaleString()} ไฟล์)</button>
+      </div>
+      <div id="fdProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="fdMsg" style="color:var(--text-secondary)"></span>
+          <span id="fdPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="fdBar" style="width:0%"></div></div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        ไฟล์ชื่อซ้ำกันข้ามเครื่องจะเติมชื่อเครื่องต่อท้ายให้ ไม่มีไฟล์หาย
+      </div>
+    </div>
   `;
+}
+
+// โหลดโฟลเดอร์แบนๆ (fast-random / input-id / backup) ของทุกเครื่องรวมเป็น zip เดียว
+function fdExport(kind) {
+  const cfg = FOLDER_DASH[kind];
+  const move = !!(document.getElementById('fdMove') || {}).checked;
+  return rfRunExport({
+    mode: 'flat', key: '', move: move,
+    subpath: cfg.subpath, base: cfg.base,
+    scope: _folderScope[kind],
+    label: (move ? 'move_' : '') + cfg.label,
+    fileName: (move ? 'move_' : '') + cfg.label + '.zip',
+    confirmText: `⚠️ ย้ายไฟล์ทั้งหมดใน ${cfg.label} ออกจากเครื่องที่เลือก ?`,
+    ui: { btn: 'fdBtn', prog: 'fdProg', msg: 'fdMsg', bar: 'fdBar', pct: 'fdPct' },
+  });
 }
 
 function filterMidCards(q) {
@@ -2380,7 +2423,8 @@ async function rfRunExport(o) {
   const btn = document.getElementById(o.ui.btn);
   const msg = document.getElementById(o.ui.msg);
   const allAgents = agentsData || [];
-  const agents = _rfScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _rfScope);
+  const scope = o.scope || _rfScope;          // หน้าอื่นส่ง scope ของตัวเองมาได้
+  const agents = scope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === scope);
   if (!agents.length) { toast('ไม่มีเครื่องออนไลน์', 'error'); return; }
   if (move && !confirm(`${o.confirmText}\n\n(${agents.length} เครื่อง) ไฟล์ต้นทางจะถูกลบหลังส่งขึ้น server สำเร็จ — กู้คืนไม่ได้`)) return;
 
@@ -2401,7 +2445,7 @@ async function rfRunExport(o) {
     socket.once('export_started', (d) => { done = true; resolve(d); });
     socket.emit('request_export', {
       agent_ids: agents.map(a => a.agent_id),
-      subpath: RANGER_CFG.subpath, base_match: RANGER_CFG.base,
+      subpath: o.subpath || RANGER_CFG.subpath, base_match: o.base || RANGER_CFG.base,
       group: o.group || 'ALL', mode: o.mode, key: o.key || '',
       groups: o.groups || null, names: o.names || [], match: o.match || 'only',
       move: move, label: o.label,
