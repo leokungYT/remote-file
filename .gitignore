@@ -9,3 +9,9 @@ ngrok.zip
 __pycache__/
 *.pyc
 _exports/
+
+# ไฟล์ backup ของ MuMu — mumu-backup = ฝั่ง server (ไฟล์ต้นฉบับที่เอาไปวางเอง)
+# mumu-cache = ฝั่ง agent (ไฟล์ที่โหลดมาเก็บไว้) + สถานะงาน .bat ที่สั่งรัน
+mumu-backup/
+mumu-cache/
+_run_state.json

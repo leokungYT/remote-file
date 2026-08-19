@@ -13,7 +13,8 @@ import uuid
 import shutil
 import base64
 import hashlib
-import logging  
+import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,7 @@ SERVER_PORT = int(os.environ.get("SERVER_PORT", "5000"))
 UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "./received_files")
 MAX_CHUNK_SIZE = 1024 * 1024  # 1MB chunks for file transfer
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "500"))  # ขนาดไฟล์อัปโหลดสูงสุด (MB)
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "123456")  # รหัสผ่านเข้าเว็บ (เว้นว่างได้ถ้าไม่ต้องการล็อกอิน)
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -96,6 +98,9 @@ def handle_agent_register(data):
         "sid": request.sid,
         "allowed_paths": data.get("allowed_paths", []),
     }
+    # จำว่าเครื่องนี้มีไฟล์ backup อะไรพร้อมแบ่งให้เพื่อน + ติดต่อได้ทาง IP ไหนบ้าง
+    _peer_note(agent_id, data.get("ips") or [data.get("ip")],
+               data.get("peer_port"), data.get("backups"))
     join_room(f"agent_{agent_id}")
     logger.info(f"✅ Agent registered: {agent_id} ({data.get('hostname')}) - SID: {request.sid}")
     emit("registered", {"status": "ok", "agent_id": agent_id})
@@ -150,6 +155,12 @@ def handle_file_chunk(data):
 @socketio.on("web_register")
 def handle_web_register(data):
     """Web client ลงทะเบียน"""
+    expected_token = hashlib.sha256((WEB_PASSWORD + SECRET_KEY).encode()).hexdigest() if WEB_PASSWORD else ""
+    if WEB_PASSWORD and request.cookies.get("web_auth") != expected_token:
+        logger.warning(f"Web client rejected - wrong password from {request.sid}")
+        emit("auth_failed", {"message": "Invalid web password. Please refresh and login again."})
+        return
+
     join_room("web_clients")
     join_room(request.sid)
     emit("agents_updated", get_agents_list())
@@ -358,6 +369,40 @@ def handle_mumu_req(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_mumu_clone")
+def handle_mumu_clone_req(data):
+    """สั่งงาน clone MuMu (โหลด backup จาก Google Drive + restore หลายจอ) ที่เครื่องลูก"""
+    req_id = send_to_agent(data["agent_id"], "mumu_clone", {
+        "sub": data.get("sub"),
+        "source": data.get("source", "link"),   # server = โหลดจาก server เรา, link = ลิงก์ข้างนอก
+        "name": data.get("name", ""),           # ชื่อไฟล์ในโฟลเดอร์ mumu-backup (โหมด server)
+        "url": data.get("url", ""),
+        "count": data.get("count", 1),
+        "launch": bool(data.get("launch")),
+        "close_first": data.get("close_first", True),   # ปิด MuMu ก่อนเริ่ม
+    }, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
+@socketio.on("request_run_file")
+def handle_run_file_req(data):
+    """สั่งรัน/หยุด/ดูสถานะไฟล์ .bat ในโฟลเดอร์โปรเจกต์ที่เครื่องลูก (เช่น pes\\login.bat)"""
+    req_id = send_to_agent(data["agent_id"], "run_file", {
+        "sub": data.get("sub"),
+        "base_match": data.get("base_match", "pes"),
+        "name": data.get("name", ""),
+        "hidden": bool(data.get("hidden")),
+        "force": bool(data.get("force")),
+    }, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 @socketio.on("request_screenshot")
 def handle_screenshot_req(data):
     """สั่งให้ agent จับภาพหน้าจอส่งกลับ (live view / PC monitor)"""
@@ -438,6 +483,11 @@ def cleanup_pending():
 
 @app.route("/")
 def index():
+    expected_token = hashlib.sha256((WEB_PASSWORD + SECRET_KEY).encode()).hexdigest() if WEB_PASSWORD else ""
+    if WEB_PASSWORD and request.cookies.get("web_auth") != expected_token:
+        html = render_template_string(LOGIN_HTML)
+        return make_response(html)
+
     html = render_template_string(
         WEB_UI_HTML
         .replace("__MAX_UPLOAD_MB__", str(MAX_UPLOAD_MB))
@@ -659,6 +709,124 @@ def handle_request_export(data):
     emit("export_started", {"job": job, "expect": sent})
 
 
+# ═══════════════════════════════════════════════════════════
+#  MuMu BACKUP — เสิร์ฟไฟล์ .mumudata จาก server ให้เครื่องลูกโหลดตรงๆ
+#  เอาไฟล์ไปวางในโฟลเดอร์ mumu-backup ข้างๆ server.py แล้วเลือกจากหน้าเว็บได้เลย
+#  (เร็วกว่า Google Drive มากถ้าอยู่วง LAN เดียวกัน และไม่ติดโควต้าดาวน์โหลด)
+# ═══════════════════════════════════════════════════════════
+MUMU_BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mumu-backup")
+os.makedirs(MUMU_BACKUP_DIR, exist_ok=True)
+
+
+def _mumu_backup_files():
+    """รายชื่อไฟล์ backup ที่วางไว้ให้เครื่องลูกโหลด"""
+    out = []
+    try:
+        for name in sorted(os.listdir(MUMU_BACKUP_DIR)):
+            full = os.path.join(MUMU_BACKUP_DIR, name)
+            if os.path.isfile(full) and name.lower().endswith((".mumudata", ".zip")):
+                out.append({"name": name, "size": os.path.getsize(full)})
+    except Exception as e:
+        logger.warning(f"อ่านโฟลเดอร์ mumu-backup ไม่ได้: {e}")
+    return out
+
+
+# จำกัดจำนวนเครื่องที่โหลดไฟล์พร้อมกัน — ไฟล์ backup ใหญ่หลาย GB
+# ถ้าปล่อยให้ 25 เครื่องรุมโหลดพร้อมกัน server จะรับ connection ไม่ไหวแล้วพังทั้งกอง
+# เครื่องที่มาไม่ทันคิวจะได้ 503 + Retry-After แล้ว agent จะรอแล้วค่อยกลับมาใหม่เอง
+# ตั้งไว้น้อยๆ ตั้งใจ: เน็ตขาออกเครื่องแม่มีเท่าเดิม ปล่อยพร้อมกันเยอะ = ช้าเท่ากันหมด
+# ปล่อยทีละ 2 เครื่องให้จบเร็ว แล้วปล่อยให้เครื่องที่ได้ไฟล์แล้วไปกระจายต่อกันเอง (เร็วกว่ามาก)
+MUMU_MAX_DOWNLOADS = int(os.environ.get("MUMU_MAX_DOWNLOADS", "2"))
+_dl_sem = threading.Semaphore(MUMU_MAX_DOWNLOADS)
+_dl_lock = threading.Lock()
+_dl_active = {"n": 0}
+
+
+def _dl_slot_release():
+    with _dl_lock:
+        _dl_active["n"] = max(0, _dl_active["n"] - 1)
+    _dl_sem.release()
+
+
+@app.route("/mumu-backup/<path:name>")
+def serve_mumu_backup(name):
+    """ให้เครื่องลูกโหลดไฟล์ backup (ต้องมี secret ตรงกับ agent ถึงจะโหลดได้)"""
+    import hmac
+    if not hmac.compare_digest(request.args.get("secret", ""), AGENT_SECRET):
+        return ("forbidden", 403)
+    safe = os.path.basename(name)            # กัน path traversal
+    full = os.path.join(MUMU_BACKUP_DIR, safe)
+    if not os.path.isfile(full):
+        return ("not found", 404)
+
+    if not _dl_sem.acquire(blocking=False):
+        resp = make_response("busy", 503)
+        resp.headers["Retry-After"] = "30"
+        return resp
+    with _dl_lock:
+        _dl_active["n"] += 1
+        active = _dl_active["n"]
+    logger.info(f"⬇️  ส่งไฟล์ {safe} ให้ {request.remote_addr} "
+                f"(กำลังโหลดพร้อมกัน {active}/{MUMU_MAX_DOWNLOADS})")
+    try:
+        # conditional=True → รองรับ Range ให้โหลดต่อได้ถ้าหลุดกลางคัน
+        resp = send_file(full, as_attachment=True, download_name=safe, conditional=True)
+    except Exception:
+        _dl_slot_release()
+        raise
+    resp.call_on_close(_dl_slot_release)     # คืนคิวเมื่อส่งไฟล์เสร็จ/ลูกค้าตัดสาย
+    return resp
+
+
+@socketio.on("request_mumu_files")
+def handle_mumu_files_req(data=None):
+    """หน้าเว็บขอรายชื่อไฟล์ backup ที่มีบน server"""
+    emit("mumu_files", {"files": _mumu_backup_files(), "folder": MUMU_BACKUP_DIR})
+
+
+# ─── ทะเบียนว่าเครื่องลูกตัวไหนมีไฟล์ backup อะไรแล้วบ้าง (ไว้ให้เพื่อนมาดูดต่อ) ───
+peer_have = {}        # agent_id -> {"ips": [...], "port": N, "files": {name: size}}
+
+
+def _peer_note(agent_id, ips, port, files):
+    if not agent_id:
+        return
+    peer_have[agent_id] = {
+        "ips": [i for i in (ips or []) if i and not str(i).startswith("127.")],
+        "port": port or 5010,
+        "files": {f.get("name"): f.get("size") for f in (files or []) if f.get("name")},
+    }
+
+
+@socketio.on("agent_have")
+def handle_agent_have(data):
+    """เครื่องลูกรายงานว่ามีไฟล์ backup อะไรพร้อมแบ่งให้เพื่อนบ้าง"""
+    if data.get("secret") != AGENT_SECRET:
+        return
+    _peer_note(data.get("agent_id"), data.get("ips"), data.get("port"), data.get("files"))
+
+
+@app.route("/mumu-peers/<path:name>")
+def serve_mumu_peers(name):
+    """เครื่องลูกถามว่า 'ใครมีไฟล์นี้แล้วบ้าง' จะได้ไปดูดจากเพื่อนแทนที่จะรุมเครื่องแม่"""
+    import hmac
+    if not hmac.compare_digest(request.args.get("secret", ""), AGENT_SECRET):
+        return ("forbidden", 403)
+    safe = os.path.basename(name)
+    online = {a.get("agent_id") for a in agents.values()}
+    want = os.path.getsize(os.path.join(MUMU_BACKUP_DIR, safe)) \
+        if os.path.isfile(os.path.join(MUMU_BACKUP_DIR, safe)) else None
+    peers = []
+    for aid, info in peer_have.items():
+        if aid not in online:                  # เครื่องที่หลุดไปแล้ว ไม่ต้องแนะนำ
+            continue
+        size = info["files"].get(safe)
+        if size is None or (want and size != want):   # ต้องมีไฟล์ครบขนาดเท่ากันเท่านั้น
+            continue
+        peers.append({"agent_id": aid, "ips": info["ips"], "port": info["port"]})
+    return jsonify({"peers": peers, "count": len(peers)})
+
+
 @app.route("/agent.py")
 def serve_agent_py():
     """ให้เครื่องลูกดาวน์โหลด agent.py ตัวล่าสุดจาก server ได้ตรงๆ"""
@@ -672,6 +840,94 @@ def serve_autoupdate_bat():
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "autoupdate.bat")
     return send_file(p, mimetype="text/plain", as_attachment=False)
 
+
+@app.route("/login", methods=["POST"])
+def login():
+    password = request.form.get("password", "")
+    if password == WEB_PASSWORD:
+        # ล็อกอินสำเร็จ ให้ redirect กลับไปหน้าแรก
+        resp = make_response(render_template_string("<script>window.location.href='/';</script>"))
+        # บันทึกเป็น Hash ลง cookie เพื่อความปลอดภัยสูงสุด (ไม่เก็บรหัสผ่านตรงๆ)
+        auth_token = hashlib.sha256((WEB_PASSWORD + SECRET_KEY).encode()).hexdigest()
+        resp.set_cookie("web_auth", auth_token, max_age=60*60*24*30, httponly=True)
+        return resp
+    else:
+        # รหัสผิด
+        html = render_template_string(LOGIN_HTML.replace("<!--ERROR-->", "<p style='color:#ef4444; text-align:center; margin-bottom:15px;'>รหัสผ่านไม่ถูกต้อง</p>"))
+        return make_response(html)
+
+
+LOGIN_HTML = r"""
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login - Remote File Manager</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&display=swap');
+  body {
+    font-family: 'IBM Plex Sans Thai', sans-serif;
+    background: #0a0e17;
+    color: #e8ecf4;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    margin: 0;
+  }
+  .login-box {
+    background: #1a2235;
+    padding: 40px;
+    border-radius: 12px;
+    border: 1px solid #2a3a55;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    width: 100%;
+    max-width: 350px;
+  }
+  h2 { text-align: center; margin-bottom: 25px; font-weight: 600; }
+  input[type="password"] {
+    width: 100%;
+    padding: 12px 15px;
+    margin-bottom: 20px;
+    border-radius: 8px;
+    border: 1px solid #2a3a55;
+    background: #111827;
+    color: #fff;
+    font-size: 16px;
+    box-sizing: border-box;
+  }
+  input[type="password"]:focus {
+    outline: none;
+    border-color: #3b82f6;
+  }
+  button {
+    width: 100%;
+    padding: 12px;
+    background: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  button:hover { background: #2563eb; }
+</style>
+</head>
+<body>
+  <div class="login-box">
+    <h2>🔒 เข้าสู่ระบบ</h2>
+    <!--ERROR-->
+    <form action="/login" method="POST">
+      <input type="password" name="password" placeholder="รหัสผ่าน" required autofocus>
+      <button type="submit">ตกลง</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
 
 # ═══════════════════════════════════════════════════════════
 #  HTML TEMPLATE (embedded)
@@ -1294,6 +1550,8 @@ WEB_UI_HTML = r"""
   /* การ์ดใหญ่ — ชื่อ combo ยาวๆ จะได้ไม่โดนตัดเหลือ "kappa+kukuru+..." */
   .hero-grid.big { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 11px; }
   .hero-grid.big .hero-card { min-height: 86px; padding: 12px 14px; }
+  /* การ์ดโฟลเดอร์ที่ติ๊กไว้ว่าจะโหลด */
+  .hero-card.picked { border-color: var(--accent); background: rgba(59,130,246,0.10); }
   .hero-grid.big .hero-name { font-size: 13px; -webkit-line-clamp: 3; }
   .hero-grid.big .hero-count { font-size: 25px; }
   .hero-grid.big .hero-card.with-img .hero-name { padding-right: 82px; }
@@ -1615,6 +1873,9 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
     <button class="btn" onclick="openBroadcastBackup()">💾 ส่งเข้า backup (ทุกเครื่อง)</button>
     <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
+    <button class="btn" onclick="openMumuCloneDashboard()">🧬 Clone MuMu</button>
+    <button class="btn" onclick="openRunFileDashboard()">▶️ รันไฟล์ .bat</button>
+    <button class="btn" onclick="openBotUpdateDashboard()">⬆️ อัปเดตบอท (ติ๊กเลือกเครื่อง)</button>
     <button class="btn" onclick="openLiveView()">🖥️ Live View</button>
     <span class="status-badge status-online" id="connStatus">● เชื่อมต่อแล้ว</span>
   </div>
@@ -1900,12 +2161,22 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
   // แยกตามโฟลเดอร์ย่อยใน found-hero (hero1 / hero2 / ...)
   const fT = folderTotals || {};
   const folderKeys = Object.keys(fT).sort((a, b) => (fT[b] - fT[a]) || a.localeCompare(b));
-  const folderCards = folderKeys.map(g => `
-    <div class="hero-card" data-name="${escHtml(g || 'ชั้นนอก')}">
-      <div class="hero-name">📁 ${escHtml(g || 'ชั้นนอก')}</div>
+  // การ์ดโฟลเดอร์ (hero1/hero2/…) ติ๊กเลือกได้ แล้วโหลดเฉพาะที่ติ๊ก — เหมือนหน้า Line Ranger-Find
+  _pesFolders = folderKeys.filter(g => g);        // ชื่อโฟลเดอร์จริง (ตัดชั้นนอกออก)
+  _pesFolderFiles = {};
+  folderKeys.forEach(g => { _pesFolderFiles[g] = fT[g] || 0; });
+  if (!_pesPick.size) _pesFolders.forEach(g => _pesPick.add(g));   // ครั้งแรกติ๊กให้หมด
+  const folderCards = folderKeys.map(g => {
+    const nm = g || 'ชั้นนอก';
+    const on = !g || _pesPick.has(g);
+    return `
+    <div class="hero-card ${on ? 'picked' : ''}" id="pesFold_${escAttr(nm)}" data-name="${escHtml(nm)}"
+         ${g ? `onclick="pesTogglePick('${escAttr(g)}')" style="cursor:pointer"` : ''}>
+      <div class="hero-name">${g ? `<input type="checkbox" ${on ? 'checked' : ''} onclick="event.stopPropagation(); pesTogglePick('${escAttr(g)}')" style="width:auto; margin:0 6px 0 0; vertical-align:middle">` : ''}📁 ${escHtml(nm)}</div>
       <div class="hero-count">${fT[g].toLocaleString()}</div>
       <div class="hero-sub">ไฟล์</div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   const inputIdTotal = perAgent.reduce((s, p) => s + (p.inputId || 0), 0);
   const agentRows = perAgent.map(p => {
     let right;
@@ -1941,8 +2212,35 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
       <div class="stat-tile"><div class="stat-label">id ที่ตรงชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
     </div>
-    ${folderCards ? `<h3 style="margin:4px 0 10px; font-size:14px; color:var(--text-secondary)">แยกตามโฟลเดอร์ใน ${cfg.label}</h3>
+    ${folderCards ? `<h3 style="margin:4px 0 10px; font-size:14px; color:var(--text-secondary)">
+      แยกตามโฟลเดอร์ใน ${cfg.label} <span style="color:var(--text-dim); font-weight:400">— กดการ์ดเพื่อติ๊กเลือกโฟลเดอร์ที่จะโหลด</span></h3>
     <div class="hero-grid">${folderCards}</div>` : ''}
+
+    <div class="pick-panel" style="margin:14px 0 18px">
+      <div class="pick-head">
+        <span class="pick-title">📦 โหลดโฟลเดอร์ที่ติ๊กออกมาเป็น .zip ไฟล์เดียว
+          <span style="color:var(--text-dim); font-weight:400">— รวมจาก ${onlineCount} เครื่อง</span></span>
+        <button class="btn" onclick="pesPickAll(true)">ติ๊กทุกโฟลเดอร์</button>
+        <button class="btn" onclick="pesPickAll(false)">เอาออกทั้งหมด</button>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer">
+          <input type="checkbox" id="pesAllMove" style="width:auto">
+          <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
+        </label>
+        <button class="btn btn-primary" id="pesAllBtn" onclick="pesExportAll('${kind}')">📦 โหลดที่ติ๊ก</button>
+      </div>
+      <div id="pesAllProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="pesAllMsg" style="color:var(--text-secondary)"></span>
+          <span id="pesAllPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="pesAllBar" style="width:0%"></div></div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        ในไฟล์ zip จะแยกเป็นโฟลเดอร์ hero1/ hero2/ ตามเดิม · ไฟล์ชื่อซ้ำข้ามเครื่องจะเติมชื่อเครื่องต่อท้ายให้
+      </div>
+    </div>
     ${nameCards ? `<h3 style="margin:22px 0 10px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อที่เจอ — ทุกเครื่องรวมกัน (ชื่อเดียวกันคนละ combo บวกรวมกัน)</h3>
     <div class="hero-grid big">${nameCards}</div>` : ''}
     <h3 style="margin:22px 0 10px; font-size:14px; color:var(--text-secondary)">แยกตามไฟล์ (combo) — ไฟล์ที่มี 2 ชื่อนับเป็นชุดเดียว</h3>
@@ -1951,6 +2249,59 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — input-id ที่เหลือ + ${cfg.label}</h3>
     <div class="agent-stats">${agentRows}</div>
   `;
+  pesSyncPick();      // ตั้งป้ายบนปุ่มให้ตรงกับโฟลเดอร์ที่ติ๊กไว้
+}
+
+// ── ติ๊กเลือกโฟลเดอร์ (hero1/hero2/…) แล้วโหลดเฉพาะที่ติ๊ก ──
+function pesTogglePick(g) {
+  if (_pesPick.has(g)) _pesPick.delete(g); else _pesPick.add(g);
+  pesSyncPick();
+}
+
+function pesPickAll(on) {
+  _pesPick.clear();
+  if (on) _pesFolders.forEach(g => _pesPick.add(g));
+  pesSyncPick();
+}
+
+// อัปเดตหน้าตาการ์ด + ป้ายบนปุ่มให้ตรงกับที่ติ๊กไว้
+function pesSyncPick() {
+  let files = 0;
+  _pesFolders.forEach(g => {
+    const on = _pesPick.has(g);
+    if (on) files += _pesFolderFiles[g] || 0;
+    const card = document.getElementById('pesFold_' + g);
+    if (card) {
+      card.classList.toggle('picked', on);
+      const cb = card.querySelector('input[type=checkbox]');
+      if (cb) cb.checked = on;
+    }
+  });
+  const btn = document.getElementById('pesAllBtn');
+  if (btn) {
+    btn.disabled = _pesPick.size === 0;
+    btn.textContent = _pesPick.size
+      ? `📦 โหลด ${_pesPick.size} โฟลเดอร์ (${files.toLocaleString()} ไฟล์)`
+      : '📦 ยังไม่ได้ติ๊กโฟลเดอร์';
+  }
+}
+
+// โหลดโฟลเดอร์ที่ติ๊กของทุกเครื่องรวมเป็น zip เดียว
+function pesExportAll(kind) {
+  const cfg = DASH_KINDS[kind];
+  const picked = [..._pesPick];
+  if (!picked.length) { toast('ยังไม่ได้ติ๊กโฟลเดอร์ที่จะโหลด', 'error'); return; }
+  const move = !!(document.getElementById('pesAllMove') || {}).checked;
+  const tag = picked.length === _pesFolders.length ? cfg.label : picked.join('_');
+  return rfRunExport({
+    mode: 'flat', key: '', move: move, groups: picked,
+    subpath: cfg.subpath, base: 'pes',
+    scope: _dashScope[kind],
+    label: (move ? 'move_' : '') + tag,
+    fileName: (move ? 'move_' : '') + tag + '.zip',
+    confirmText: `⚠️ ย้ายไฟล์ใน ${picked.join(', ')} ออกจากเครื่องที่เลือก ?`,
+    ui: { btn: 'pesAllBtn', prog: 'pesAllProg', msg: 'pesAllMsg', bar: 'pesAllBar', pct: 'pesAllPct' },
+  });
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2348,6 +2699,9 @@ function heroImgs(comboName) {
 // ── กดการ์ดแล้วเปิดดูข้อมูลเต็ม ──
 // kind='combo' ดูโฟลเดอร์ combo นั้น | kind='name' ดูตัวละครตัวเดียว (รวมทุก combo ที่มีชื่อนี้)
 let _pesCache = null;
+let _pesFolders = [];        // ชื่อโฟลเดอร์ใน found-hero (hero1/hero2/…)
+let _pesFolderFiles = {};    // จำนวนไฟล์ของแต่ละโฟลเดอร์ (ไว้โชว์บนปุ่ม)
+const _pesPick = new Set();  // โฟลเดอร์ที่ติ๊กไว้ว่าจะโหลด
 const DETAIL_SRC = {
   ranger: { cfg: () => RANGER_CFG, mode: 'combo', nameMode: 'name', scope: () => _rfScope,
             group: () => _rfGroup, cache: () => _rfCache, unit: 'ชุด' },
@@ -3070,6 +3424,768 @@ async function mumuCloseAll() {
 }
 
 // ═══════════════════════════════════════════════════════════
+//  RUN FILE — กดปุ่มเดียว ให้ทุกเครื่องเปิดไฟล์ .bat เอง (เช่น pes\login.bat)
+// ═══════════════════════════════════════════════════════════
+let _runGen = 0;         // เปลี่ยนทุกครั้งที่วาดหน้าใหม่ — ใช้หยุด loop โพลเก่า
+let _runAgents = [];
+const RUN_PROJECTS = [
+  { key: 'pes', label: '⚽ pes' },
+  { key: 'main', label: '🏹 main (Line Ranger)' },
+  { key: 'cookie-run', label: '🍪 cookie-run' },
+];
+
+function runCfg() {
+  const sel = document.getElementById('runProject');
+  const file = document.getElementById('runFile');
+  const hid = document.getElementById('runHidden');
+  return {
+    base: sel ? sel.value : 'pes',
+    name: file ? (file.value || '').trim() : '',
+    hidden: hid ? hid.checked : false,
+  };
+}
+
+function runSaveCfg() {
+  try { localStorage.setItem('runCfg', JSON.stringify(runCfg())); } catch (e) {}
+}
+
+function runIncluded() {
+  const out = [];
+  for (let i = 0; i < _runAgents.length; i++) {
+    const cb = document.getElementById('run_inc_' + i);
+    if (cb && cb.checked) out.push(i);
+  }
+  return out;
+}
+
+function runTickAll(v) {
+  document.querySelectorAll('.run_inc').forEach(cb => { cb.checked = !!v; });
+}
+
+function openRunFileDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  _runGen++;
+  _runAgents = (agentsData || []).slice();
+  if (!_runAgents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+  let cfg = { base: 'pes', name: 'login.bat', hidden: false };
+  try { cfg = Object.assign(cfg, JSON.parse(localStorage.getItem('runCfg') || '{}')); } catch (e) {}
+
+  const inputStyle = 'background:var(--bg-card); border:1px solid var(--border); color:var(--text-primary); border-radius:8px; padding:8px 10px';
+  const projOpts = RUN_PROJECTS.map(p =>
+    `<option value="${escAttr(p.key)}" ${cfg.base === p.key ? 'selected' : ''}>${escHtml(p.label)}</option>`).join('');
+  const cards = _runAgents.map((a, i) => {
+    const label = escHtml(a.name || a.hostname || a.agent_id);
+    return `<div class="mumu-card" id="run_card_${i}">
+      <div class="mumu-head">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:700; font-size:14px">
+          <input type="checkbox" class="run_inc" id="run_inc_${i}" checked style="width:auto; margin:0">
+          <span>🖥️ ${label}</span>
+        </label>
+        <div class="mumu-actions">
+          <button class="btn btn-primary" onclick="runStart(${i})">▶️ รัน</button>
+          <button class="btn btn-danger" onclick="runStop(${i})">⛔ หยุด</button>
+        </div>
+      </div>
+      <div class="mumu-body" id="run_status_${i}"><span style="color:var(--text-dim); font-size:12px">⏳ กำลังเช็คสถานะ...</span></div>
+    </div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">▶️ รันไฟล์ .bat — กดทีเดียว ทุกเครื่องเปิดเอง</h2>
+      <button class="btn btn-primary" onclick="openRunFileDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="pick-panel" style="margin-bottom:14px">
+      <div class="pick-head">
+        <span class="pick-title">⚙️ เลือกโปรเจกต์และไฟล์ที่จะรัน (ไฟล์ต้องอยู่ในโฟลเดอร์โปรเจกต์ของเครื่องลูก)</span>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">
+        <select id="runProject" class="btn project-select" style="${inputStyle}" onchange="runSaveCfg(); runLoadFiles()">${projOpts}</select>
+        <input type="text" id="runFile" list="runFileList" class="dash-search" style="flex:1; min-width:200px"
+               placeholder="login.bat" value="${escAttr(cfg.name)}" oninput="runSaveCfg()">
+        <datalist id="runFileList"></datalist>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; white-space:nowrap">
+          <input type="checkbox" id="runHidden" ${cfg.hidden ? 'checked' : ''} style="width:auto; margin:0" onchange="runSaveCfg()"> ซ่อนหน้าต่าง
+        </label>
+      </div>
+      <div class="pick-head" style="margin:12px 0 0">
+        <button class="btn btn-primary" onclick="runStartAll()">▶️ รันทุกเครื่องที่ติ๊ก</button>
+        <button class="btn btn-danger" onclick="runStopAll()">⛔ หยุดทุกเครื่องที่ติ๊ก</button>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="runTickAll(true)">ติ๊กทุกเครื่อง</button>
+        <button class="btn" onclick="runTickAll(false)">เอาออกทั้งหมด</button>
+      </div>
+      <div id="runFileHint" style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        เครื่องลูกจะเปิดไฟล์เหมือนเราดับเบิลคลิกเอง (หน้าต่าง cmd โผล่ที่เครื่องนั้น) · รันได้เฉพาะ .bat .cmd .exe .py ในโฟลเดอร์โปรเจกต์เท่านั้น
+      </div>
+    </div>
+    <div class="mumu-grid">${cards}</div>`;
+
+  runLoadFiles();
+  runPollLoop(_runGen);
+}
+
+async function runLoadFiles() {
+  // ถามรายชื่อไฟล์จากเครื่องแรกที่ตอบได้ เอามาเป็นตัวเลือกในช่องกรอก
+  const cfg = runCfg();
+  const hint = document.getElementById('runFileHint');
+  for (const a of _runAgents) {
+    const res = await mcReq(a.agent_id, 'request_run_file', { sub: 'list', base_match: cfg.base }, 20000);
+    if (res.error || !res.files) continue;
+    const dl = document.getElementById('runFileList');
+    if (dl) dl.innerHTML = res.files.map(f => `<option value="${escAttr(f)}">`).join('');
+    if (hint && res.files.length) {
+      hint.innerHTML = `พบไฟล์ที่รันได้ ${res.files.length} ไฟล์ในโฟลเดอร์ <code>${escHtml(res.base || cfg.base)}</code> (จากเครื่อง ${escHtml(a.name || a.hostname || a.agent_id)}) — กดที่ช่องกรอกเพื่อเลือก`;
+    }
+    return;
+  }
+  if (hint) hint.innerHTML = '<span style="color:var(--warning)">ยังดึงรายชื่อไฟล์จากเครื่องลูกไม่ได้ — พิมพ์ชื่อไฟล์เองได้เลย เช่น login.bat</span>';
+}
+
+async function runPollLoop(gen) {
+  while (gen === _runGen) {
+    for (let i = 0; i < _runAgents.length; i++) {
+      if (gen !== _runGen || !document.getElementById('run_card_' + i)) return;
+      const res = await mcReq(_runAgents[i].agent_id, 'request_run_file', { sub: 'status' }, 20000);
+      if (gen !== _runGen) return;
+      runRenderStatus(i, res);
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+}
+
+function runRenderStatus(i, res) {
+  const el = document.getElementById('run_status_' + i);
+  if (!el) return;
+  if (res.error) {
+    el.innerHTML = `<span style="color:var(--danger); font-size:12px">❌ ${escHtml(res.error)}</span>`;
+    return;
+  }
+  const jobs = res.jobs || [];
+  if (!jobs.length) {
+    el.innerHTML = '<span style="color:var(--text-dim); font-size:12px">⚪ ไม่มีไฟล์ที่กำลังรันอยู่</span>';
+    return;
+  }
+  el.innerHTML = jobs.map(j =>
+    `<div style="font-size:12px; color:var(--success)">🟢 <b>${escHtml(j.name || '')}</b> กำลังทำงาน · PID ${escHtml(String(j.pid || ''))} · เริ่ม ${escHtml(j.started || '')}</div>`
+  ).join('');
+}
+
+async function runStart(i, quiet) {
+  const a = _runAgents[i];
+  if (!a) return;
+  const cfg = runCfg();
+  if (!cfg.name) { toast('ยังไม่ได้ใส่ชื่อไฟล์ที่จะรัน', 'error'); return; }
+  const el = document.getElementById('run_status_' + i);
+  if (el) el.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังสั่งเปิด...</span>';
+  const res = await mcReq(a.agent_id, 'request_run_file',
+    { sub: 'start', base_match: cfg.base, name: cfg.name, hidden: cfg.hidden }, 40000);
+  const name = a.name || a.hostname || a.agent_id;
+  if (res.error) {
+    if (el) el.innerHTML = `<span style="color:${res.already_running ? 'var(--warning)' : 'var(--danger)'}; font-size:12px">${res.already_running ? '⚠️' : '❌'} ${escHtml(res.error)}</span>`;
+    if (!quiet) toast(`${name}: ${res.error}`, res.already_running ? 'info' : 'error');
+    return;
+  }
+  if (el) el.innerHTML = `<span style="color:var(--success); font-size:12px">🟢 เปิด <b>${escHtml(res.name || cfg.name)}</b> แล้ว · PID ${escHtml(String(res.pid || ''))}</span>`;
+  if (!quiet) toast(`${name}: เปิด ${res.name || cfg.name} แล้ว`, 'success');
+}
+
+async function runStartAll() {
+  const cfg = runCfg();
+  if (!cfg.name) { toast('ยังไม่ได้ใส่ชื่อไฟล์ที่จะรัน', 'error'); return; }
+  const idxs = runIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  if (!confirm(`▶️ สั่งรัน ${cfg.base}\\${cfg.name} ที่ ${idxs.length} เครื่อง ?`)) return;
+  for (const i of idxs) await runStart(i, true);
+  toast(`สั่งรันแล้ว ${idxs.length} เครื่อง`, 'success');
+}
+
+async function runStop(i, quiet) {
+  const a = _runAgents[i];
+  if (!a) return;
+  const el = document.getElementById('run_status_' + i);
+  if (el) el.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังหยุด...</span>';
+  const cfgStop = runCfg();
+  // ส่งโปรเจกต์ไปด้วย เพื่อให้ agent กวาดฆ่า process จริงในโฟลเดอร์นั้นได้
+  // แม้ตัว agent จะไม่ได้เป็นคนเปิดบอทเอง (เปิดจาก task scheduler / login.bat วนเอง)
+  const res = await mcReq(a.agent_id, 'request_run_file',
+    { sub: 'stop', base_match: cfgStop.base, name: cfgStop.name }, 40000);
+  if (res.error) {
+    if (el) el.innerHTML = `<span style="color:var(--danger); font-size:12px">❌ ${escHtml(res.error)}</span>`;
+    if (!quiet) toast(res.error, 'error');
+    return;
+  }
+  if (el) el.innerHTML = `<span style="color:var(--text-dim); font-size:12px">⚪ หยุดแล้ว ${res.count || 0} งาน</span>`;
+  if (!quiet) toast(`หยุดแล้ว ${res.count || 0} งาน`, 'success');
+}
+
+async function runStopAll() {
+  const idxs = runIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  if (!confirm(`⛔ หยุดไฟล์ที่กำลังรันอยู่ของ ${idxs.length} เครื่อง ?`)) return;
+  for (const i of idxs) await runStop(i, true);
+  toast('สั่งหยุดทุกเครื่องแล้ว', 'success');
+}
+
+// ═══════════════════════════════════════════════════════════
+//  CLONE MUMU — วางลิงก์ Google Drive แล้วให้ทุกเครื่อง โหลด+restore+เปิดจอ เองอัตโนมัติ
+// ═══════════════════════════════════════════════════════════
+let _mcChain = Promise.resolve();   // คิวยิงคำสั่งทีละตัว กัน request_sent จับ request_id ผิดตัว
+let _mcGen = 0;                     // เปลี่ยนทุกครั้งที่วาดหน้าใหม่ — ใช้หยุด loop โพลเก่า
+let _mcAgents = [];
+let _mcJobs = {};                   // i -> state ล่าสุดของงาน clone เครื่องนั้น
+
+function mcReq(agentId, eventName, payload, waitMs) {
+  // ทุก request ของหน้านี้เข้าคิวเดียวกัน: emit -> รอ request_sent (ได้ request_id) -> ค่อยปล่อยตัวถัดไป
+  // ส่วนการรอ response ปล่อยรอนอกคิวได้เลย เพราะผูกกับ request_id เฉพาะตัวแล้ว
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v || {}); } };
+    _mcChain = _mcChain.then(() => new Promise((next) => {
+      let sent = false;
+      const onSent = (d) => {
+        sent = true;
+        socket.once('response_' + d.request_id, (resp) => done(resp));
+        setTimeout(() => done({ error: 'หมดเวลา (เครื่องไม่ตอบ)' }), waitMs || 60000);
+        next();
+      };
+      socket.once('request_sent', onSent);
+      setTimeout(() => {
+        if (!sent) { socket.off('request_sent', onSent); done({ error: 'เครื่องไม่ออนไลน์หรือไม่ตอบ' }); next(); }
+      }, 8000);
+      socket.emit(eventName, Object.assign({ agent_id: agentId }, payload || {}));
+    }));
+  });
+}
+
+function mcVal(id) { const el = document.getElementById(id); return el ? el.value : ''; }
+
+function mcSettings() {
+  let count = parseInt(mcVal('mcCount'), 10);
+  if (!count || count < 1) count = 1;
+  if (count > 100) count = 100;
+  const lch = document.getElementById('mcLaunch');
+  const cf = document.getElementById('mcCloseFirst');
+  return {
+    source: mcVal('mcSource') || 'server',
+    name: mcVal('mcFile') || '',
+    url: (mcVal('mcUrl') || '').trim(),
+    count: count,
+    launch: lch ? lch.checked : true,
+    close_first: cf ? cf.checked : true,
+  };
+}
+
+// สลับช่องกรอกตามแหล่งไฟล์ที่เลือก
+function mcToggleSource() {
+  const s = mcVal('mcSource');
+  const srv = document.getElementById('mcSrcServer');
+  const lnk = document.getElementById('mcSrcLink');
+  if (srv) srv.style.display = s === 'server' ? '' : 'none';
+  if (lnk) lnk.style.display = s === 'server' ? 'none' : '';
+  mcSaveSettings();
+}
+
+// ขอรายชื่อไฟล์ backup ที่วางไว้บน server
+function mcServerFiles() {
+  return new Promise((resolve) => {
+    let done = false;
+    socket.once('mumu_files', (d) => { done = true; resolve(d || {}); });
+    socket.emit('request_mumu_files', {});
+    setTimeout(() => { if (!done) resolve(null); }, 8000);
+  });
+}
+
+async function mcLoadServerFiles(selected) {
+  const sel = document.getElementById('mcFile');
+  const hint = document.getElementById('mcFileHint');
+  if (!sel) return;
+  const d = await mcServerFiles();
+  if (!d) { if (hint) hint.innerHTML = '<span style="color:var(--warning)">ขอรายชื่อไฟล์จาก server ไม่สำเร็จ</span>'; return; }
+  const files = d.files || [];
+  if (!files.length) {
+    sel.innerHTML = '<option value="">— ยังไม่มีไฟล์ —</option>';
+    if (hint) hint.innerHTML = `ยังไม่มีไฟล์ในโฟลเดอร์ <code>${escHtml(d.folder || 'mumu-backup')}</code> — เอาไฟล์ .mumudata (หรือ .zip) ไปวางในโฟลเดอร์นี้ที่เครื่อง server แล้วกดรีเฟรช`;
+    return;
+  }
+  sel.innerHTML = files.map(f =>
+    `<option value="${escAttr(f.name)}" ${f.name === selected ? 'selected' : ''}>${escHtml(f.name)} (${(f.size / 1073741824).toFixed(2)} GB)</option>`).join('');
+  if (hint) hint.innerHTML = `พบ ${files.length} ไฟล์ในโฟลเดอร์ <code>${escHtml(d.folder || '')}</code> · เครื่องลูกจะโหลดจาก server ผ่าน LAN (เร็วกว่าและไม่ติดโควต้า)`;
+}
+
+function mcSaveSettings() {
+  try { localStorage.setItem('mcCfg', JSON.stringify(mcSettings())); } catch (e) {}
+}
+
+function mcIncluded() {
+  const out = [];
+  for (let i = 0; i < _mcAgents.length; i++) {
+    const cb = document.getElementById('mc_inc_' + i);
+    if (cb && cb.checked) out.push(i);
+  }
+  return out;
+}
+
+function mcTickAll(v) {
+  document.querySelectorAll('.mc_inc').forEach(cb => { cb.checked = !!v; });
+}
+
+function openMumuCloneDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  _mcGen++;
+  _mcJobs = {};
+  _mcAgents = (agentsData || []).slice();
+  if (!_mcAgents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+  let cfg = { source: 'server', name: '', url: '', count: 5, launch: true, close_first: true };
+  try { cfg = Object.assign(cfg, JSON.parse(localStorage.getItem('mcCfg') || '{}')); } catch (e) {}
+
+  const inputStyle = 'background:var(--bg-card); border:1px solid var(--border); color:var(--text-primary); border-radius:8px';
+  const cards = _mcAgents.map((a, i) => {
+    const label = escHtml(a.name || a.hostname || a.agent_id);
+    return `<div class="mumu-card" id="mc_card_${i}">
+      <div class="mumu-head">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:700; font-size:14px">
+          <input type="checkbox" class="mc_inc" id="mc_inc_${i}" checked style="width:auto; margin:0">
+          <span>🖥️ ${label}</span>
+        </label>
+        <div class="mumu-actions">
+          <button class="btn btn-primary" onclick="mcStart(${i})">🚀 เริ่ม</button>
+          <button class="btn" onclick="mcOpenAll(${i})">▶️ เปิดทุกจอ</button>
+          <button class="btn btn-danger" onclick="mcKill(${i})">💀 Kill MuMu</button>
+          <button class="btn btn-danger" onclick="mcDeleteAll(${i})">🗑️ ลบทุกจอ</button>
+          <button class="btn" onclick="mcCancel(${i})">✖ ยกเลิก</button>
+        </div>
+      </div>
+      <div class="mumu-body" id="mc_status_${i}"><span style="color:var(--text-dim); font-size:12px">⏳ กำลังเช็คสถานะ...</span></div>
+      <div class="progress-bar" id="mc_bar_${i}" style="margin-top:8px; display:none"><div class="progress-fill" id="mc_fill_${i}" style="width:0%"></div></div>
+      <div id="mc_insts_${i}" style="font-size:12px; color:var(--text-secondary); margin-top:8px">⏳ กำลังเช็คจำนวนจอ...</div>
+      <div id="mc_cache_${i}" style="font-size:11px; color:var(--text-dim); margin-top:6px"></div>
+    </div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🧬 Clone MuMu — วางลิงก์แล้วให้ทุกเครื่องทำเองอัตโนมัติ</h2>
+      <button class="btn btn-primary" onclick="openMumuCloneDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="pick-panel" style="margin-bottom:14px">
+      <div class="pick-head">
+        <span class="pick-title">⚙️ ตั้งค่า — เลือกไฟล์ .mumudata (หรือ .zip ที่มี .mumudata ข้างใน) ที่จะให้ทุกเครื่องเอาไป restore</span>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">
+        <select id="mcSource" class="btn project-select" style="${inputStyle}" onchange="mcToggleSource()">
+          <option value="server" ${cfg.source !== 'link' ? 'selected' : ''}>📁 ไฟล์บน server (แนะนำ)</option>
+          <option value="link" ${cfg.source === 'link' ? 'selected' : ''}>🔗 ลิงก์ภายนอก</option>
+        </select>
+        <span id="mcSrcServer" style="flex:1; min-width:260px; ${cfg.source === 'link' ? 'display:none' : ''}">
+          <select id="mcFile" class="btn project-select" style="${inputStyle}; width:100%" onchange="mcSaveSettings()">
+            <option value="">— กำลังโหลดรายชื่อไฟล์ —</option>
+          </select>
+        </span>
+        <span id="mcSrcLink" style="flex:1; min-width:260px; ${cfg.source === 'link' ? '' : 'display:none'}">
+          <input type="text" id="mcUrl" class="dash-search" style="width:100%" placeholder="https://drive.google.com/file/d/... หรือลิงก์ดาวน์โหลดตรง" value="${escAttr(cfg.url)}" oninput="mcSaveSettings()">
+        </span>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap">จำนวนจอ/เครื่อง
+          <input type="number" id="mcCount" min="1" max="100" value="${parseInt(cfg.count, 10) || 5}" style="width:70px; padding:6px 8px; ${inputStyle}" onchange="mcSaveSettings()">
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; white-space:nowrap">
+          <input type="checkbox" id="mcLaunch" ${cfg.launch ? 'checked' : ''} style="width:auto; margin:0" onchange="mcSaveSettings()"> เปิดจอเลยหลังเสร็จ
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; white-space:nowrap"
+               title="ปิดหน้าต่าง MuMu ทั้งหมดก่อน แล้วสร้างจอผ่านคำสั่งล้วนๆ — กันอาการค้างที่ Creating device">
+          <input type="checkbox" id="mcCloseFirst" ${cfg.close_first !== false ? 'checked' : ''} style="width:auto; margin:0" onchange="mcSaveSettings()"> ปิด MuMu ก่อนเริ่ม (แนะนำ)
+        </label>
+      </div>
+      <div class="pick-head" style="margin:12px 0 0">
+        <button class="btn btn-primary" onclick="mcStartAll()">🚀 เริ่มทุกเครื่องที่ติ๊ก</button>
+        <button class="btn" onclick="mcOpenAllEvery()">▶️ เปิดทุกจอ (ทุกเครื่องที่ติ๊ก)</button>
+        <button class="btn btn-danger" onclick="mcKillEvery()">💀 Kill MuMu (ทุกเครื่องที่ติ๊ก)</button>
+        <button class="btn btn-danger" onclick="mcDeleteAllEvery()">🗑️ ลบทุกจอ (ทุกเครื่องที่ติ๊ก)</button>
+        <button class="btn" onclick="mcCacheClearEvery()">🧹 ลบไฟล์ที่โหลดไว้</button>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="mcTickAll(true)">ติ๊กทุกเครื่อง</button>
+        <button class="btn" onclick="mcTickAll(false)">เอาออกทั้งหมด</button>
+      </div>
+      <div id="mcFileHint" style="font-size:11px; color:var(--text-dim); margin-top:8px"></div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:4px">
+        แต่ละเครื่องจะทำเอง: ⬇️ โหลดไฟล์ → ⚙️ restore สร้างจอใหม่ตามจำนวนที่ตั้ง → ▶️ เปิดจอพร้อมใช้งาน · ไฟล์ที่เคยโหลดแล้วขนาดตรงกันจะไม่โหลดซ้ำ
+      </div>
+    </div>
+    <div class="pick-panel" id="mcBulk" style="display:none; margin-bottom:14px">
+      <div style="display:flex; justify-content:space-between; gap:10px; font-size:13px; margin-bottom:6px">
+        <span id="mcBulkMsg" style="color:var(--text-secondary)"></span>
+        <span id="mcBulkPct" style="color:var(--accent); font-weight:700; white-space:nowrap"></span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" id="mcBulkBar" style="width:0%"></div></div>
+    </div>
+    <div class="mumu-grid">${cards}</div>`;
+
+  mcLoadServerFiles(cfg.name);   // ดึงรายชื่อไฟล์ backup ที่วางไว้บน server
+  mcPollLoop(_mcGen);        // โพลสถานะงานวนไปเรื่อยๆ จนออกจากหน้า
+  mcLoadInstsAll(_mcGen);    // เช็คจำนวนจอของทุกเครื่องรอบแรก
+}
+
+async function mcPollLoop(gen) {
+  while (gen === _mcGen) {
+    for (let i = 0; i < _mcAgents.length; i++) {
+      if (gen !== _mcGen || !document.getElementById('mc_card_' + i)) return;
+      const res = await mcReq(_mcAgents[i].agent_id, 'request_mumu_clone', { sub: 'status' }, 20000);
+      if (gen !== _mcGen) return;
+      mcRenderStatus(i, res);
+    }
+    await new Promise(r => setTimeout(r, 2500));
+  }
+}
+
+async function mcLoadInstsAll(gen) {
+  for (let i = 0; i < _mcAgents.length; i++) {
+    if (gen !== _mcGen) return;
+    await mcLoadInsts(i);
+    if (gen !== _mcGen) return;
+    await mcCacheInfo(i);     // ไฟล์ที่โหลดไว้ + เนื้อที่ว่าง (ไว้เตือนก่อน MuMu ค้าง)
+  }
+}
+
+async function mcLoadInsts(i) {
+  const a = _mcAgents[i];
+  if (!a || !document.getElementById('mc_insts_' + i)) return;
+  const res = await mcReq(a.agent_id, 'request_mumu', { sub: 'list' }, 30000);
+  const box = document.getElementById('mc_insts_' + i);
+  if (!box) return;
+  if (res.error) {
+    box.innerHTML = `<span style="color:var(--warning)">จอ: เช็คไม่ได้ — ${escHtml(res.error)}</span>`;
+    return;
+  }
+  const insts = res.instances || [];
+  const running = insts.filter(x => x.running).length;
+  box.innerHTML = `🖥️ มีอยู่ <b>${insts.length}</b> จอ · เปิดอยู่ <b style="color:var(--success)">${running}</b> จอ`;
+}
+
+const MC_ACTIVE = ['downloading', 'restoring', 'launching'];
+
+// ── แถบรวมด้านบน: บอกว่างานทั้งฟลีตไปถึงไหนแล้ว ──
+function mcBulk(msg, pct, color) {
+  const box = document.getElementById('mcBulk');
+  if (!box) return;
+  box.style.display = '';
+  document.getElementById('mcBulkMsg').innerHTML = msg;
+  document.getElementById('mcBulkPct').textContent = pct >= 0 ? pct + '%' : '';
+  const bar = document.getElementById('mcBulkBar');
+  bar.style.width = Math.max(0, Math.min(100, pct < 0 ? 0 : pct)) + '%';
+  bar.style.background = color || 'var(--accent)';
+}
+
+function mcBulkHide() {
+  const box = document.getElementById('mcBulk');
+  if (box) box.style.display = 'none';
+}
+
+// รวมสถานะ clone ของทุกเครื่องเป็นแถบเดียว (เรียกทุกครั้งที่มีสถานะเครื่องไหนอัปเดต)
+function mcUpdateAggregate() {
+  if (_mcBulkBusy) return;      // ระหว่างงานลบ/เปิด ให้แถบแสดงงานนั้นแทน ไม่ต้องแย่งกัน
+  const states = Object.values(_mcJobs).filter(s => s && s.status && s.status !== 'idle');
+  if (!states.length) { mcBulkHide(); return; }
+  const active = states.filter(s => MC_ACTIVE.indexOf(s.status) !== -1).length;
+  const finished = states.filter(s => s.status === 'done').length;
+  const failed = states.filter(s => s.status === 'failed' || s.status === 'cancelled').length;
+  const scrDone = states.reduce((a, s) => a + (s.done || 0), 0);
+  const scrTotal = states.reduce((a, s) => a + (s.count || 0), 0);
+  const pct = scrTotal ? Math.round(scrDone * 100 / scrTotal) : 0;
+  const parts = [`🧬 clone เสร็จแล้ว <b>${finished}</b>/<b>${states.length}</b> เครื่อง`];
+  if (active) parts.push(`⏳ กำลังทำ <b>${active}</b> เครื่อง`);
+  if (failed) parts.push(`<span style="color:var(--danger)">❌ ล้มเหลว ${failed}</span>`);
+  parts.push(`จอที่ restore แล้ว <b>${scrDone}</b>/<b>${scrTotal}</b> จอ`);
+  mcBulk(parts.join(' · '), pct, active ? 'var(--accent)' : 'var(--success)');
+}
+
+let _mcBulkBusy = false;   // true ระหว่างงาน ลบ/เปิด ทุกเครื่อง
+
+function mcRenderStatus(i, res) {
+  const el = document.getElementById('mc_status_' + i);
+  const bar = document.getElementById('mc_bar_' + i);
+  const fill = document.getElementById('mc_fill_' + i);
+  if (!el) return;
+  if (res.error) {
+    el.innerHTML = `<span style="color:var(--danger); font-size:12px">❌ ${escHtml(res.error)}</span>`;
+    if (bar) bar.style.display = 'none';
+    _mcJobs[i] = null;
+    return;
+  }
+  const st = res.state || {};
+  const prev = _mcJobs[i];
+  _mcJobs[i] = st;
+  const active = MC_ACTIVE.indexOf(st.status) !== -1;
+  let html = '';
+  let pct = -1;
+
+  if (st.status === 'idle') {
+    html = '<span style="color:var(--text-dim)">ยังไม่มีงาน — ตั้งค่าด้านบนแล้วกด 🚀 เริ่ม</span>';
+  } else if (st.status === 'downloading') {
+    const mb = (st.downloaded || 0) / 1048576;
+    if (st.total) {
+      pct = Math.min(100, Math.round((st.downloaded || 0) * 100 / st.total));
+      html = `<span style="color:var(--accent)">⬇️ ${escHtml(st.message || 'กำลังดาวน์โหลด...')} — ${mb.toLocaleString(undefined, {maximumFractionDigits: 0})}/${(st.total / 1048576).toLocaleString(undefined, {maximumFractionDigits: 0})} MB (${pct}%)</span>`;
+    } else {
+      html = `<span style="color:var(--accent)">⬇️ ${escHtml(st.message || 'กำลังดาวน์โหลด...')} — ${mb.toLocaleString(undefined, {maximumFractionDigits: 0})} MB</span>`;
+    }
+  } else if (st.status === 'restoring') {
+    pct = st.count ? Math.round((st.done || 0) * 100 / st.count) : 0;
+    html = `<span style="color:var(--accent)">⚙️ ${escHtml(st.message || 'กำลัง restore...')} — เสร็จแล้ว ${st.done || 0}/${st.count || 0} จอ</span>`;
+  } else if (st.status === 'launching') {
+    pct = 100;
+    html = `<span style="color:var(--accent)">▶️ ${escHtml(st.message || 'กำลังเปิดจอ...')}</span>`;
+  } else if (st.status === 'done') {
+    const idxs = (st.new_indexes || []).join(', ');
+    html = `<span style="color:var(--success)">✅ ${escHtml(st.message || 'เสร็จแล้ว')}${idxs ? ' · จอใหม่: #' + escHtml(idxs) : ''}</span>`;
+  } else if (st.status === 'cancelled') {
+    html = `<span style="color:var(--warning)">⚠️ ${escHtml(st.message || 'ยกเลิกแล้ว')}</span>`;
+  } else if (st.status === 'failed') {
+    html = `<span style="color:var(--danger)">❌ ${escHtml(st.message || 'ล้มเหลว')}</span>`;
+  } else {
+    html = `<span style="color:var(--text-dim)">${escHtml(st.status || '?')}</span>`;
+  }
+  if (st.errors && st.errors.length) {
+    html += `<div style="color:var(--danger); font-size:11px; margin-top:4px">${st.errors.map(e => escHtml(e)).join('<br>')}</div>`;
+  }
+  el.innerHTML = `<div style="font-size:12px">${html}</div>`;
+  if (bar && fill) {
+    bar.style.display = pct >= 0 ? '' : 'none';
+    if (pct >= 0) fill.style.width = pct + '%';
+  }
+
+  // งานเพิ่งจบในรอบนี้ -> รีเฟรชจำนวนจอของเครื่องนั้น
+  if (prev && MC_ACTIVE.indexOf(prev.status) !== -1 && !active) mcLoadInsts(i);
+  mcUpdateAggregate();
+}
+
+// ตรวจว่าเลือกไฟล์/ลิงก์ครบหรือยัง คืนข้อความเตือนถ้ายังไม่ครบ
+function mcMissing(s) {
+  if (s.source === 'server') return s.name ? '' : 'ยังไม่ได้เลือกไฟล์ backup บน server';
+  return s.url ? '' : 'ยังไม่ได้วางลิงก์ดาวน์โหลด';
+}
+
+async function mcStart(i, quiet) {
+  const a = _mcAgents[i];
+  if (!a) return;
+  const s = mcSettings();
+  const miss = mcMissing(s);
+  if (miss) { toast(miss, 'error'); return; }
+  mcSaveSettings();
+  const el = document.getElementById('mc_status_' + i);
+  if (el) el.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังสั่งงาน...</span>';
+  const res = await mcReq(a.agent_id, 'request_mumu_clone',
+    { sub: 'start', source: s.source, name: s.name, url: s.url, count: s.count,
+      launch: s.launch, close_first: s.close_first }, 30000);
+  if (res.error) {
+    if (el) el.innerHTML = `<span style="color:var(--danger); font-size:12px">❌ ${escHtml(res.error)}</span>`;
+    if (!quiet) toast(`${a.name || a.hostname || a.agent_id}: ${res.error}`, 'error');
+    return;
+  }
+  if (!quiet) toast(`สั่งงาน ${a.name || a.hostname || a.agent_id} แล้ว (${s.count} จอ)`, 'success');
+}
+
+async function mcStartAll() {
+  const s = mcSettings();
+  const miss = mcMissing(s);
+  if (miss) { toast(miss, 'error'); return; }
+  const idxs = mcIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  const src = s.source === 'server' ? `ไฟล์บน server: ${s.name}` : 'ลิงก์ภายนอก';
+  if (!confirm(`🚀 เริ่ม clone ${s.count} จอ/เครื่อง ที่ ${idxs.length} เครื่อง ?\n${src}\nแต่ละเครื่องจะโหลดไฟล์เองแล้ว restore อัตโนมัติ`)) return;
+  _mcBulkBusy = true;
+  for (let n = 0; n < idxs.length; n++) {
+    mcBulk(`🚀 กำลังสั่งงาน... <b>${n}</b>/<b>${idxs.length}</b> เครื่อง`,
+           Math.round(n * 100 / idxs.length));
+    await mcStart(idxs[n], true);
+  }
+  _mcBulkBusy = false;
+  mcBulk(`🚀 สั่งงานครบ <b>${idxs.length}</b> เครื่องแล้ว — กำลังรอผล...`, 100);
+  toast(`สั่งงานแล้ว ${idxs.length} เครื่อง — ดูความคืบหน้ารวมได้ที่แถบด้านบน`, 'success');
+}
+
+async function mcCancel(i) {
+  const a = _mcAgents[i];
+  if (!a) return;
+  const res = await mcReq(a.agent_id, 'request_mumu_clone', { sub: 'cancel' }, 20000);
+  if (res.error) { toast(res.error, 'error'); return; }
+  toast('สั่งยกเลิกแล้ว (จอที่ restore ไปแล้วจะยังอยู่)', 'info');
+}
+
+async function mcOpenAll(i, quiet) {
+  const a = _mcAgents[i];
+  if (!a) return;
+  const box = document.getElementById('mc_insts_' + i);
+  if (box) box.innerHTML = '<span style="color:var(--accent)">⏳ กำลังสั่งเปิดทุกจอ...</span>';
+  const res = await mcReq(a.agent_id, 'request_mumu', { sub: 'open_all' }, 240000);
+  if (res.error) {
+    const b = document.getElementById('mc_insts_' + i);
+    if (b) b.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`;
+    if (!quiet) toast(res.error, 'error');
+    return res;
+  }
+  if (!quiet) toast(`สั่งเปิดทุกจอแล้ว (${res.count || 0} จอ)`, 'success');
+  setTimeout(() => mcLoadInsts(i), 4000);
+  return res;
+}
+
+// ── 💀 บังคับปิด MuMu ทุก process (ใช้ตอนค้างจนกดปิดเองไม่ได้) ──
+async function mcKill(i, quiet) {
+  const a = _mcAgents[i];
+  if (!a) return;
+  if (!quiet && !confirm(`💀 บังคับปิด MuMu ทั้งหมดของ ${a.name || a.agent_id} ?\nจอที่เปิดอยู่จะถูกปิดทันที`)) return;
+  const b = document.getElementById('mc_insts_' + i);
+  if (b) b.innerHTML = '<span style="color:var(--accent)">⏳ กำลังปิด MuMu...</span>';
+  const res = await mcReq(a.agent_id, 'request_mumu', { sub: 'close' }, 90000);
+  if (res.error) {
+    if (b) b.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`;
+    if (!quiet) toast(res.error, 'error');
+    return res;
+  }
+  if (b) b.innerHTML = `<span style="color:var(--success)">✅ ปิด MuMu แล้ว ${res.count || 0} process</span>`;
+  if (!quiet) toast(`ปิด MuMu แล้ว ${res.count || 0} process`, 'success');
+  setTimeout(() => mcLoadInsts(i), 2500);
+  return res;
+}
+
+async function mcKillEvery() {
+  const idxs = mcIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  if (!confirm(`💀 บังคับปิด MuMu ทั้งหมดของ ${idxs.length} เครื่อง ?`)) return;
+  _mcBulkBusy = true;
+  let killed = 0;
+  for (let n = 0; n < idxs.length; n++) {
+    mcBulk(`💀 กำลังปิด MuMu... เครื่องที่ <b>${n + 1}</b>/<b>${idxs.length}</b> · ปิดไปแล้ว <b>${killed}</b> process`,
+           Math.round(n * 100 / idxs.length), 'var(--danger)');
+    const res = await mcKill(idxs[n], true);
+    killed += (res && res.count) || 0;
+  }
+  _mcBulkBusy = false;
+  mcBulk(`✅ ปิด MuMu ครบ <b>${idxs.length}</b> เครื่อง · รวม <b>${killed}</b> process`, 100, 'var(--danger)');
+  toast(`ปิด MuMu แล้ว รวม ${killed} process`, 'success');
+}
+
+// ── 🧹 ไฟล์ backup ที่โหลดเก็บไว้ในเครื่องลูก (บอกที่อยู่ + ลบคืนเนื้อที่) ──
+function mcFmtGB(n) { return (n / 1073741824).toFixed(1) + ' GB'; }
+
+async function mcCacheInfo(i) {
+  const a = _mcAgents[i];
+  const el = document.getElementById('mc_cache_' + i);
+  if (!a || !el) return;
+  const res = await mcReq(a.agent_id, 'request_mumu_clone', { sub: 'cache_list' }, 30000);
+  if (res.error) { el.innerHTML = `<span style="color:var(--danger)">${escHtml(res.error)}</span>`; return; }
+  const files = res.files || [];
+  const low = res.mumu_free && res.mumu_free < 10737418240;   // เหลือน้อยกว่า 10 GB = เสี่ยง MuMu ค้าง
+  el.innerHTML =
+    `💾 ไฟล์ที่โหลดไว้: <b>${files.length}</b> ไฟล์ (${mcFmtGB(res.total || 0)})` +
+    (files.length ? ` — ${files.map(f => escHtml(f.name) + (f.partial ? ' <i>(ยังไม่ครบ)</i>' : '')).join(', ')}` : '') +
+    `<br>📁 <code>${escHtml(res.folder || '')}</code>` +
+    ` · ว่างในไดรฟ์ MuMu: <b style="color:${low ? 'var(--danger)' : 'var(--success)'}">${mcFmtGB(res.mumu_free || 0)}</b>` +
+    (low ? ' ⚠️ เนื้อที่เหลือน้อย เสี่ยง MuMu ค้างตอนสร้างจอ' : '') +
+    (files.length ? ` <a href="#" onclick="mcCacheClear(${i});return false" style="color:var(--danger)">[ลบไฟล์]</a>` : '');
+}
+
+async function mcCacheClear(i, quiet) {
+  const a = _mcAgents[i];
+  if (!a) return;
+  if (!quiet && !confirm(`🧹 ลบไฟล์ backup ที่โหลดเก็บไว้ในเครื่อง ${a.name || a.agent_id} ?\n(จอที่ restore ไปแล้วไม่หาย ลบแค่ไฟล์ต้นฉบับที่โหลดมา)`)) return;
+  const res = await mcReq(a.agent_id, 'request_mumu_clone', { sub: 'cache_clear' }, 60000);
+  if (res.error) { if (!quiet) toast(res.error, 'error'); return res; }
+  if (!quiet) toast(`ลบ ${(res.deleted || []).length} ไฟล์ คืนเนื้อที่ ${mcFmtGB(res.freed || 0)}`, 'success');
+  mcCacheInfo(i);
+  return res;
+}
+
+async function mcCacheClearEvery() {
+  const idxs = mcIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  if (!confirm(`🧹 ลบไฟล์ backup ที่โหลดไว้ของ ${idxs.length} เครื่อง ?\n(จอที่ restore แล้วไม่หาย — ลบแค่ไฟล์ต้นฉบับเพื่อคืนเนื้อที่)`)) return;
+  _mcBulkBusy = true;
+  let freed = 0, n_files = 0;
+  for (let n = 0; n < idxs.length; n++) {
+    mcBulk(`🧹 กำลังลบไฟล์ที่โหลดไว้... เครื่องที่ <b>${n + 1}</b>/<b>${idxs.length}</b> · คืนแล้ว <b>${mcFmtGB(freed)}</b>`,
+           Math.round(n * 100 / idxs.length));
+    const res = await mcCacheClear(idxs[n], true);
+    if (res && !res.error) { freed += res.freed || 0; n_files += (res.deleted || []).length; }
+  }
+  _mcBulkBusy = false;
+  mcBulk(`✅ ลบไฟล์ที่โหลดไว้ <b>${n_files}</b> ไฟล์ · คืนเนื้อที่รวม <b>${mcFmtGB(freed)}</b>`, 100);
+  toast(`คืนเนื้อที่รวม ${mcFmtGB(freed)}`, 'success');
+}
+
+async function mcOpenAllEvery() {
+  const idxs = mcIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  if (!confirm(`▶️ เปิด MuMu ทุกจอของ ${idxs.length} เครื่อง ?`)) return;
+  _mcBulkBusy = true;
+  let opened = 0, fail = 0;
+  for (let n = 0; n < idxs.length; n++) {
+    const nm = escHtml(_mcAgents[idxs[n]] ? (_mcAgents[idxs[n]].name || _mcAgents[idxs[n]].agent_id) : '');
+    mcBulk(`▶️ กำลังเปิดจอ... เครื่องที่ <b>${n + 1}</b>/<b>${idxs.length}</b> (${nm}) · เปิดไปแล้ว <b>${opened}</b> จอ`,
+           Math.round(n * 100 / idxs.length), 'var(--success)');
+    const res = await mcOpenAll(idxs[n], true);
+    if (res && res.error) fail++; else opened += (res && res.count) || 0;
+  }
+  _mcBulkBusy = false;
+  mcBulk(`✅ เปิดจอครบ <b>${idxs.length}</b> เครื่อง · รวม <b>${opened}</b> จอ` +
+         (fail ? ` · <span style="color:var(--danger)">ล้มเหลว ${fail} เครื่อง</span>` : ''), 100, 'var(--success)');
+  toast(`สั่งเปิดทุกจอแล้ว รวม ${opened} จอ`, 'success');
+}
+
+async function mcDeleteAll(i, skipConfirm) {
+  const a = _mcAgents[i];
+  if (!a) return;
+  const name = a.name || a.hostname || a.agent_id;
+  if (!skipConfirm && !confirm(`🗑️ ลบ MuMu ทุกจอที่เครื่อง "${name}" ?\n(ปิด MuMu ทั้งหมดก่อน แล้วลบทุก instance — ข้อมูลในจอหายถาวร)`)) return;
+  const box = document.getElementById('mc_insts_' + i);
+  if (box) box.innerHTML = '<span style="color:var(--accent)">⏳ กำลังลบทุกจอ... (อาจใช้เวลาสักพัก)</span>';
+  const res = await mcReq(a.agent_id, 'request_mumu', { sub: 'delete_all' }, 600000);
+  const b = document.getElementById('mc_insts_' + i);
+  if (res.error) {
+    if (b) b.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`;
+    if (!skipConfirm) toast(`${name}: ${res.error}`, 'error');
+    return res;
+  }
+  if (b) {
+    b.innerHTML = res.warning
+      ? `<span style="color:var(--warning)">⚠️ ลบแล้ว ${res.deleted || 0} จอ — ${escHtml(res.warning)}</span>`
+      : `<span style="color:var(--success)">✅ ลบแล้ว ${res.deleted || 0} จอ</span>`;
+  }
+  if (!skipConfirm) toast(`${name}: ลบแล้ว ${res.deleted || 0} จอ`, 'success');
+  setTimeout(() => mcLoadInsts(i), 2500);
+  return res;
+}
+
+async function mcDeleteAllEvery() {
+  const idxs = mcIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  if (!confirm(`🗑️ ลบ MuMu ทุกจอของ ${idxs.length} เครื่อง ?\nข้อมูลทุกจอจะหายถาวร!`)) return;
+  if (!confirm('ยืนยันอีกครั้ง: ลบทุกจอ ทุกเครื่องที่ติ๊ก จริงๆ ?')) return;
+  _mcBulkBusy = true;
+  let del = 0, fail = 0;
+  for (let n = 0; n < idxs.length; n++) {
+    const nm = escHtml(_mcAgents[idxs[n]] ? (_mcAgents[idxs[n]].name || _mcAgents[idxs[n]].agent_id) : '');
+    mcBulk(`🗑️ กำลังลบ... เครื่องที่ <b>${n + 1}</b>/<b>${idxs.length}</b> (${nm}) · ลบไปแล้ว <b>${del}</b> จอ`,
+           Math.round(n * 100 / idxs.length), 'var(--danger)');
+    const res = await mcDeleteAll(idxs[n], true);
+    if (res && res.error) fail++; else del += (res && res.deleted) || 0;
+  }
+  _mcBulkBusy = false;
+  mcBulk(`✅ ลบครบ <b>${idxs.length}</b> เครื่อง · รวม <b>${del}</b> จอ` +
+         (fail ? ` · <span style="color:var(--danger)">ล้มเหลว ${fail} เครื่อง</span>` : ''), 100, 'var(--danger)');
+  toast(`ลบทุกจอเสร็จแล้ว รวม ${del} จอ`, 'success');
+}
+
+// ═══════════════════════════════════════════════════════════
 //  DASHBOARD COOKIE-RUN (ดึงชื่อ id จากโฟลเดอร์ id-found)
 // ═══════════════════════════════════════════════════════════
 function listIdsOnAgent(agentId) {
@@ -3327,22 +4443,30 @@ function readAsBase64(file) {
 
 // อัปโหลด 1 ไฟล์ไปเครื่องเดียว โดยให้ agent วางในโฟลเดอร์ <game>/<subpath> เอง (base_match+subpath)
 // subpath = input-id หรือ backup ตามปุ่มที่เปิดหน้ามา
+// ไม่มี timeout — ไฟล์ใหญ่แค่ไหนก็รอจนจบ เลิกเองเฉพาะตอนเครื่องปลายทางหลุดออฟไลน์จริงๆ
 function uploadToInput(agentId, filename, size, base64, game, subpath) {
   return new Promise((resolve, reject) => {
     const uploadId = 'bc_' + Math.random().toString(36).substr(2, 9);
     const CHUNK = 512 * 1024;
     const total = Math.ceil(base64.length / CHUNK) || 1;
     let done = false;
-    const cleanup = () => socket.off('upload_ready', onReady);
-    const timer = setTimeout(() => { if (!done) { cleanup(); reject(new Error('timeout')); } }, 30000);
+    const cleanup = () => { socket.off('upload_ready', onReady); clearInterval(watch); };
+    // เฝ้าดูว่าเครื่องปลายทางยังออนไลน์ไหม — ถ้าหลุดไปเลยค่อยเลิกรอ (ไม่ใช่การจับเวลา)
+    const watch = setInterval(() => {
+      if (done) return;
+      if (!(agentsData || []).some(a => a.agent_id === agentId)) {
+        cleanup();
+        reject(new Error('เครื่องปลายทางหลุดออฟไลน์'));
+      }
+    }, 10000);
 
-    function onReady(info) {
+    async function onReady(info) {
       if (info.upload_id !== uploadId) return;
-      cleanup();
+      socket.off('upload_ready', onReady);
       const rid = info.request_id;
       const onResp = (resp) => {
         socket.off('response_' + rid, onResp);
-        done = true; clearTimeout(timer);
+        done = true; clearInterval(watch);
         if (resp.error) reject(new Error(resp.error)); else resolve(resp);
       };
       socket.on('response_' + rid, onResp);
@@ -3352,6 +4476,8 @@ function uploadToInput(agentId, filename, size, base64, game, subpath) {
           data: base64.slice(i * CHUNK, (i + 1) * CHUNK),
           is_last: (i === total - 1),
         });
+        // ยิงรวดเดียวทุกก้อนจะอัดคิว socket จนตัน — เว้นจังหวะให้มันส่งออกไปก่อน
+        if (i % 4 === 3) await _sleep(0);
       }
     }
     socket.on('upload_ready', onReady);
@@ -3361,6 +4487,17 @@ function uploadToInput(agentId, filename, size, base64, game, subpath) {
       base_match: game, subpath: subpath || bcCfg().subpath,
     });
   });
+}
+
+// อัปโหลดพร้อมลองใหม่ 1 ครั้ง (ไฟล์ใหญ่เจอสะดุดครั้งเดียวไม่ควรถือว่าเจ๊ง)
+async function uploadWithRetry(agentId, file, b64, game, subpath, onRetry) {
+  try {
+    return await uploadToInput(agentId, file.name, file.size, b64, game, subpath);
+  } catch (e) {
+    if (onRetry) onRetry(e);
+    await _sleep(2000);
+    return await uploadToInput(agentId, file.name, file.size, b64, game, subpath);
+  }
 }
 
 async function broadcastFiles(fileList) {
@@ -3382,9 +4519,12 @@ async function broadcastFiles(fileList) {
     catch (e) { bcLog('❌ อ่านไฟล์ ' + escHtml(file.name) + ' ไม่ได้', true); continue; }
 
     let ok = 0; const fails = [];
-    await runLimited(agents, 4, async (a) => {
+    const mb = file.size / 1048576;
+    const conc = mb > 20 ? 1 : (mb > 5 ? 2 : 4);      // ไฟล์ใหญ่ส่งทีละเครื่อง กัน socket ตัน
+    if (mb > 5) bcLog(`⚙️ ${escHtml(file.name)} ${mb.toFixed(1)} MB → ส่งพร้อมกันทีละ ${conc} เครื่อง`, false);
+    await runLimited(agents, conc, async (a) => {
       const mname = a.name || a.hostname || a.agent_id;
-      try { await uploadToInput(a.agent_id, file.name, file.size, base64, game); ok++; }
+      try { await uploadWithRetry(a.agent_id, file, base64, game); ok++; }
       catch (e) { fails.push(mname + ': ' + (e.message || e)); }
     });
     const failHtml = fails.length ? ' <span style="color:var(--danger)">❌ ' + fails.length + '</span>' : '';
@@ -3428,15 +4568,23 @@ async function distributeFiles(files, agents, game) {
 
   let assigned = 0;
   const pairs = sortedAgents.slice(0, pairN).map((a, i) => ({ a, file: sortedFiles[i] }));
-  await runLimited(pairs, 4, async ({ a, file }) => {
+  // ไฟล์ใหญ่ห้ามยิงพร้อมกันหลายตัว — ทุกเครื่องใช้ socket เส้นเดียวกัน แย่งกันจนช้าแล้ว timeout ยกแผง
+  const avgMB = pairs.reduce((s, p) => s + p.file.size, 0) / Math.max(1, pairs.length) / 1048576;
+  const conc = avgMB > 20 ? 1 : (avgMB > 5 ? 2 : 4);
+  bcLog(`⚙️ ไฟล์เฉลี่ย ${avgMB.toFixed(1)} MB → ส่งพร้อมกันทีละ ${conc} เครื่อง`, false);
+  await runLimited(pairs, conc, async ({ a, file }) => {
     const mname = a.name || a.hostname || a.agent_id;
     try {
       const b64 = await readAsBase64(file);
-      await uploadToInput(a.agent_id, file.name, file.size, b64, game);
+      const t0 = Date.now();
+      bcLog(`⏫ <b>${escHtml(mname)}</b> ← ${escHtml(file.name)} (${(file.size / 1048576).toFixed(1)} MB) กำลังส่ง...`, false);
+      await uploadWithRetry(a.agent_id, file, b64, game, null,
+        () => bcLog(`🔁 <b>${escHtml(mname)}</b> ← ${escHtml(file.name)} สะดุด กำลังลองใหม่...`, false));
       assigned++;
-      bcLog(`🎯 <b>${escHtml(mname)}</b> ← <b>${escHtml(file.name)}</b> [${escHtml(game)}] ✅`, false);
+      const secs = Math.round((Date.now() - t0) / 1000);
+      bcLog(`🎯 <b>${escHtml(mname)}</b> ← <b>${escHtml(file.name)}</b> [${escHtml(game)}] ✅ <small style="color:var(--text-dim)">${secs} วิ</small>`, false);
     } catch (e) {
-      bcLog(`❌ <b>${escHtml(mname)}</b> ← ${escHtml(file.name)} → ${escHtml(String(e.message || e))}`, true);
+      bcLog(`❌ <b>${escHtml(mname)}</b> ← ${escHtml(file.name)} (${(file.size / 1048576).toFixed(1)} MB) → ${escHtml(String(e.message || e))}`, true);
     }
   });
 
@@ -3448,36 +4596,37 @@ async function distributeFiles(files, agents, game) {
   toast(`ส่งตามลำดับเสร็จ: ${assigned} คู่${leftFiles.length ? ' / เหลือ ' + leftFiles.length + ' ไฟล์' : ''}`, 'success');
 }
 
-// ถาม path จริงของไฟล์ใน <game>/<subpath> (ใช้ list_ids ที่คืน entries = full path)
-function listInputEntries(agentId, game, subpath) {
+// รอผลจากเครื่องลูกแบบ "ไม่จับเวลา" — เลิกรอเฉพาะตอนเครื่องนั้นหลุดออฟไลน์จริงๆ
+// (ลบไฟล์เป็นหมื่นรายการ/อ่านโฟลเดอร์ใหญ่ ใช้เวลานานกว่า timeout เดิมมาก จนขึ้น timeout ทั้งที่ยังทำงานอยู่)
+function agentCall(agentId, event, payload) {
   return new Promise((resolve, reject) => {
     let settled = false;
+    const finish = (fn, v) => { if (!settled) { settled = true; clearInterval(watch); fn(v); } };
+    const watch = setInterval(() => {
+      if (!settled && !(agentsData || []).some(a => a.agent_id === agentId)) {
+        finish(reject, new Error('เครื่องปลายทางหลุดออฟไลน์'));
+      }
+    }, 10000);
     socket.once('request_sent', (data) => {
       const rid = data.request_id;
       socket.once('response_' + rid, (resp) => {
-        settled = true;
-        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
+        if (resp && resp.error) finish(reject, new Error(resp.error));
+        else finish(resolve, resp || {});
       });
     });
-    socket.emit('request_list_ids', { agent_id: agentId, subpath: subpath || bcCfg().subpath, base_match: game });
-    setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 20000);
+    socket.emit(event, Object.assign({ agent_id: agentId }, payload || {}));
   });
+}
+
+// ถาม path จริงของไฟล์ใน <game>/<subpath> (ใช้ list_ids ที่คืน entries = full path)
+function listInputEntries(agentId, game, subpath) {
+  return agentCall(agentId, 'request_list_ids',
+                   { subpath: subpath || bcCfg().subpath, base_match: game });
 }
 
 // ลบหลายไฟล์ด้วยกลไก "ลบปกติ" เดียวกับ file browser (request_delete_many)
 function deleteManyOnAgent(agentId, paths) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    socket.once('request_sent', (data) => {
-      const rid = data.request_id;
-      socket.once('response_' + rid, (resp) => {
-        settled = true;
-        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
-      });
-    });
-    socket.emit('request_delete_many', { agent_id: agentId, paths: paths });
-    setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 30000);
-  });
+  return agentCall(agentId, 'request_delete_many', { paths: paths });
 }
 
 async function clearInputAll() {
@@ -3492,6 +4641,7 @@ async function clearInputAll() {
   for (const a of agents) {
     const mname = a.name || a.hostname || a.agent_id;
     try {
+      bcLog(`🔎 <b>${escHtml(mname)}</b> → กำลังอ่านรายการไฟล์...`, false);
       const info = await listInputEntries(a.agent_id, game, cfg.subpath);
       if (info.exists === false) {
         bcLog(`🗑️ <b>${escHtml(mname)}</b> → <span style="color:var(--warning)">ไม่พบโฟลเดอร์ ${escHtml(cfg.label)}</span>`, false);
@@ -3503,6 +4653,7 @@ async function clearInputAll() {
         bcLog(`🗑️ <b>${escHtml(mname)}</b> → ว่างอยู่แล้ว (0 รายการ)`, false);
         continue;
       }
+      bcLog(`🗑️ <b>${escHtml(mname)}</b> → กำลังลบ ${paths.length.toLocaleString()} รายการ...`, false);
       const res = await deleteManyOnAgent(a.agent_id, paths);
       okMachines++; totalDeleted += (res.deleted || 0);
       bcLog(`🗑️ <b>${escHtml(mname)}</b> → ลบ ${res.deleted || 0} รายการ` +
@@ -3512,6 +4663,238 @@ async function clearInputAll() {
     }
   }
   toast(`เคลียร์ ${cfg.label} เสร็จ: ${okMachines}/${agents.length} เครื่อง (ลบรวม ${totalDeleted})`, 'success');
+}
+
+// ═══════════════════════════════════════════════════════════
+//  BOT UPDATE — ติ๊กเลือกเฉพาะเครื่องที่ต้องการอัปเดต
+//  เครื่องที่ไม่ติ๊ก = ไม่โดนแตะเลย (กันเครื่องที่ตั้งค่า/ใช้ฟังก์ชันคนละแบบโดนทับ)
+// ═══════════════════════════════════════════════════════════
+let _buAgents = [];
+
+// เนื้อไฟล์ force-update.bat ที่จะส่งให้เครื่องที่ยังไม่มี (ASCII ล้วน กัน cmd อ่านภาษาไทยเพี้ยน)
+const BU_FORCE_BAT = [
+  '@echo off',
+  'title FORCE UPDATE - PES Bot',
+  'cd /d "%~dp0"',
+  'echo [1/3] Closing PES bot only (agent.py is NOT touched) ...',
+  "powershell -NoProfile -Command \"Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*login.py*' -or $_.CommandLine -like '*auto_update.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\" >nul 2>&1",
+  'timeout /t 2 /nobreak >nul',
+  'echo [2/3] Running silent update ...',
+  'py auto_update.py --silent',
+  'echo [3/3] Making sure the bot is running ...',
+  'timeout /t 15 /nobreak >nul',
+  "powershell -NoProfile -Command \"if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*login.py*' }) { exit 0 } else { exit 1 }\"",
+  'if errorlevel 1 start "" login.bat',
+  'echo [4/4] Making sure the remote agent is alive ...',
+  "powershell -NoProfile -Command \"if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*agent.py*' })) { $a = Get-ChildItem -Path C:\\Users\\*\\Downloads\\remote\\remote-file\\agent.py,C:\\remote-file\\agent.py,D:\\remote-file\\agent.py -ErrorAction SilentlyContinue | Select-Object -First 1; if ($a) { Start-Process pythonw -ArgumentList $a.FullName -WorkingDirectory $a.DirectoryName } }\" >nul 2>&1",
+  'exit',
+  ''
+].join('\r\n');
+
+// ส่ง force-update.bat ไปวางในโฟลเดอร์โปรเจกต์ของเครื่องนั้น (subpath '.' = โฟลเดอร์หลัก)
+async function buSendBat(agentId, base) {
+  const b64 = btoa(BU_FORCE_BAT);
+  return uploadToInput(agentId, 'force-update.bat', BU_FORCE_BAT.length, b64, base, '.');
+}
+
+async function buSendBatSelected() {
+  const idxs = buIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'error'); return; }
+  const cfg = buCfg();
+  let ok = 0;
+  for (const i of idxs) {
+    const a = _buAgents[i];
+    const el = document.getElementById('bu_status_' + i);
+    if (el) el.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังส่ง force-update.bat ...</span>';
+    try {
+      await buSendBat(a.agent_id, cfg.base);
+      ok++;
+      if (el) el.innerHTML = '<span style="color:var(--success); font-size:12px">📤 ส่ง force-update.bat แล้ว</span>';
+    } catch (e) {
+      if (el) el.innerHTML = '<span style="color:var(--danger); font-size:12px">❌ ส่งไฟล์ไม่สำเร็จ: ' + escHtml(String(e.message || e)) + '</span>';
+    }
+  }
+  toast('ส่งไฟล์เสร็จ: ' + ok + '/' + idxs.length + ' เครื่อง', ok === idxs.length ? 'success' : 'error');
+}
+
+function buCfg() {
+  const sel  = document.getElementById('buProject');
+  const file = document.getElementById('buFile');
+  const also = document.getElementById('buAlsoAgent');
+  const name = file ? (file.value || '').trim() : '';
+  return {
+    base: sel ? sel.value : 'pes',
+    name: name || 'force-update.bat',
+    alsoAgent: also ? also.checked : false,
+  };
+}
+
+function buSaveCfg() { try { localStorage.setItem('botUpdateCfg', JSON.stringify(buCfg())); } catch (e) {} }
+
+function buIncluded() {
+  const out = [];
+  for (let i = 0; i < _buAgents.length; i++) {
+    const cb = document.getElementById('bu_inc_' + i);
+    if (cb && cb.checked) out.push(i);
+  }
+  return out;
+}
+
+function buTickAll(v) {
+  document.querySelectorAll('.bu_inc').forEach(cb => { cb.checked = !!v; });
+  buCount();
+}
+
+function buCount() {
+  const el = document.getElementById('buCount');
+  if (el) el.textContent = 'ติ๊กไว้ ' + buIncluded().length + ' / ' + _buAgents.length + ' เครื่อง';
+}
+
+function openBotUpdateDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  _buAgents = (agentsData || []).slice();
+  if (!_buAgents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+
+  let cfg = { base: 'pes', name: 'force-update.bat', alsoAgent: false };
+  try { cfg = Object.assign(cfg, JSON.parse(localStorage.getItem('botUpdateCfg') || '{}')); } catch (e) {}
+
+  const inputStyle = 'background:var(--bg-card); border:1px solid var(--border); color:var(--text-primary); border-radius:8px; padding:8px 10px';
+  const projOpts = RUN_PROJECTS.map(p =>
+    '<option value="' + escAttr(p.key) + '"' + (cfg.base === p.key ? ' selected' : '') + '>' + escHtml(p.label) + '</option>').join('');
+
+  // ค่าเริ่มต้น "ไม่ติ๊ก" ทุกเครื่อง — ต้องเลือกเองก่อนถึงจะโดนอัปเดต (กันเผลอทับทั้งฟลีต)
+  const cards = _buAgents.map((a, i) => {
+    const label = escHtml(a.name || a.hostname || a.agent_id);
+    return '<div class="mumu-card" id="bu_card_' + i + '">' +
+      '<div class="mumu-head">' +
+        '<label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:700; font-size:14px">' +
+          '<input type="checkbox" class="bu_inc" id="bu_inc_' + i + '" style="width:auto; margin:0" onchange="buCount()">' +
+          '<span>🖥️ ' + label + '</span>' +
+        '</label>' +
+        '<div class="mumu-actions">' +
+          '<button class="btn btn-primary" onclick="buUpdateOne(' + i + ')">⬆️ อัปเดตเครื่องนี้</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mumu-body" id="bu_status_' + i + '"><span style="color:var(--text-dim); font-size:12px">— ยังไม่ได้สั่งอัปเดต</span></div>' +
+    '</div>';
+  }).join('');
+
+  content.innerHTML =
+    '<div class="toolbar">' +
+      '<h2 style="flex:1; font-size:18px">⬆️ อัปเดตบอท — ติ๊กเลือกเฉพาะเครื่องที่ต้องการ</h2>' +
+      '<button class="btn btn-primary" onclick="openBotUpdateDashboard()">🔄 รีเฟรช</button>' +
+    '</div>' +
+    '<div class="pick-panel" style="margin-bottom:14px">' +
+      '<div class="pick-head">' +
+        '<span class="pick-title">⚙️ เลือกโปรเจกต์ + ไฟล์อัปเดตที่จะสั่งรันบนเครื่องลูก</span>' +
+      '</div>' +
+      '<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">' +
+        '<select id="buProject" class="btn project-select" style="' + inputStyle + '" onchange="buSaveCfg()">' + projOpts + '</select>' +
+        '<input type="text" id="buFile" class="dash-search" style="flex:1; min-width:220px" placeholder="force-update.bat" value="' + escAttr(cfg.name) + '" oninput="buSaveCfg()">' +
+        '<label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; white-space:nowrap">' +
+          '<input type="checkbox" id="buAlsoAgent"' + (cfg.alsoAgent ? ' checked' : '') + ' style="width:auto; margin:0" onchange="buSaveCfg()"> อัปเดต agent ด้วย' +
+        '</label>' +
+      '</div>' +
+      '<div style="font-size:12px; color:var(--text-dim); margin-top:8px; line-height:1.6">' +
+        '• <b>เครื่องที่ไม่ติ๊ก จะไม่ถูกแตะเลย</b> — เครื่องที่ตั้งค่า/ใช้ฟังก์ชันคนละแบบจะไม่โดนทับ<br>' +
+        '• <b>force-update.bat</b> = ปิดบอทที่ค้าง → ดึงโค้ดใหม่แบบเงียบ → เปิดบอทใหม่ (มีในบอท 3.3.2 ขึ้นไป)<br>' +
+        '• เครื่องที่ยังเป็นเวอร์ชันเก่า เปลี่ยนชื่อไฟล์เป็น <b>login.bat</b> ได้ (ต้องไม่มีบอทรันอยู่ ไม่งั้นจะเปิดซ้อน)' +
+      '</div>' +
+      '<div class="pick-head" style="margin:12px 0 0">' +
+        '<button class="btn btn-primary" onclick="buUpdateSelected()">⬆️ อัปเดตเครื่องที่ติ๊ก</button>' +
+        '<button class="btn" onclick="buSendBatSelected()" title="ส่งไฟล์ force-update.bat ไปวางในโฟลเดอร์โปรเจกต์ของเครื่องที่ติ๊ก">📤 ส่งไฟล์ให้เครื่องที่ติ๊ก</button>' +
+        '<span id="buCount" style="font-size:12px; color:var(--text-dim); margin-left:6px">ติ๊กไว้ 0 / ' + _buAgents.length + ' เครื่อง</span>' +
+        '<span style="flex:1"></span>' +
+        '<button class="btn" onclick="buTickAll(true)">ติ๊กทุกเครื่อง</button>' +
+        '<button class="btn" onclick="buTickAll(false)">เอาออกทั้งหมด</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="mumu-grid">' + cards + '</div>';
+
+  buCount();
+}
+
+async function buUpdateOne(i, quiet) {
+  const a = _buAgents[i];
+  if (!a) return false;
+  const cfg = buCfg();
+  const el = document.getElementById('bu_status_' + i);
+  const setSt = (html) => { if (el) el.innerHTML = html; };
+  const mname = a.name || a.hostname || a.agent_id;
+
+  const runOnce = () => mcReq(a.agent_id, 'request_run_file',
+    { sub: 'start', base_match: cfg.base, name: cfg.name, hidden: false }, 60000);
+
+  // ── ส่ง force-update.bat ตัวล่าสุดไปทับ "ทุกครั้ง" ก่อนรัน ─────────────────
+  //    เครื่องที่เคยได้ไฟล์เวอร์ชันเก่า (v3.3.2) ยังมีบรรทัด taskkill /im pythonw.exe
+  //    ซึ่งฆ่า agent.py ทิ้งไปด้วย -> เครื่องหลุดจาก dashboard ทั้งฟลีต
+  //    ถ้าไม่ทับไว้ก่อน มันจะรันไฟล์เก่าที่ค้างอยู่ในเครื่องเสมอ
+  if (cfg.name === 'force-update.bat') {
+    setSt('<span style="color:var(--accent); font-size:12px">📤 ส่ง force-update.bat ตัวล่าสุดไปทับก่อน...</span>');
+    try {
+      await buSendBat(a.agent_id, cfg.base);
+    } catch (e) {
+      setSt('<span style="color:var(--danger); font-size:12px">❌ ส่งไฟล์ไม่สำเร็จ: ' + escHtml(String(e.message || e)) + '</span>');
+      return false;
+    }
+  }
+
+  setSt('<span style="color:var(--accent); font-size:12px">⏳ กำลังสั่งอัปเดต...</span>');
+  let res = await runOnce();
+
+  // เผื่อกรณีอื่นที่ไฟล์หาย (เช่นเปลี่ยนชื่อไฟล์เอง) -> ส่งให้แล้วรันซ้ำ
+  if (res.error && /ไม่พบไฟล์|not found/i.test(res.error) && cfg.name === 'force-update.bat') {
+    try {
+      await buSendBat(a.agent_id, cfg.base);
+      res = await runOnce();
+    } catch (e) {
+      setSt('<span style="color:var(--danger); font-size:12px">❌ ส่งไฟล์ไม่สำเร็จ: ' + escHtml(String(e.message || e)) + '</span>');
+      return false;
+    }
+  }
+
+  if (res.error) {
+    setSt('<span style="color:' + (res.already_running ? 'var(--warning)' : 'var(--danger)') + '; font-size:12px">' +
+          (res.already_running ? '⚠️ ' : '❌ ') + escHtml(res.error) + '</span>');
+    if (!quiet) toast(mname + ': ' + res.error, res.already_running ? 'info' : 'error');
+    return false;
+  }
+
+  const msg = '<span style="color:var(--success); font-size:12px">🟢 สั่ง <b>' + escHtml(res.name || cfg.name) + '</b> แล้ว · PID ' + escHtml(String(res.pid || '')) + '</span>';
+  setSt(msg);
+
+  if (cfg.alsoAgent) {
+    setSt(msg + ' <span style="color:var(--accent); font-size:12px">· ⏳ อัปเดต agent...</span>');
+    try {
+      await updateOneAgent(a.agent_id);
+      setSt(msg + ' <span style="color:var(--success); font-size:12px">· ✅ agent อัปเดตแล้ว</span>');
+    } catch (e) {
+      setSt(msg + ' <span style="color:var(--warning); font-size:12px">· ⚠️ agent: ' + escHtml(String(e.message || e)) + '</span>');
+    }
+  }
+
+  if (!quiet) toast(mname + ': สั่งอัปเดตแล้ว', 'success');
+  return true;
+}
+
+async function buUpdateSelected() {
+  const idxs = buIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง (ติ๊กเครื่องที่จะอัปเดตก่อน)', 'error'); return; }
+  const cfg = buCfg();
+  const names = idxs.map(i => (_buAgents[i].name || _buAgents[i].hostname || _buAgents[i].agent_id)).join('\n  • ');
+  if (!confirm('สั่งอัปเดต ' + idxs.length + ' เครื่องที่ติ๊กไว้ ?\n\nจะรัน "' + cfg.name + '" ในโปรเจกต์ ' + cfg.base +
+               (cfg.alsoAgent ? ' + อัปเดต agent ด้วย' : '') + '\n\n  • ' + names + '\n\nเครื่องที่ไม่ได้ติ๊กจะไม่ถูกแตะ')) return;
+
+  let ok = 0;
+  for (const i of idxs) {
+    if (await buUpdateOne(i, true)) ok++;
+  }
+  toast('สั่งอัปเดตเสร็จ: ' + ok + '/' + idxs.length + ' เครื่อง', ok === idxs.length ? 'success' : 'error');
 }
 
 // ── อัปเดต agent ทางไกล (ดึงโค้ดใหม่ + รีสตาร์ท) ──
