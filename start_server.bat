@@ -58,6 +58,16 @@ echo [4/5] Checking dependencies + firewall...
 pip install flask flask-socketio >nul 2>&1
 netsh advfirewall firewall add rule name="RemoteFileManager" dir=in action=allow protocol=TCP localport=%SERVER_PORT% >nul 2>&1
 
+:: ===== ensure Tailscale Serve + Funnel is up =====
+:: agents connect via https://server.tail8db58a.ts.net (works on Tailscale AND under VPN)
+:: Funnel must stay on; these commands are idempotent (safe to re-run each start)
+set "TSEXE=C:\Program Files\Tailscale\tailscale.exe"
+if exist "%TSEXE%" (
+    echo Ensuring Tailscale Serve/Funnel is up ...
+    "%TSEXE%" serve --bg %SERVER_PORT% >nul 2>&1
+    "%TSEXE%" funnel --bg %SERVER_PORT% >nul 2>&1
+)
+
 :: ===== [5/5] Run server =====
 echo [5/5] Starting server on http://0.0.0.0:%SERVER_PORT%
 echo.

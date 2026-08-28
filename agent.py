@@ -47,11 +47,30 @@ def _load_config():
 _cfg = _load_config()
 
 
+# แทนชื่อ server ด้วย "IP Tailscale ตรงๆ" (ไม่พึ่ง DNS/MagicDNS เลย)
+#   เหตุผล: ตอนเปิด Surfshark/VPN ชื่อ ts.net บางทีถูก resolve เป็น Funnel ingress (ผ่าน VPN → หลุด)
+#   บางทีเป็น IP ภายใน — ไม่สม่ำเสมอ  ใช้ IP ตรงๆ จะวิ่งตรงผ่าน Tailscale เสมอ (นิ่ง)
+#   *** เปิด VPN ต้องตั้ง Bypasser ให้ Tailscale ข้าม VPN ด้วย (add tailscaled.exe) ***
+#   ถ้า Tailscale IP ของ server เปลี่ยน แก้บรรทัดนี้ (ดู `tailscale ip -4` ที่เครื่อง server)
+_TS_HOST_URL = {"server": "http://100.80.76.47:5000",
+                "nuuboy": "http://100.80.76.47:5000"}
+
+
+def _rewrite_ts_host(u):
+    """http://server:5000 / http://nuuboy:5000 -> http://100.80.76.47:5000 (Tailscale IP ตรงๆ)"""
+    import re
+    m = re.match(r"^(https?://)([^/:]+)(?::\d+)?(/.*)?$", u.strip())
+    if m and m.group(2).lower() in _TS_HOST_URL:
+        return _TS_HOST_URL[m.group(2).lower()] + (m.group(3) or "")
+    return u
+
+
 def _parse_server_urls():
     """รวมรายชื่อ server ที่จะเชื่อมต่อ (รองรับหลายเครื่องพร้อมกัน เช่น server + nuuboy)
        ลำดับความสำคัญ:
          env SERVER_URLS (คั่นด้วย , หรือ ;) > env SERVER_URL >
-         config 'server_urls' (list หรือ string) > config 'server_url' > ค่าเริ่มต้น"""
+         config 'server_urls' (list หรือ string) > config 'server_url' > ค่าเริ่มต้น
+       แล้วแปลงชื่อ Tailscale เป็น IP ตรงๆ (กันเปิด VPN แล้วชื่อ DNS ใช้ไม่ได้)"""
     raw = []
     env_multi = os.environ.get("SERVER_URLS", "").strip()
     env_single = os.environ.get("SERVER_URL", "").strip()
@@ -68,10 +87,10 @@ def _parse_server_urls():
             raw = cfg_multi.replace(";", ",").split(",")
         elif cfg_single:
             raw = [str(cfg_single)]
-    # ทำความสะอาด + ตัด url ซ้ำ (คงลำดับเดิม)
+    # ทำความสะอาด + แปลงชื่อ Tailscale -> IP + ตัด url ซ้ำ (คงลำดับเดิม)
     seen, urls = set(), []
     for u in raw:
-        u = u.strip().rstrip("/")
+        u = _rewrite_ts_host(u.strip().rstrip("/"))
         if u and u not in seen:
             seen.add(u)
             urls.append(u)
@@ -1353,6 +1372,96 @@ def _pid_alive(pid):
         return False
 
 
+def _proc_cwd(pid):
+    """คืน current working directory ของโปรเซส (อ่านจาก PEB) หรือ None ถ้าอ่านไม่ได้
+
+    ใช้จับโปรเซสที่ถูกสั่งด้วย path แบบ relative — เช่น `py login.py`,
+    `start "" login.bat`, cmd /c login.bat — ที่ command line ไม่มีพาธโฟลเดอร์
+    ให้ regex ดู แต่ cwd = โฟลเดอร์โปรเจกต์จริง (เคสบอทเปิดจาก Task Scheduler /
+    login.bat รีสตาร์ทตัวเอง)  อ่านไม่ได้เมื่อไหร่ก็คืน None แล้วไปพึ่ง regex เดิมแทน"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ntdll = ctypes.WinDLL("ntdll")
+
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.ReadProcessMemory.restype = wintypes.BOOL
+        k32.ReadProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p,
+                                          ctypes.c_void_p, ctypes.c_size_t,
+                                          ctypes.POINTER(ctypes.c_size_t)]
+        ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+        ntdll.NtQueryInformationProcess.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                    ctypes.c_void_p, ctypes.c_ulong,
+                                                    ctypes.POINTER(ctypes.c_ulong)]
+
+        PROCESS_QUERY_INFORMATION = 0x0400
+        PROCESS_VM_READ = 0x0010
+        h = k32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, int(pid))
+        if not h:
+            return None
+        try:
+            is64 = ctypes.sizeof(ctypes.c_void_p) == 8
+            ptr = ctypes.sizeof(ctypes.c_void_p)
+
+            class PROCESS_BASIC_INFORMATION(ctypes.Structure):
+                _fields_ = [("Reserved1", ctypes.c_void_p),
+                            ("PebBaseAddress", ctypes.c_void_p),
+                            ("Reserved2", ctypes.c_void_p * 2),
+                            ("UniqueProcessId", ctypes.c_void_p),
+                            ("Reserved3", ctypes.c_void_p)]
+
+            pbi = PROCESS_BASIC_INFORMATION()
+            ret = ctypes.c_ulong()
+            if ntdll.NtQueryInformationProcess(h, 0, ctypes.byref(pbi),
+                                               ctypes.sizeof(pbi), ctypes.byref(ret)) != 0:
+                return None
+            if not pbi.PebBaseAddress:
+                return None
+
+            def read(addr, size):
+                buf = ctypes.create_string_buffer(size)
+                n = ctypes.c_size_t()
+                if not k32.ReadProcessMemory(h, ctypes.c_void_p(addr), buf, size,
+                                             ctypes.byref(n)) or n.value != size:
+                    return None
+                return buf.raw
+
+            # PEB.ProcessParameters : 0x20 (x64) / 0x10 (x86)
+            raw = read(pbi.PebBaseAddress + (0x20 if is64 else 0x10), ptr)
+            if not raw:
+                return None
+            params = int.from_bytes(raw, "little")
+            if not params:
+                return None
+            # RTL_USER_PROCESS_PARAMETERS.CurrentDirectory : 0x38 (x64) / 0x24 (x86)
+            #   = UNICODE_STRING { USHORT Length; USHORT MaxLength; PWSTR Buffer; }
+            cd = 0x38 if is64 else 0x24
+            head = read(params + cd, 4)
+            if not head:
+                return None
+            length = int.from_bytes(head[0:2], "little")
+            if not length:
+                return None
+            raw = read(params + cd + (8 if is64 else 4), ptr)
+            if not raw:
+                return None
+            buf_addr = int.from_bytes(raw, "little")
+            if not buf_addr:
+                return None
+            data = read(buf_addr, length)
+            if not data:
+                return None
+            return data.decode("utf-16-le", "ignore").rstrip("\\/")
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return None
+
+
 def _run_state_load():
     """อ่านงานที่ค้างจากไฟล์ — ให้สถานะไม่หายเวลา agent ถูกรีสตาร์ท"""
     try:
@@ -1475,19 +1584,24 @@ def _procs_in_folder(folder):
     ใช้ตอนสั่ง stop โดยที่ agent ไม่ได้เป็นคนเปิดงานนั้นเอง (ไม่มี PID ในมือ) เช่นบอทถูกเปิด
     จาก Task Scheduler / login.bat รีสตาร์ทตัวเอง / force-update.bat
 
-    เงื่อนไขต้องครบ 3 ข้อถึงจะนับ (กันฆ่าผิดตัว):
+    เงื่อนไขต้องครบถึงจะนับ (กันฆ่าผิดตัว):
       1. ชื่อโปรเซสเป็น cmd.exe / python.exe / pythonw.exe / py.exe เท่านั้น
          (bash, explorer, cloudflared ฯลฯ ที่บังเอิญมีพาธนี้ใน command line จะไม่โดน)
-      2. command line มี "พาธโฟลเดอร์โปรเจกต์ + ชื่อไฟล์ .bat/.cmd/.py" ต่อกันจริงๆ
-         ไม่ใช่แค่เอ่ยถึงพาธเฉยๆ
-      3. ไม่ใช่ตัว agent เอง (agent.py อยู่คนละโฟลเดอร์อยู่แล้ว + กัน pid ตัวเองไว้อีกชั้น)
+      2. ผูกกับโฟลเดอร์โปรเจกต์จริง — อย่างใดอย่างหนึ่ง:
+           ก. command line มี "พาธโฟลเดอร์โปรเจกต์ + ชื่อไฟล์ .bat/.cmd/.py" ต่อกัน
+              (เคสสั่งด้วยพาธเต็ม เช่นที่เว็บสั่ง cmd /c C:\...\pes\login.bat)
+           ข. command line อ้างไฟล์ .bat/.cmd/.py แบบ relative (เช่น `py login.py`,
+              cmd /c login.bat) และ cwd ของโปรเซส = โฟลเดอร์โปรเจกต์
+              (เคสบอทเปิดจาก Task Scheduler / login.bat รีสตาร์ทตัวเอง — command line
+              ไม่มีพาธให้ regex ข้อ ก. ดู)
+      3. ไม่ใช่ตัว agent เอง (กันทั้งด้วย pid ตัวเอง และกันไม่ให้แตะ agent.py)
     """
     if not folder:
         return []
     import re
     try:
         ps = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | "
-              "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress")
+              "Select-Object ProcessId,Name,CommandLine,ExecutablePath | ConvertTo-Json -Compress")
         out, _rc = _run_hidden(["powershell", "-NoProfile", "-Command", ps], timeout=30)
         data = json.loads(out) if out.strip() else []
         if isinstance(data, dict):
@@ -1500,6 +1614,8 @@ def _procs_in_folder(folder):
     allow = {"cmd.exe", "python.exe", "pythonw.exe", "py.exe"}
     key = os.path.normcase(os.path.abspath(folder)).rstrip("\/")
     pat = re.compile(re.escape(key) + r"[\\/][^\"'<>|]*?\.(?:bat|cmd|py)")
+    # จับ "ชื่อไฟล์สคริปต์" แบบ relative ในบรรทัดคำสั่ง (ไม่มีพาธนำหน้า)
+    ref = re.compile(r"[\w .+\-()]+\.(?:bat|cmd|py)\b", re.IGNORECASE)
 
     hits = []
     for it in data:
@@ -1507,55 +1623,123 @@ def _procs_in_folder(folder):
             pid = int(it.get("ProcessId") or 0)
             name = str(it.get("Name") or "").lower()
             cmd = str(it.get("CommandLine") or "")
+            exe = str(it.get("ExecutablePath") or "")
         except Exception:
             continue
-        if not pid or pid == me or name not in allow:
+        if not pid or pid == me:
             continue
+        low = cmd.lower()
+        if "agent.py" in low:                      # ห้ามแตะตัว agent เด็ดขาด
+            continue
+        is_cmd = (name == "cmd.exe")
+
+        # ข้อ ก0 — ไฟล์ .exe ของบอทที่วางอยู่ "ในโฟลเดอร์โปรเจกต์โดยตรง" (เผื่อบอทแพ็กเป็น exe)
+        #   จับเฉพาะไฟล์ในโฟลเดอร์ราก ไม่ลงไปโฟลเดอร์ย่อย เช่น pes\adb\adb.exe จะไม่โดน
+        if exe:
+            exe_n = os.path.normcase(os.path.abspath(exe))
+            if os.path.dirname(exe_n) == key and exe_n.endswith(".exe") \
+                    and name not in ("cmd.exe",):
+                hits.append((is_cmd, pid, cmd or exe))
+                continue
+
+        if name not in allow:
+            continue
+        # ข้อ ก — พาธเต็มของโฟลเดอร์ + ชื่อไฟล์สคริปต์อยู่ในบรรทัดคำสั่ง
         if pat.search(os.path.normcase(cmd)):
-            hits.append((pid, cmd))
-    return hits
+            hits.append((is_cmd, pid, cmd))
+            continue
+        # ข้อ ข — รันสคริปต์แบบ relative + ยืนยันด้วย cwd ว่าอยู่โฟลเดอร์นี้จริง
+        if ref.search(cmd):
+            cwd = _proc_cwd(pid)
+            if cwd and os.path.normcase(cwd).rstrip("\/") == key:
+                hits.append((is_cmd, pid, cmd))
+
+    # ฆ่า cmd.exe (ตัว .bat ที่อาจวน/รีสตาร์ท) ก่อน python จะได้ไม่ถูก respawn ระหว่างกวาด
+    hits.sort(key=lambda x: 0 if x[0] else 1)
+    return [(pid, cmd) for _is_cmd, pid, cmd in hits]
+
+
+def _taskkill_tree(pid):
+    """ฆ่าทั้ง process tree ด้วย taskkill /T /F แล้ว "ยืนยันว่าดับจริง"
+       - ถ้ายังไม่ดับ ลอง PowerShell Stop-Process ซ้ำอีกชั้น
+       - คืน (ok, ข้อความบอกเหตุที่ฆ่าไม่ได้)  โดยจับเคส "สิทธิ์ไม่พอ" ให้ชัด
+       เดิมโค้ดเรียก taskkill แล้วไม่เช็ค return code เลย — ฆ่าไม่ได้ก็ยังนับว่าสำเร็จ
+       ทำให้ "กดหยุดแล้วเงียบ" โดยไม่มีสาเหตุบอก"""
+    out = ""
+    try:
+        out, _rc = _run_hidden(["taskkill", "/T", "/F", "/PID", str(pid)], timeout=20)
+    except Exception as e:
+        out = str(e)
+    if not _pid_alive(pid):
+        return True, ""
+    try:
+        _run_hidden(["powershell", "-NoProfile", "-Command",
+                     f"Stop-Process -Id {int(pid)} -Force -ErrorAction SilentlyContinue"],
+                    timeout=20)
+    except Exception:
+        pass
+    if not _pid_alive(pid):
+        return True, ""
+    msg = (out or "").strip().replace("\r", " ").replace("\n", " ")
+    low = msg.lower()
+    if "access is denied" in low or "denied" in low or "ปฏิเสธ" in msg:
+        return False, "สิทธิ์ไม่พอ (ต้องรัน agent เป็น Administrator ที่เครื่องลูก)"
+    return False, (msg[:160] or f"หยุด pid {pid} ไม่สำเร็จ")
 
 
 def _run_stop(data):
-    """หยุดงาน: ปิดทั้ง process tree (cmd + py ที่มันเปิดต่อ) ด้วย taskkill /T /F"""
+    """หยุดงาน: ปิดทั้ง process tree (cmd + py ที่มันเปิดต่อ) ด้วย taskkill /T /F
+       แล้วรายงานผลจริง — เจอกี่ตัว ฆ่าได้กี่ตัว ฆ่าไม่ได้เพราะอะไร"""
     name = str(data.get("name") or "").strip().lower()
     with _run_lock:
         targets = [dict(j) for j in _run_jobs.values()
                    if not name or str(j.get("name", "")).lower() == name]
     stopped, errors = [], []
     killed_pids = set()
+    found = 0
     for job in targets:
         pid = job.get("pid")
         if not pid or not _pid_alive(pid):
             continue
-        try:
-            _run_hidden(["taskkill", "/T", "/F", "/PID", str(pid)], timeout=20)
+        found += 1
+        ok, msg = _taskkill_tree(pid)
+        if ok:
             killed_pids.add(pid)
             stopped.append(job.get("name"))
-        except Exception as e:
-            errors.append(f"{job.get('name')}: {e}")
+        else:
+            errors.append(f"{job.get('name')}: {msg}")
 
     # ── กวาดซ้ำ: ฆ่า process จริงที่ยังรันอยู่ในโฟลเดอร์โปรเจกต์ ──────────────
     #    เคสที่เจอบ่อย: บอทถูกเปิดจากทางอื่น (Task Scheduler / login.bat รีสตาร์ทตัวเอง /
     #    force-update.bat) agent เลยไม่มี PID ในมือ กด "หยุด" แล้วไม่มีอะไรเกิดขึ้น
     base = _resolve_game_base((data.get("base_match") or "").strip().lower())
+    note = None
     if base:
         for pid, cmd in _procs_in_folder(base):
             if pid in killed_pids or not _pid_alive(pid):
                 continue
-            try:
-                _run_hidden(["taskkill", "/T", "/F", "/PID", str(pid)], timeout=20)
+            found += 1
+            label = os.path.basename(cmd.strip().strip('"').split('"')[0]) or f"pid {pid}"
+            ok, msg = _taskkill_tree(pid)
+            if ok:
                 killed_pids.add(pid)
-                stopped.append(os.path.basename(cmd.strip().strip('"').split('"')[0]) or f"pid {pid}")
-            except Exception as e:
-                errors.append(f"pid {pid}: {e}")
+                stopped.append(label)
+            else:
+                errors.append(f"{label}: {msg}")
+    else:
+        note = (f"หาโฟลเดอร์โปรเจกต์ '{data.get('base_match')}' ที่เครื่องนี้ไม่เจอ "
+                "— เช็ก allowed_paths ใน config.json")
 
     with _run_lock:
         for key in [k for k, j in _run_jobs.items() if not j.get("pid") or not _pid_alive(j["pid"])]:
             _run_jobs.pop(key, None)
         _run_state_save()
-    logger.info(f"  run_file: หยุด {len(stopped)} งาน")
-    return {"success": True, "stopped": stopped, "count": len(stopped), "errors": errors}
+    logger.info(f"  run_file: หยุด {len(stopped)}/{found} งาน (errors={len(errors)})")
+    res = {"success": True, "stopped": stopped, "count": len(stopped),
+           "found": found, "errors": errors}
+    if note:
+        res["note"] = note
+    return res
 
 
 def handle_run_file(req_id, data):
@@ -1752,11 +1936,64 @@ def _mumu_run_v(mgr, subcmd, vvalue, *rest, timeout=60):
 _MUMU_SCAN_MAX = 64   # ไล่ถามเลขจอ 0..63 ตอนที่ถามแบบ 'all' ไม่ได้
 
 
-def _mumu_info_raw(mgr, timeout=20):
+def _mumu_info_parallel(mgr, indices, timeout_each=20, workers=10, overall_timeout=60):
+    """ถาม info ทีละจอแบบ "ขนาน" คืน dict {str(idx): data} เฉพาะจอที่มีอยู่จริง
+
+    ใช้ตอน info all ค้าง/ช้า: จอที่ Android ค้างจะ timeout เฉพาะตัวมันเอง ไม่ลากจอ
+    ที่ดีให้พังไปด้วย (info all รอจอที่ค้างจอเดียวก็ค้างทั้งชุด)  จอที่ไม่มีจริงจะตอบ
+    errcode -200 เร็วมาก เลยไม่เปลืองเวลา
+
+    มี "เพดานเวลารวม" (overall_timeout): เครื่องที่ MuMuManager ค้างหนัก (ถามทีละจอ
+    ก็ยังค้าง) จะคืนเท่าที่ได้ภายในเวลานี้ ไม่รอจนครบ — จะได้ไม่ค้างเป็นนาทีๆ"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    flags = _mumu_vflag_order()
+    out_map = {}
+
+    def one(i):
+        for flag in flags:
+            try:
+                o, _rc = _run_hidden([mgr, "info", flag, str(i)], timeout=timeout_each)
+            except Exception:
+                return i, None            # timeout/พัง — ข้ามจอนี้ (ไม่บล็อกตัวอื่น)
+            if _mumu_is_help(o):           # flag ตัวนี้ไม่ถูก ลองตัวถัดไป
+                continue
+            d = _mumu_json(o)
+            if isinstance(d, dict) and str(i) in d and isinstance(d[str(i)], dict):
+                d = d[str(i)]              # รูปแบบ {"0": {...}} → เอา {...} ข้างใน
+            return i, d
+        return i, None
+
+    ex = ThreadPoolExecutor(max_workers=workers)
+    futs = [ex.submit(one, i) for i in indices]
+    try:
+        for f in as_completed(futs, timeout=overall_timeout):
+            try:
+                i, d = f.result()
+            except Exception:
+                continue
+            if isinstance(d, dict) and _mumu_entry_ok(d):
+                out_map[str(i)] = d
+    except Exception:
+        pass                              # เกินเพดานเวลารวม — คืนเท่าที่ได้
+    ex.shutdown(wait=False, cancel_futures=True)  # ไม่รอ thread ที่ยังค้าง
+    return out_map
+
+
+def _mumu_info_raw(mgr, timeout=None):
     """ดึง info ของทุกจอ คืน (data, flag, raw ล่าสุด)
        เครื่องที่ยังไม่มี instance สักจอ MuMuManager จะไม่รับคำว่า 'all'
        แล้วพ่นหน้า help ออกมาแทน (ไม่ใช่ {} ว่างๆ) — กรณีนั้นถอยไปไล่ถามทีละเลข
-       แล้วคัดเฉพาะจอที่มีอยู่จริง (จอที่ไม่มีจะตอบ errcode -200 มา)"""
+       แล้วคัดเฉพาะจอที่มีอยู่จริง (จอที่ไม่มีจะตอบ errcode -200 มา)
+
+       ลอง 'info all' เร็วๆ ก่อน (เครื่องปกติตอบไม่กี่วิ) — ถ้าค้าง/ช้าเกิน timeout
+       (จอเยอะ + บางจอ Android ค้าง 'info all' รอจอที่ค้างจนพังทั้งชุด) ถอยไปถาม
+       ทีละจอแบบขนานแทน จอที่ค้างจะหลุดเฉพาะตัว ที่เหลือได้ครบ
+       ปรับได้ใน config.json: mumu_info_timeout (info all), mumu_info_each_timeout (ต่อจอ)"""
+    if timeout is None:
+        try:
+            timeout = int(_cfg.get("mumu_info_timeout", 25))
+        except Exception:
+            timeout = 25
     last = ""
     for flag in _mumu_vflag_order():
         try:
@@ -1770,16 +2007,19 @@ def _mumu_info_raw(mgr, timeout=20):
             return data, flag, out
         last = out
 
-    idx_list = ",".join(str(i) for i in range(_MUMU_SCAN_MAX))
-    for flag in _mumu_vflag_order():
-        try:
-            out, _rc = _run_hidden([mgr, "info", flag, idx_list], timeout=max(timeout, 60))
-        except Exception:
-            continue
-        data = _mumu_json(out)
-        if isinstance(data, dict):
-            _mumu_vflag["ok"] = flag
-            return {k: v for k, v in data.items() if _mumu_entry_ok(v)}, flag, out
+    # info all ค้าง/ไม่เป็น JSON — ถามทีละจอแบบขนาน (กันจอที่ค้างลากทั้งชุดพัง)
+    try:
+        each = int(_cfg.get("mumu_info_each_timeout", 20))
+    except Exception:
+        each = 20
+    try:
+        smax = int(_cfg.get("mumu_scan_max", 40))
+    except Exception:
+        smax = 40
+    par = _mumu_info_parallel(mgr, range(smax), timeout_each=each, overall_timeout=60)
+    if par:
+        flag_ok = _mumu_vflag.get("ok") or _mumu_vflag_order()[0]
+        return par, flag_ok, "(parallel per-instance)"
     return None, None, last
 
 
@@ -1932,6 +2172,189 @@ def _mumu_delete_all():
     return res
 
 
+def _mumu_apply_kv(mgr, want, targets, kv, timeout=180):
+    """สั่ง MuMuManager setting ให้จอใน targets ด้วยชุด key/value เดียว
+       ลองแบบทีเดียวทุกจอก่อน (all -> เลขจอรวม) เวอร์ชันเก่าไม่รับค่อยไล่ทีละจอ
+       คืน (done_indices, errors, bulk_ok)"""
+    done, errors = [], []
+    idxs = [str(x["index"]) for x in targets]
+    bulk_v = "all" if not want else ",".join(idxs)
+    bulk_ok = False
+    try:
+        out, rc, flag = _mumu_run_v(mgr, "setting", bulk_v, *kv, timeout=timeout)
+        if flag is None and bulk_v == "all":
+            out, rc, flag = _mumu_run_v(mgr, "setting", ",".join(idxs), *kv, timeout=timeout)
+        if flag is not None and rc == 0:
+            done = [x["index"] for x in targets]
+            bulk_ok = True
+        elif flag is not None:
+            errors.append(f"ตั้งค่ารวมไม่ผ่าน ({' '.join((out or '').split())[:70]})")
+    except Exception as e:
+        errors.append(f"ตั้งค่ารวมไม่สำเร็จ: {e}")
+
+    if not bulk_ok:                      # ถอยไปไล่ทีละจอ (MuMuManager เก่าไม่รับหลายจอ)
+        for inst in targets:
+            idx = inst["index"]
+            try:
+                out, rc, flag = _mumu_run_v(mgr, "setting", idx, *kv, timeout=60)
+                if flag is None:
+                    errors.append(f"จอ {idx}: ไม่รับคำสั่ง setting ({' '.join((out or '').split())[:60]})")
+                elif rc != 0:
+                    errors.append(f"จอ {idx}: ตั้งค่าไม่สำเร็จ ({' '.join((out or '').split())[:60]})")
+                else:
+                    done.append(idx)
+            except Exception as e:
+                errors.append(f"จอ {idx}: {e}")
+    return done, errors, bulk_ok
+
+
+def _mumu_get_setting(mgr, idx, key):
+    """อ่านค่า setting ตัวเดียวของจอกลับมา คืน string (ตัวพิมพ์เดิม) หรือ None ถ้าอ่านไม่ได้
+       ใช้ยืนยันว่า setting ที่สั่งไปติดจริง (เช่น renderer เปลี่ยนเป็น vk/dx แล้วจริงไหม)"""
+    try:
+        out, _rc, flag = _mumu_run_v(mgr, "setting", idx, "-k", key, timeout=30)
+        if flag is None:
+            return None
+        data = _mumu_json(out)
+        if isinstance(data, dict):
+            if key in data:
+                return str(data[key])
+            if "value" in data:
+                return str(data["value"])
+            # บางเวอร์ชันคืน {"0": {"renderer_mode": "..."}}
+            for v in data.values():
+                if isinstance(v, dict) and key in v:
+                    return str(v[key])
+        txt = " ".join((out or "").split())
+        return txt[:60] or None
+    except Exception:
+        return None
+
+
+def _mumu_set_display(indices=None, width=None, height=None, dpi=None,
+                      fps=None, cpu=None, ram=None, root=None, renderer=None,
+                      restart=True):
+    """ตั้งค่าจอของ MuMu หลายจอในทีเดียว — ความละเอียด / FPS / CPU / RAM / root / renderer
+       แล้วรีสตาร์ทเฉพาะจอที่เปิดอยู่ให้ค่าใหม่มีผลทันที
+
+       ค่าไหนเป็น None = ไม่แตะของเดิม
+       key ที่ใช้อ้างอิงจาก MuMuManager setting -aw:
+         resolution_mode / resolution_{width,height,dpi}.custom
+         max_frame_rate, performance_mode, performance_{cpu,mem}.custom, root_permission
+         renderer_mode (vk = Vulkan, dx = DirectX)
+
+       รวมทุก key เป็นคำสั่ง setting เดียวต่อจอ จะได้ไม่ต้องเปิดโปรเซสหลายรอบ
+       (เครื่องลูกมีหลายสิบจอ ถ้าแยกคำสั่งจะช้ามาก)
+       renderer ยิงเป็นคำสั่งแยก — ถ้า key ไม่ตรงเวอร์ชัน จะได้ไม่ทำให้ค่าอื่นพังไปด้วย"""
+    mgr = _mumu_manager_path()
+    if not mgr:
+        return {"error": "หา MuMuManager.exe ไม่เจอ — ตั้ง 'mumu_manager_path' ใน config.json" + _mumu_hint()}
+
+    listed = _mumu_list()
+    if listed.get("error"):
+        return listed
+    all_inst = listed.get("instances", [])
+    if not all_inst:
+        return {"error": "ไม่มี instance ให้ตั้งค่า (0 จอ)"}
+
+    want = [str(i) for i in (indices or [])]
+    targets = [x for x in all_inst if not want or str(x["index"]) in want]
+    if not targets:
+        return {"error": f"ไม่พบจอตามที่เลือก: {', '.join(want)}"}
+
+    # ประกอบ key/value ครั้งเดียว ใช้ซ้ำได้ทุกจอ
+    kv = []
+    if width and height and dpi:
+        kv += ["-k", "resolution_mode",          "-val", "custom",
+               "-k", "resolution_width.custom",  "-val", str(int(width)),
+               "-k", "resolution_height.custom", "-val", str(int(height)),
+               "-k", "resolution_dpi.custom",    "-val", str(int(dpi))]
+    if fps:
+        kv += ["-k", "max_frame_rate", "-val", str(int(fps))]
+    if cpu or ram:
+        kv += ["-k", "performance_mode", "-val", "custom"]
+        if cpu:
+            kv += ["-k", "performance_cpu.custom", "-val", str(int(cpu))]
+        if ram:
+            kv += ["-k", "performance_mem.custom", "-val", str(int(ram))]
+    if root is not None:
+        kv += ["-k", "root_permission", "-val", ("true" if root else "false")]
+
+    if not kv and renderer not in ("vk", "dx"):
+        return {"error": "ยังไม่ได้เลือกค่าที่จะตั้ง (ความละเอียด / FPS / CPU / RAM / root / renderer)"}
+
+    errors, done = [], []
+
+    # ── ตั้งค่าหลัก (ความละเอียด/FPS/CPU/RAM/root) ทุกจอในคำสั่งเดียว ─────────
+    #    เครื่องลูกมีหลายสิบจอ ถ้าเปิด MuMuManager ทีละจอจะช้ามากจน "หมดเวลา"
+    #    ค่านี้ตั้งได้ทั้งจอที่เปิดและจอที่ปิด (จอที่ปิดค่าจะมีผลตอนเปิดครั้งถัดไป)
+    if kv:
+        done, errs, _ok = _mumu_apply_kv(mgr, want, targets, kv)
+        errors += errs
+
+    # ── renderer (Vulkan/DirectX) — ยิงเป็นคำสั่งแยก ─────────────────────────
+    renderer_done = False
+    if renderer in ("vk", "dx"):
+        rdone, rerrs, _rok = _mumu_apply_kv(mgr, want, targets,
+                                            ["-k", "renderer_mode", "-val", renderer])
+        if rdone:
+            renderer_done = True
+            if not done:                 # กรณีตั้ง renderer อย่างเดียว → ถือว่าแตะจอครบ
+                done = rdone
+            # อ่านค่ากลับมายืนยันว่าติดจริง (key/ค่าอาจไม่ตรงทุกเวอร์ชัน แล้ว MuMuManager
+            # อาจ rc=0 ทั้งที่ไม่ได้เปลี่ยนอะไร) — ถ้าอ่านได้ค่าชัดๆ แต่ไม่ใช่ที่สั่ง ค่อยเตือน
+            cur = _mumu_get_setting(mgr, targets[0]["index"], "renderer_mode")
+            if cur and renderer not in cur.lower() and len(cur) <= 12:
+                renderer_done = False
+                errors.append(f"renderer: สั่ง '{renderer}' แต่จออ่านค่าได้เป็น '{cur}' "
+                              f"— key/ค่าอาจไม่ตรงกับ MuMu เวอร์ชันนี้ (บอกผมค่านี้เพื่อแก้ให้ตรง)")
+        else:
+            errors += ["renderer: " + e for e in rerrs] or \
+                      ["renderer: ตั้งไม่สำเร็จ (key อาจไม่ตรงกับ MuMu เวอร์ชันนี้)"]
+
+    # ── รีสตาร์ทเฉพาะจอที่เปิดอยู่ (รวมเป็นคำสั่งเดียวเช่นกัน) ────────────────
+    #    จอที่ปิดอยู่ไม่ต้องรีสตาร์ท ค่าจะมีผลเองตอนเปิดครั้งถัดไป
+    restarted = []
+    if restart:
+        run_idxs = [x["index"] for x in targets
+                    if x.get("running") and x["index"] in done]
+        if run_idxs:
+            csv = ",".join(str(i) for i in run_idxs)
+            try:
+                _out, rc, flag = _mumu_run_v(mgr, "control", csv, "restart", timeout=180)
+                if flag is not None and rc == 0:
+                    restarted = list(run_idxs)
+                else:
+                    for i in run_idxs:            # fallback ไล่ทีละจอ
+                        try:
+                            _o, rc2, fl2 = _mumu_run_v(mgr, "control", i, "restart", timeout=60)
+                            if fl2 is not None and rc2 == 0:
+                                restarted.append(i)
+                        except Exception as e:
+                            errors.append(f"จอ {i}: รีสตาร์ทไม่สำเร็จ ({e})")
+            except Exception as e:
+                errors.append(f"รีสตาร์ทรวมไม่สำเร็จ: {e}")
+
+    parts = []
+    if width and height and dpi:
+        parts.append(f"{int(width)}x{int(height)} dpi {int(dpi)}")
+    if fps:
+        parts.append(f"{int(fps)} FPS")
+    if cpu:
+        parts.append(f"CPU {int(cpu)} core")
+    if ram:
+        parts.append(f"RAM {int(ram)} GB")
+    if root is not None:
+        parts.append("เปิด root" if root else "ปิด root")
+    if renderer and renderer_done:
+        parts.append("Vulkan" if renderer == "vk" else "DirectX")
+    logger.info(f"  MuMu display: ตั้ง {len(done)}/{len(targets)} จอ ({', '.join(parts)}) "
+                f"รีสตาร์ท {len(restarted)} จอ")
+    return {"success": True, "count": len(done), "total": len(targets),
+            "done": done, "restarted": restarted, "applied": ", ".join(parts),
+            "errors": errors}
+
+
 def _mumu_probe():
     """ตรวจสภาพ MuMuManager ของเครื่องนี้ — เวอร์ชันอะไร และรับคำสั่ง info รูปแบบไหนได้บ้าง
        (ไว้ไล่ปัญหาเครื่องที่อ่านรายชื่อจอไม่ได้ รันแต่ MuMuManager เท่านั้น)"""
@@ -1963,6 +2386,263 @@ def _mumu_probe():
     return {"success": True, "manager": mgr, "results": out_list}
 
 
+# ═══════════════════════════════════════════════════════════
+#  จัดหน้าต่างบนเดสก์ท็อป — พับทุกแอป / เรียงจอ MuMu เป็นตาราง
+#  ใช้ ctypes ตรงๆ ไม่พึ่ง pywin32 เครื่องลูกจะได้ไม่ต้องลงอะไรเพิ่ม
+#
+#  หมายเหตุ 64-bit: ต้องตั้ง argtypes/restype ให้ handle เป็น c_void_p
+#  ไม่งั้น ctypes จะมองเป็น c_int แล้ว HWND โดนตัดเหลือ 32 bit
+# ═══════════════════════════════════════════════════════════
+
+def _win_user32():
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.windll.user32
+    u.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+    u.FindWindowW.restype = ctypes.c_void_p
+    u.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_size_t]
+    u.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    u.IsIconic.argtypes = [ctypes.c_void_p]
+    u.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    u.GetWindow.restype = ctypes.c_void_p
+    u.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+    u.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+    u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+    u.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    u.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
+                               ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+    u.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
+    return u
+
+
+def _proc_exe_name(pid):
+    """ชื่อไฟล์ .exe ของโปรเซสตาม pid (คืนสตริงว่างถ้าเปิดไม่ได้ เช่นโปรเซสสิทธิ์สูงกว่า)"""
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.windll.kernel32
+    k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k.OpenProcess.restype = ctypes.c_void_p
+    k.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, wintypes.DWORD,
+                                             ctypes.c_wchar_p, ctypes.POINTER(wintypes.DWORD)]
+    k.CloseHandle.argtypes = [ctypes.c_void_p]
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return ""
+    try:
+        size = wintypes.DWORD(512)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return os.path.basename(buf.value)
+        return ""
+    finally:
+        k.CloseHandle(h)
+
+
+def _win_minimize_all(undo=False):
+    """พับทุกหน้าต่างลง taskbar (เหมือนกด Win+D) หรือคืนกลับถ้า undo=True
+       ส่ง WM_COMMAND ไปที่หน้าต่าง taskbar ซึ่งเป็นวิธีเดียวกับที่ Windows ใช้เอง"""
+    try:
+        u = _win_user32()
+        hwnd = u.FindWindowW("Shell_TrayWnd", None)
+        if not hwnd:
+            return {"error": "หา taskbar ไม่เจอ (Shell_TrayWnd) — เดสก์ท็อปอาจยังไม่พร้อม"}
+        MIN_ALL, MIN_ALL_UNDO = 419, 416
+        u.SendMessageW(hwnd, 0x0111, MIN_ALL_UNDO if undo else MIN_ALL, 0)
+        return {"success": True, "undo": bool(undo)}
+    except Exception as e:
+        return {"error": f"พับหน้าต่างไม่สำเร็จ: {e}"}
+
+
+# โปรเซสของ MuMu ที่ "ไม่ใช่จอเกม" — ตัวจัดการหลายจอ / ตัวติดตั้ง / ตัวอัปเดต
+# ไม่เอามาเรียงด้วย ไม่งั้นมันไปกินช่องในตารางแล้วจอเกมเลื่อนหมด
+_MUMU_SKIP_EXE = (
+    "mumumultiplayer.exe",    # ตัวจัดการหลายจอ (หน้าต่างที่ไม่ต้องการ)
+    "mumumanager.exe",
+    "mumuinstaller.exe",
+    "mumuuninstaller.exe",
+    "mumuupdater.exe",
+    "mumuvmmheadless.exe",
+    "mumuservice.exe",
+)
+
+# ชื่อหน้าต่างของ "ตัวจัดการ" แบบตรงตัว — เทียบเต็มชื่อ ไม่ใช่ substring
+# เพราะจอเกมมักตั้งชื่อว่า "pes vpn-new-fix-12" ซึ่งไม่ควรโดนตัดเพราะบังเอิญมีคำซ้ำ
+_MUMU_MGR_TITLES = {
+    "mumuplayer", "mumu player", "mumuplayer 12", "mumu player 12",
+    "mumuplayer12", "mumu player 12 pro", "mumuplayer pro", "mumuplayerpro",
+    "mumu", "mumu模拟器", "mumu模擬器", "mumu emulator",
+}
+
+# กันอีกชั้นด้วยคำที่โผล่ในชื่อหน้าต่างตัวจัดการเท่านั้น (ใช้แบบ substring ได้)
+_MUMU_SKIP_TITLE = ("多开器", "多開器", "multi-instance", "multi instance",
+                    "instance manager", "ตัวจัดการ")
+
+
+def _is_mumu_manager(exe, title):
+    """หน้าต่างนี้เป็นตัวจัดการของ MuMu (ไม่ใช่จอเกม) หรือเปล่า"""
+    if exe.lower() in _MUMU_SKIP_EXE:
+        return True
+    t = " ".join((title or "").split()).strip().lower()
+    if t in _MUMU_MGR_TITLES:
+        return True
+    return any(k in t for k in _MUMU_SKIP_TITLE)
+
+
+def _win_mumu_windows(include_manager=False):
+    """หา handle หน้าต่างจอเกม MuMu ที่กำลังแสดงอยู่ (ดูจากชื่อ .exe ของโปรเซส)
+       ปกติจะตัดหน้าต่างตัวจัดการหลายจอออก — เอาเฉพาะจอเกมมาเรียง"""
+    import ctypes
+    from ctypes import wintypes
+    u = _win_user32()
+    found, skipped = [], []
+    ENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def _cb(hwnd, _lparam):
+        try:
+            if not u.IsWindowVisible(hwnd):
+                return True
+            if u.GetWindow(hwnd, 4):          # GW_OWNER — มีเจ้าของ = หน้าต่างลูก/ป๊อปอัป ข้าม
+                return True
+            n = u.GetWindowTextLengthW(hwnd)
+            if n <= 0:                        # ไม่มีชื่อ = หน้าต่างซ่อน/ระบบ
+                return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            u.GetWindowTextW(hwnd, buf, n + 1)
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            exe = _proc_exe_name(pid.value)
+            if exe.lower().startswith("mumu"):
+                item = {"hwnd": hwnd, "title": buf.value, "exe": exe, "pid": pid.value}
+                if not include_manager and _is_mumu_manager(exe, buf.value):
+                    skipped.append(item)
+                else:
+                    found.append(item)
+        except Exception:
+            pass                              # หน้าต่างหายระหว่างไล่ — ข้ามไปตัวถัดไป
+        return True
+
+    u.EnumWindows(ENUMPROC(_cb), 0)
+    found.sort(key=lambda w: (w["title"], w["pid"]))
+    if skipped:
+        logger.info("  ข้ามหน้าต่างตัวจัดการ MuMu: "
+                    + ", ".join(f"{w['exe']}({w['title'][:24]})" for w in skipped))
+    _win_mumu_windows.last_skipped = skipped
+    return found
+
+
+def _win_aspect(u, wins, default=0.70):
+    """สัดส่วน สูง/กว้าง ของหน้าต่างที่เปิดอยู่ (เอาค่ากลาง กันหน้าต่างแปลกๆ ลากค่าเพี้ยน)
+       ใช้ตอนย่อจอ จะได้คงทรงเดิมของ MuMu ไม่บี้"""
+    import ctypes
+    from ctypes import wintypes
+    vals = []
+    for w in wins:
+        try:
+            r = wintypes.RECT()
+            if u.GetWindowRect(w["hwnd"], ctypes.byref(r)):
+                ww, hh = r.right - r.left, r.bottom - r.top
+                if ww > 0 and hh > 0:
+                    vals.append(hh / float(ww))
+        except Exception:
+            pass
+    if not vals:
+        return default
+    vals.sort()
+    return min(3.0, max(0.3, vals[len(vals) // 2]))
+
+
+def _mumu_arrange(cols=0, gap=0, size=0):
+    """เรียงหน้าต่าง MuMu เป็นตาราง ไม่ทับ taskbar
+
+       size > 0  -> โหมดจอเล็ก: ตรึงความกว้างไว้เท่านี้ แล้วอัดชิดมุมซ้ายบน
+                    ที่เหลือของเดสก์ท็อปปล่อยว่าง (คงสัดส่วนเดิมของ MuMu)
+       size = 0  -> โหมดเต็มจอ: หารพื้นที่ทำงานให้เต็ม
+       cols = 0  -> คำนวณจำนวนคอลัมน์ให้เอง"""
+    import ctypes
+    import math
+    from ctypes import wintypes
+    try:
+        u = _win_user32()
+        wins = _win_mumu_windows()
+        if not wins:
+            skipped = getattr(_win_mumu_windows, "last_skipped", []) or []
+            if skipped:
+                return {"error": "เจอแต่หน้าต่างตัวจัดการ MuMu ยังไม่มีจอเกมเปิดอยู่ "
+                                 "— เปิดจอก่อนแล้วค่อยสั่งเรียง"}
+            return {"error": "ไม่พบหน้าต่าง MuMu ที่เปิดอยู่ — เปิดจอก่อนแล้วค่อยสั่งเรียง"}
+
+        rect = wintypes.RECT()
+        if not u.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):   # SPI_GETWORKAREA
+            return {"error": "อ่านขนาดพื้นที่หน้าจอไม่ได้"}
+        ax, ay = rect.left, rect.top
+        aw, ah = rect.right - rect.left, rect.bottom - rect.top
+
+        n = len(wins)
+        try:
+            g = max(0, int(gap or 0))
+        except Exception:
+            g = 0
+        try:
+            c = int(cols or 0)
+        except Exception:
+            c = 0
+        try:
+            size = int(size or 0)
+        except Exception:
+            size = 0
+
+        if size > 0:
+            # โหมดจอเล็ก — ตรึงความกว้าง อัดชิดมุมซ้ายบน ไม่ยืดเต็มจอ
+            cw = max(120, size)
+            ch = max(90, int(round(cw * _win_aspect(u, wins))))
+            if c <= 0:
+                c = max(1, (aw + g) // (cw + g))
+            c = max(1, min(c, n))
+            r = int(math.ceil(n / c))
+            # ถ้าแถวล้นความสูงจอ ย่อทั้งตารางลงพอดี จะได้ไม่มีจอตกขอบล่าง
+            need = r * ch + g * max(0, r - 1)
+            if need > ah:
+                k = ah / float(need)
+                cw = max(120, int(cw * k))
+                ch = max(90, int(ch * k))
+                c = max(1, min((aw + g) // (cw + g), n))
+                r = int(math.ceil(n / c))
+        else:
+            # โหมดเต็มจอ — หารพื้นที่ทำงานให้หมด
+            if c <= 0:
+                c = max(1, int(math.ceil(math.sqrt(n))))
+            c = max(1, min(c, n))
+            r = int(math.ceil(n / c))
+            cw = max(120, (aw - g * (c - 1)) // c)
+            ch = max(120, (ah - g * (r - 1)) // r)
+
+        SW_RESTORE = 9
+        SWP_NOZORDER, SWP_NOACTIVATE = 0x0004, 0x0010
+        placed, errors = [], []
+        for i, w in enumerate(wins):
+            try:
+                if u.IsIconic(w["hwnd"]):
+                    u.ShowWindow(w["hwnd"], SW_RESTORE)
+                x = ax + (i % c) * (cw + g)
+                y = ay + (i // c) * (ch + g)
+                if u.SetWindowPos(w["hwnd"], None, x, y, cw, ch, SWP_NOZORDER | SWP_NOACTIVATE):
+                    placed.append(w["title"])
+                else:
+                    errors.append(f"{w['title']}: ย้ายหน้าต่างไม่สำเร็จ")
+            except Exception as e:
+                errors.append(f"{w['title']}: {e}")
+
+        logger.info(f"  MuMu arrange: เรียง {len(placed)}/{n} จอ เป็น {c}x{r}")
+        skipped = getattr(_win_mumu_windows, "last_skipped", []) or []
+        return {"success": True, "count": len(placed), "total": n,
+                "cols": c, "rows": r, "cell": [cw, ch], "area": [aw, ah],
+                "small": size > 0, "placed": placed, "errors": errors,
+                "skipped": [w["title"] for w in skipped]}
+    except Exception as e:
+        return {"error": f"เรียงจอไม่สำเร็จ: {e}"}
+
+
 def handle_mumu_control(req_id, data):
     """เปิด/ปิด/ลบ/ดึงรายชื่อ MuMu instance (รันใน thread กันบล็อก socket)"""
     sub = data.get("sub")
@@ -1981,6 +2661,20 @@ def handle_mumu_control(req_id, data):
                 res = _mumu_delete_all()
             elif sub == "probe":
                 res = _mumu_probe()
+            elif sub == "minimize_all":
+                res = _win_minimize_all(False)
+            elif sub == "restore_all":
+                res = _win_minimize_all(True)
+            elif sub == "display":
+                res = _mumu_set_display(
+                    indices=data.get("indices") or [],
+                    width=data.get("width"), height=data.get("height"),
+                    dpi=data.get("dpi"), fps=data.get("fps"),
+                    cpu=data.get("cpu"), ram=data.get("ram"),
+                    root=data.get("root"), renderer=data.get("renderer"),
+                    restart=bool(data.get("restart", True)))
+            elif sub == "arrange":
+                res = _mumu_arrange(data.get("cols"), data.get("gap"), data.get("size"))
             else:
                 res = {"error": f"คำสั่ง mumu ไม่รู้จัก: {sub}"}
         except Exception as e:
@@ -2837,15 +3531,86 @@ def _clone_netcheck(name, prefer=None):
     return out
 
 
+def _download_from_host(host, name):
+    """ดึงไฟล์ backup จากเครื่องที่ผู้ใช้ระบุ IP มาเอง (ผ่านพอร์ตแบ่งไฟล์ของ agent)
+
+       ไม่ต้องผ่านเครื่องแม่ ไม่ต้องออกเน็ตนอก — ใช้ตอนที่เครื่องแม่เน็ตอ่อน
+       หรือเว็บต้นทางจำกัดความเร็วเพราะโหลดพร้อมกันหลายเครื่องจาก IP เดียว
+       รับได้ทั้ง IP วง LAN, Tailscale (100.x.x.x) และแบบระบุพอร์ต ip:port"""
+    from urllib.parse import quote
+    fname = os.path.basename(str(name).strip())
+    if not fname:
+        raise _CloneError("ยังไม่ได้ระบุชื่อไฟล์ที่จะดึง")
+
+    h = str(host or "").strip()
+    for pre in ("http://", "https://"):
+        if h.lower().startswith(pre):
+            h = h[len(pre):]
+    h = h.strip("/").split("/")[0]
+    if not h:
+        raise _CloneError("ยังไม่ได้ระบุ IP เครื่องต้นทาง")
+    if ":" not in h:
+        h = f"{h}:{PEER_PORT}"
+
+    # ถ้าเครื่องนี้มีไฟล์ครบอยู่แล้ว (เช่นเป็นเครื่องต้นทางเอง) ใช้ของเดิมเลย
+    local = os.path.join(_clone_backup_dir(), fname)
+    if os.path.isfile(local):
+        _clone_update(filename=fname, downloaded=os.path.getsize(local),
+                      total=os.path.getsize(local), folder=_clone_backup_dir(),
+                      message=f"มีไฟล์ {fname} อยู่ในเครื่องแล้ว — ไม่ต้องดึงจาก {h}")
+        logger.info(f"  ใช้ไฟล์เดิมที่ {local}")
+        return local
+
+    url = f"http://{h}/peer/{quote(fname)}?secret={quote(AGENT_SECRET)}"
+    attempt, waited, errs = 0, 0, []
+    while attempt < 8:
+        if _clone_cancel.is_set():
+            raise _CloneError("ยกเลิกแล้ว")
+        try:
+            return _direct_download(url)
+        except _CloneBusy as b:
+            # เครื่องต้นทางกำลังแจกให้เพื่อนอยู่ครบคิว — รอแล้วค่อยกลับมา ไม่นับเป็นความล้มเหลว
+            waited += b.wait
+            if waited > 3600:
+                raise _CloneError(f"รอคิวเครื่อง {h} นานเกิน 1 ชั่วโมง — ลองลดจำนวนเครื่องที่สั่งพร้อมกัน")
+            _clone_update(message=f"เครื่อง {h} กำลังแจกให้เพื่อนอยู่ — รอคิว {b.wait} วิ")
+            time.sleep(b.wait)
+        except _CloneError as e:
+            # 403/404/ไม่ใช่ไฟล์ — ลองใหม่ก็ไม่ช่วย บอกให้รู้เลยว่าผิดตรงไหน
+            msg = _scrub_secret(e)
+            if "404" in msg:
+                # กรณีที่เจอบ่อยสุด: เครื่องต้นทางยังโหลดไม่จบ ไฟล์ยังเป็น .part อยู่
+                raise _CloneError(
+                    f"เครื่อง {h} ไม่มีไฟล์ชื่อ \"{fname}\" ที่โหลดครบแล้ว (404) — "
+                    f"ถ้าเครื่องนั้นยังโหลดไม่จบ ไฟล์จะยังเป็น .part ซึ่งดึงไม่ได้ "
+                    f"ให้รอจนจบก่อน หรือกดปุ่ม 🔍 ดูไฟล์ เพื่อเช็กชื่อไฟล์ที่มีจริง")
+            raise _CloneError(f"ดึงจาก {h} ไม่สำเร็จ: {msg}")
+        except Exception as e:
+            attempt += 1
+            errs.append(_scrub_secret(e)[:100])
+            if attempt >= 8:
+                break
+            wait = min(60, 15 * attempt)
+            _clone_update(message=f"ต่อ {h} ไม่ติด — รอ {wait} วิแล้วโหลดต่อจากจุดเดิม "
+                                  f"(ครั้งที่ {attempt + 1}/8)")
+            time.sleep(wait)
+    raise _CloneError(f"ดึงไฟล์จาก {h} ไม่สำเร็จ — " + " | ".join(dict.fromkeys(errs))[:200]
+                      + f" (เช็กว่าเครื่อง {h} เปิดอยู่ และ agent รันอยู่)")
+
+
 def _clone_worker(url, count, launch, source="link", name="", server_url=None,
-                  close_first=True):
+                  close_first=True, host=""):
     """งานเบื้องหลัง: โหลดไฟล์ -> restore ทีละจอจนครบ -> (ถ้าเลือก) เปิดจอใหม่ทั้งหมด"""
     try:
         mgr = _mumu_manager_path()
         if not mgr:
             raise _CloneError("หา MuMuManager.exe ไม่เจอ — ตั้ง 'mumu_manager_path' ใน config.json" + _mumu_hint())
 
-        if source == "server":
+        if source == "host":
+            _clone_update(status="downloading", message=f"กำลังดึง {name} จากเครื่อง {host}...")
+            path = _download_from_host(host, name)
+            _peer_report()      # โหลดเสร็จแล้ว บอกเพื่อนว่ามาดูดต่อจากเราได้
+        elif source == "server":
             _clone_update(status="downloading", message=f"กำลังหาแหล่งโหลด {name}...")
             path = _download_from_servers(name, server_url)
             _peer_report()      # โหลดเสร็จแล้ว บอกเพื่อนว่ามาดูดต่อจากเราได้
@@ -2953,7 +3718,15 @@ def handle_mumu_clone(req_id, data):
     source = str(data.get("source") or "link").strip()
     url = str(data.get("url") or "").strip()
     name = str(data.get("name") or "").strip()
-    if source == "server":
+    host = str(data.get("host") or "").strip()
+    if source == "host":
+        if not host:
+            send_response(req_id, {"error": "ยังไม่ได้ใส่ IP เครื่องต้นทาง"})
+            return
+        if not name:
+            send_response(req_id, {"error": "ยังไม่ได้ใส่ชื่อไฟล์ที่จะดึง"})
+            return
+    elif source == "server":
         if not name:
             send_response(req_id, {"error": "ยังไม่ได้เลือกไฟล์ backup บน server"})
             return
@@ -2983,10 +3756,12 @@ def handle_mumu_clone(req_id, data):
                              "done": 0, "count": count, "errors": [], "new_indexes": []})
 
     threading.Thread(target=_clone_worker,
-                     args=(url, count, launch, source, name, server_url, bool(close_first)),
+                     args=(url, count, launch, source, name, server_url,
+                           bool(close_first), host),
                      daemon=True).start()
     logger.info(f"  MuMu clone: เริ่มงาน — {count} จอ, launch={launch}, "
-                f"source={source}{(' ' + name) if name else ''}")
+                f"source={source}{(' ' + name) if name else ''}"
+                f"{(' จาก ' + host) if host else ''}")
     send_response(req_id, {"success": True, "started": True, "count": count})
 
 
@@ -3165,7 +3940,11 @@ def _connect_loop(url, client):
         try:
             if fails == 0:
                 logger.info(f"🔗 Connecting to {url}...")
-            client.connect(url, transports=["websocket", "polling"])
+            # Funnel/HTTPS วิ่งผ่าน relay/proxy — WebSocket มักหลุดกลางคัน (ต่อได้แวบเดียวแล้วตัด)
+            # จึงใช้ polling ที่ทนกว่า (แต่ละ request สั้นๆ ผ่าน proxy ได้นิ่งกว่า)
+            # ต่อตรงในวง Tailscale (http เป็น IP) ใช้ WebSocket เร็วกว่าได้เลย
+            _tr = ["polling"] if url.lower().startswith("https") else ["websocket", "polling"]
+            client.connect(url, transports=_tr)
             fails = 0
             client.wait()
         except socketio.exceptions.ConnectionError as e:
@@ -3309,6 +4088,26 @@ def is_already_running():
         return False
 
 
+def _periodic_autoupdate():
+    """เช็ก agent.py ใหม่จาก server "เป็นระยะ" (ไม่ใช่แค่ตอนเปิด) — agent อัปเดตเองไม่ต้องรอสั่ง
+       เครื่องที่เพิ่งกลับมา online ก็จะคว้าเวอร์ชันใหม่เองภายในไม่กี่นาที
+       ปรับรอบได้ใน config.json: autoupdate_interval_min (0 = ปิด) · env AGENT_NO_AUTOUPDATE ก็ปิดได้"""
+    if os.environ.get("AGENT_NO_AUTOUPDATE"):
+        return
+    try:
+        interval = int(_cfg.get("autoupdate_interval_min", 30))
+    except Exception:
+        interval = 30
+    if interval <= 0:
+        return
+    while True:
+        time.sleep(max(60, interval * 60))
+        try:
+            _startup_autoupdate()   # ถ้ามีของใหม่ ฟังก์ชันนี้จะ _relaunch_and_exit() ให้เอง
+        except Exception as e:
+            logger.info(f"(periodic autoupdate ข้าม: {e})")
+
+
 def main():
     if is_already_running():
         print("Agent already running - exiting this duplicate.")
@@ -3351,6 +4150,7 @@ def main():
     # socket loop ทำงานเบื้องหลังเสมอ
     threading.Thread(target=agent_loop, daemon=True).start()
     threading.Thread(target=_peer_serve, daemon=True).start()   # แบ่งไฟล์ backup ให้เพื่อน
+    threading.Thread(target=_periodic_autoupdate, daemon=True).start()  # เช็ก agent.py ใหม่เป็นระยะ
 
     has_tray = False
     try:

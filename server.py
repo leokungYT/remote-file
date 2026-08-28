@@ -54,8 +54,8 @@ socketio = SocketIO(
     app,
     cors_allowed_origins="*",
     max_http_buffer_size=int(MAX_UPLOAD_MB * 1024 * 1024 * 1.5),  # base64 (+33%) + framing headroom
-    ping_timeout=30,
-    ping_interval=10,
+    ping_timeout=60,    # ใจกว้างขึ้น: เครื่องที่ต่อผ่าน Funnel/VPN (relay ช้า) จะได้ไม่โดนตัดง่าย
+    ping_interval=25,
     async_mode="threading"
 )
 
@@ -362,6 +362,15 @@ def handle_mumu_req(data):
     req_id = send_to_agent(data["agent_id"], "mumu_control", {
         "sub": data.get("sub"),
         "indices": data.get("indices", []),
+        "cols": data.get("cols", 0),        # sub=arrange: จำนวนคอลัมน์ (0 = ให้คำนวณเอง)
+        "gap": data.get("gap", 0),          # sub=arrange: ระยะห่างระหว่างจอ (px)
+        "size": data.get("size", 0),        # sub=arrange: ความกว้างต่อจอ (0 = ยืดเต็มจอ)
+        # sub=display: ตั้งค่าจอ MuMu (ค่าที่ไม่ส่ง/None = ไม่แตะของเดิม)
+        "width": data.get("width"), "height": data.get("height"),
+        "dpi": data.get("dpi"), "fps": data.get("fps"),
+        "cpu": data.get("cpu"), "ram": data.get("ram"),
+        "root": data.get("root"), "renderer": data.get("renderer"),
+        "restart": data.get("restart", True),
     }, request.sid)
     if req_id:
         emit("request_sent", {"request_id": req_id})
@@ -374,7 +383,9 @@ def handle_mumu_clone_req(data):
     """สั่งงาน clone MuMu (โหลด backup จาก Google Drive + restore หลายจอ) ที่เครื่องลูก"""
     req_id = send_to_agent(data["agent_id"], "mumu_clone", {
         "sub": data.get("sub"),
-        "source": data.get("source", "link"),   # server = โหลดจาก server เรา, link = ลิงก์ข้างนอก
+        "source": data.get("source", "link"),   # server = โหลดจาก server เรา, link = ลิงก์ข้างนอก,
+                                                # host = ดึงจากเครื่องที่ระบุ IP เอง
+        "host": data.get("host", ""),           # โหมด host: IP เครื่องต้นทาง (ใส่ ip:port ได้)
         "name": data.get("name", ""),           # ชื่อไฟล์ในโฟลเดอร์ mumu-backup (โหมด server)
         "url": data.get("url", ""),
         "count": data.get("count", 1),
@@ -444,9 +455,11 @@ def send_to_agent(agent_id, action, data, web_sid):
     matches.sort()
     target_sid = matches[-1][1]
 
-    # กันบวม: ลบ request ที่ค้างนานเกิน 60 วิ (เครื่องที่ตาย/ไม่ตอบกลับ)
+    # กันบวม: ลบ request ที่ค้างนานเกิน 300 วิ (เครื่องที่ตาย/ไม่ตอบกลับ)
+    #   ต้องไม่สั้นกว่างานที่นานจริง (ตั้งค่าจอ/รีสตาร์ทหลายสิบจอ) ไม่งั้นจะตัด response
+    #   ของงานที่ยัง "ทำอยู่จริง" ทิ้ง แล้วเว็บขึ้น "เครื่องไม่ตอบ" ทั้งที่กำลังทำงาน
     if len(pending_requests) > 40:
-        cutoff = time.time() - 60
+        cutoff = time.time() - 300
         for k in [k for k, v in pending_requests.items() if v.get("created_at", 0) < cutoff]:
             pending_requests.pop(k, None)
 
@@ -778,10 +791,37 @@ def serve_mumu_backup(name):
     return resp
 
 
+def _mumu_peer_only_files(exclude):
+    """ไฟล์ที่ 'เครื่องลูก' มีอยู่แล้ว แต่บน server ไม่มี
+
+       มีไว้เพื่อกรณีที่เน็ต/Wi-Fi ของเครื่องแม่อ่อนกว่าเครื่องลูก จะได้ไม่ต้อง
+       ลากไฟล์หลาย GB เข้าเครื่องแม่ก่อน — ให้เครื่องหนึ่งโหลดจากเน็ตครั้งเดียว
+       แล้วที่เหลือดูดจากเพื่อนผ่าน LAN ได้เลย (agent เลือกเพื่อนก่อน server อยู่แล้ว)"""
+    online = {a.get("agent_id") for a in agents.values()}
+    tally = {}
+    for aid, info in peer_have.items():
+        if aid not in online:
+            continue
+        for name, size in (info.get("files") or {}).items():
+            name = str(name)
+            if name in exclude or not name.lower().endswith((".mumudata", ".zip")):
+                continue
+            e = tally.setdefault(name, {"name": name, "size": 0, "peers": 0, "source": "peer"})
+            e["peers"] += 1
+            e["size"] = max(e["size"], int(size or 0))
+    return sorted(tally.values(), key=lambda x: x["name"])
+
+
 @socketio.on("request_mumu_files")
 def handle_mumu_files_req(data=None):
-    """หน้าเว็บขอรายชื่อไฟล์ backup ที่มีบน server"""
-    emit("mumu_files", {"files": _mumu_backup_files(), "folder": MUMU_BACKUP_DIR})
+    """หน้าเว็บขอรายชื่อไฟล์ backup — ทั้งที่อยู่บน server และที่อยู่บนเครื่องลูก"""
+    on_server = _mumu_backup_files()
+    for f in on_server:
+        f["source"] = "server"
+    peers_only = _mumu_peer_only_files({f["name"] for f in on_server})
+    emit("mumu_files", {"files": on_server + peers_only,
+                        "folder": MUMU_BACKUP_DIR,
+                        "peer_count": len(peers_only)})
 
 
 # ─── ทะเบียนว่าเครื่องลูกตัวไหนมีไฟล์ backup อะไรแล้วบ้าง (ไว้ให้เพื่อนมาดูดต่อ) ───
@@ -804,6 +844,41 @@ def handle_agent_have(data):
     if data.get("secret") != AGENT_SECRET:
         return
     _peer_note(data.get("agent_id"), data.get("ips"), data.get("port"), data.get("files"))
+
+
+@socketio.on("request_host_files")
+def handle_host_files_req(data=None):
+    """หน้าเว็บถามว่า 'เครื่องที่ IP นี้มีไฟล์อะไรพร้อมให้ดึงบ้าง'
+
+       ตอบจากทะเบียนที่ agent รายงานไว้ตอน register ซึ่งนับเฉพาะไฟล์ที่โหลด
+       ครบแล้วเท่านั้น (ไฟล์ .part ที่ยังโหลดไม่จบจะไม่อยู่ในนี้ และดึงไม่ได้)"""
+    host = str((data or {}).get("host") or "").strip()
+    for pre in ("http://", "https://"):
+        if host.lower().startswith(pre):
+            host = host[len(pre):]
+    host = host.strip("/").split("/")[0].split(":")[0]
+    if not host:
+        emit("host_files", {"error": "ยังไม่ได้ใส่ IP เครื่องต้นทาง"})
+        return
+
+    online = {a.get("agent_id"): a for a in agents.values()}
+    for aid, info in peer_have.items():
+        if host not in (info.get("ips") or []):
+            continue
+        a = online.get(aid) or {}
+        emit("host_files", {
+            "host": host,
+            "agent_id": aid,
+            "name": a.get("name") or a.get("hostname") or aid,
+            "online": aid in online,
+            "port": info.get("port"),
+            "files": [{"name": k, "size": v}
+                      for k, v in sorted((info.get("files") or {}).items())],
+        })
+        return
+    emit("host_files", {"host": host,
+                        "error": f"ไม่รู้จักเครื่องที่ IP {host} — ต้องเป็นเครื่องลูก "
+                                 f"ที่เคยต่อเข้า server นี้ (ลอง IP อื่นของเครื่องนั้น)"})
 
 
 @app.route("/mumu-peers/<path:name>")
@@ -1669,8 +1744,20 @@ WEB_UI_HTML = r"""
   .mumu-actions { display: flex; gap: 6px; flex-wrap: wrap; }
   .mumu-actions .btn { padding: 6px 10px; font-size: 12px; }
   .mumu-body { min-height: 30px; }
-  .mumu-inst { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+  /* หัวลิสต์จอ: บอกจำนวนจอ + ปุ่มเลือกทุกจอ */
+  .mumu-inst-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+  .mumu-selall { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+  .mumu-selall input { width: auto; margin: 0; }
+  /* ชิปจอแบบกระชับ ลงได้หลายอันต่อแถว + จำกัดความสูงให้การ์ดไม่ยาวเกินไป (จอเยอะเลื่อนดูได้) */
+  .mumu-inst-wrap { display: flex; flex-wrap: wrap; gap: 6px; max-height: 208px; overflow-y: auto; padding-right: 2px; }
+  .mumu-inst { display: inline-flex; align-items: center; gap: 5px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-size: 12px; cursor: pointer; }
   .mumu-inst input { width: auto; margin: 0; }
+  .mumu-inst span { font-variant-numeric: tabular-nums; }
+  /* แถบความคืบหน้าตอนสั่งงานทั้งฟลีต (เปิดทุกจอ ฯลฯ) */
+  .mm-prog { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; margin-bottom: 14px; }
+  .mm-prog-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13px; margin-bottom: 8px; }
+  .mm-prog-track { height: 10px; background: var(--bg-secondary); border-radius: 6px; overflow: hidden; }
+  .mm-prog-bar { height: 100%; width: 0%; background: var(--accent); border-radius: 6px; transition: width .25s ease; }
 
   /* ── COOKIE-RUN id cards (แสดงชื่อ id) ── */
   .id-grid {
@@ -1873,6 +1960,8 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
     <button class="btn" onclick="openBroadcastBackup()">💾 ส่งเข้า backup (ทุกเครื่อง)</button>
     <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
+    <button class="btn" onclick="quickArrangeAll()" title="เรียงหน้าต่าง MuMu เป็นตารางเต็มจอ ทุกเครื่อง">🔲 เรียงจอ</button>
+    <button class="btn" onclick="quickMinimizeAll()" title="ย่อทุกหน้าต่างลง taskbar ทุกเครื่อง">🗕 พับทุกแอป</button>
     <button class="btn" onclick="openMumuCloneDashboard()">🧬 Clone MuMu</button>
     <button class="btn" onclick="openRunFileDashboard()">▶️ รันไฟล์ .bat</button>
     <button class="btn" onclick="openBotUpdateDashboard()">⬆️ อัปเดตบอท (ติ๊กเลือกเครื่อง)</button>
@@ -3315,15 +3404,248 @@ function filterRangerCards(q) {
 // ═══════════════════════════════════════════════════════════
 //  MuMu Player 12 — เปิด/ปิด instance รายเครื่อง
 // ═══════════════════════════════════════════════════════════
-function mumuReq(agentId, sub, indices) {
+function mumuReq(agentId, sub, indices, opts, waitMs) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => { if (!settled) { settled = true; resolve(v || {}); } };
     const onSent = (data) => { socket.once('response_' + data.request_id, (resp) => done(resp)); };
     socket.once('request_sent', onSent);
-    setTimeout(() => { socket.off('request_sent', onSent); done({ error: 'หมดเวลา (เครื่องไม่ตอบ)' }); }, 45000);
-    socket.emit('request_mumu', { agent_id: agentId, sub: sub, indices: indices || [] });
+    // งานบางอย่าง (ตั้งค่าจอ/รีสตาร์ทหลายสิบจอ) ใช้เวลานาน — ส่ง waitMs ยาวๆ มาได้
+    setTimeout(() => { socket.off('request_sent', onSent); done({ error: 'หมดเวลา (เครื่องไม่ตอบ)' }); }, waitMs || 45000);
+    socket.emit('request_mumu', Object.assign(
+      { agent_id: agentId, sub: sub, indices: indices || [] }, opts || {}));
   });
+}
+// ตั้งค่าจอ MuMu อาจต้องรีสตาร์ทหลายสิบจอ ให้รอได้นานถึง 10 นาที ไม่ต้องรีบตัดว่า "เครื่องไม่ตอบ"
+const MM_DISPLAY_WAIT = 600000;
+
+// จำนวนคอลัมน์ที่ผู้ใช้พิมพ์ไว้ในแถบเครื่องมือ (ว่าง = ให้เครื่องลูกคำนวณเอง)
+function mumuCols() {
+  const el = document.getElementById('mmCols');
+  const v = parseInt((el && el.value) || '0', 10);
+  return (isNaN(v) || v < 1) ? 0 : v;
+}
+function mumuGap() {
+  const el = document.getElementById('mmGap');
+  const v = parseInt((el && el.value) || '0', 10);
+  return (isNaN(v) || v < 0) ? 0 : v;
+}
+
+// ความกว้างต่อจอ (px) 0 = ยืดเต็มจอ
+// จำค่าที่เลือกไว้ ปุ่มลัดบนแถบบนสุดจะได้ใช้ค่าเดียวกันแม้ไม่ได้เปิดหน้า MuMu
+const MM_SIZE_KEY = 'mumuCellWidth';
+function mumuSize() {
+  const el = document.getElementById('mmSize');
+  if (el) return parseInt(el.value, 10) || 0;
+  const saved = parseInt(localStorage.getItem(MM_SIZE_KEY) || '', 10);
+  return isNaN(saved) ? 260 : saved;      // ไม่เคยเลือก = จอเล็ก 260px
+}
+function mumuSizeChanged() {
+  const el = document.getElementById('mmSize');
+  if (el) localStorage.setItem(MM_SIZE_KEY, el.value);
+}
+
+// ── ตั้งค่าจอ MuMu (ความละเอียด / FPS / CPU / RAM) ───────────
+const MD_KEY = 'mumuDisplayCfg';
+function mmDispCfg() {
+  let c = {};
+  try { c = JSON.parse(localStorage.getItem(MD_KEY) || '{}') || {}; } catch (e) {}
+  return { width: c.width || '', height: c.height || '', dpi: c.dpi || '',
+           fps: c.fps || '', cpu: c.cpu || '', ram: c.ram || '',
+           root: c.root === '1' || c.root === '0' ? c.root : '',   // '' = ไม่แตะ, '1' = เปิด, '0' = ปิด
+           renderer: c.renderer === 'vk' || c.renderer === 'dx' ? c.renderer : '',  // '' = ไม่แตะ
+           restart: c.restart !== false };
+}
+function mmDispSave() {
+  const g = (id) => (document.getElementById(id) || {}).value || '';
+  const r = document.getElementById('mdRestart');
+  try {
+    localStorage.setItem(MD_KEY, JSON.stringify({
+      width: g('mdW'), height: g('mdH'), dpi: g('mdDpi'),
+      fps: g('mdFps'), cpu: g('mdCpu'), ram: g('mdRam'),
+      root: g('mdRoot'), renderer: g('mdRenderer'),
+      restart: r ? r.checked : true,
+    }));
+  } catch (e) {}
+}
+
+// ช่องที่ปล่อยว่าง -> null เพื่อบอก agent ว่า "ไม่ต้องแตะค่านี้"
+function mmDispPayload() {
+  const num = (id) => {
+    const v = parseInt(((document.getElementById(id) || {}).value || '').trim(), 10);
+    return isNaN(v) ? null : v;
+  };
+  const r = document.getElementById('mdRestart');
+  const rootV = (document.getElementById('mdRoot') || {}).value || '';
+  // root: '1' = เปิด(true), '0' = ปิด(false), '' = ไม่แตะ(null)
+  const root = rootV === '1' ? true : (rootV === '0' ? false : null);
+  const rendV = (document.getElementById('mdRenderer') || {}).value || '';
+  // renderer: 'vk' = Vulkan, 'dx' = DirectX, '' = ไม่แตะ(null)
+  const renderer = (rendV === 'vk' || rendV === 'dx') ? rendV : null;
+  return { width: num('mdW'), height: num('mdH'), dpi: num('mdDpi'),
+           fps: num('mdFps'), cpu: num('mdCpu'), ram: num('mdRam'),
+           root: root, renderer: renderer,
+           restart: r ? r.checked : true };
+}
+
+// ความละเอียดต้องครบ 3 ช่องถึงจะนับ ไม่งั้นตั้งครึ่งๆ กลางๆ แล้วจอเพี้ยน
+function mmDispEmpty(p) {
+  const hasRes = p.width && p.height && p.dpi;
+  return !hasRes && !p.fps && !p.cpu && !p.ram && p.root === null && !p.renderer;
+}
+
+async function mmDisplay(i) {
+  const a = (window._mumuAgents || [])[i];
+  if (!a) return;
+  const p = mmDispPayload();
+  if (mmDispEmpty(p)) { toast('ยังไม่ได้ใส่ค่าที่จะตั้ง (ความละเอียดต้องครบ 3 ช่อง)', 'info'); return; }
+  mmDispSave();
+  const status = document.getElementById('mm_status_' + i);
+  const picked = [...document.querySelectorAll('.mm_chk_' + i + ':checked')].map(c => c.value);
+  status.innerHTML = '<span style="color:var(--accent)">⏳ กำลังตั้งค่าจอ... (หลายจออาจใช้เวลาสักครู่ อย่าเพิ่งปิดหน้า)</span>';
+  const res = await mumuReq(a.agent_id, 'display', picked, p, MM_DISPLAY_WAIT);
+  if (res.error) { status.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`; return; }
+  const rs = res.restarted && res.restarted.length ? ` · รีจอ ${res.restarted.length} จอ` : '';
+  const er = res.errors && res.errors.length ? ` <span style="color:var(--warning)">(${res.errors.length} จอพลาด)</span>` : '';
+  status.innerHTML = `<span style="color:#22c55e">✅ ตั้ง ${res.count}/${res.total} จอ — ${escHtml(res.applied || '')}${rs}</span>${er}`;
+}
+
+async function mmDisplayAll() {
+  const list = window._mumuAgents || [];
+  if (!list.length) { toast('ยังไม่มีเครื่องลูกออนไลน์', 'info'); return; }
+  const p = mmDispPayload();
+  if (mmDispEmpty(p)) { toast('ยังไม่ได้ใส่ค่าที่จะตั้ง (ความละเอียดต้องครบ 3 ช่อง)', 'info'); return; }
+  mmDispSave();
+  const bits = [];
+  if (p.width && p.height && p.dpi) bits.push(`${p.width}x${p.height} dpi ${p.dpi}`);
+  if (p.fps) bits.push(`${p.fps} FPS`);
+  if (p.cpu) bits.push(`CPU ${p.cpu} core`);
+  if (p.ram) bits.push(`RAM ${p.ram} GB`);
+  if (p.root !== null) bits.push(p.root ? 'เปิด root' : 'ปิด root');
+  if (p.renderer) bits.push(p.renderer === 'vk' ? 'Vulkan' : 'DirectX');
+  if (!confirm(`⚙️ ตั้งค่าจอทุกจอ บน ${list.length} เครื่อง ?\n${bits.join(' · ')}`
+      + (p.restart ? '\nจอที่เปิดอยู่จะถูกรีสตาร์ทให้อัตโนมัติ' : ''))) return;
+  const n = list.length;
+  // ทำทีละเครื่อง (กัน request ชนกัน) — restart จอเยอะๆ ช้า จึงมี progress bar + ตั้ง "รอคิว"
+  // ทุกเครื่องตั้งแต่แรก จะได้เห็นว่าที่เหลือกำลังต่อคิว ไม่ใช่ค้าง
+  for (let i = 0; i < n; i++) {
+    const st = document.getElementById('mm_status_' + i);
+    if (st) st.innerHTML = '<span style="color:var(--text-dim)">⏳ รอคิว...</span>';
+  }
+  let ok = 0, fail = 0, totalScr = 0;
+  mmProgress(`⚙️ กำลังตั้งค่าจอ... 0/<b>${n}</b> เครื่อง`, 0);
+  for (let i = 0; i < n; i++) {
+    const nm = list[i].name || list[i].hostname || list[i].agent_id;
+    const st = document.getElementById('mm_status_' + i);
+    if (st) st.innerHTML = '<span style="color:var(--accent)">⏳ กำลังตั้งค่า...</span>';
+    mmProgress(`⚙️ กำลังตั้งค่า <b>${escHtml(nm)}</b> ... (เสร็จ ${i}/<b>${n}</b> เครื่อง · รวม ${totalScr} จอ)`,
+               Math.round(i * 100 / n));
+    const res = await mumuReq(list[i].agent_id, 'display', [], p, MM_DISPLAY_WAIT);
+    if (res.error) {
+      fail++;
+      if (st) st.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`;
+    } else {
+      ok++; totalScr += (res.count || 0);
+      const rs = res.restarted && res.restarted.length ? ` · รีจอ ${res.restarted.length}` : '';
+      const er = res.errors && res.errors.length ? ` <span style="color:var(--warning)">(${res.errors.length} พลาด)</span>` : '';
+      if (st) st.innerHTML = `<span style="color:#22c55e">✅ ตั้ง ${res.count}/${res.total} จอ${rs}</span>${er}`;
+    }
+    const last = (i + 1 === n);
+    mmProgress(`⚙️ ตั้งค่าแล้ว <b>${i + 1}</b>/<b>${n}</b> เครื่อง · รวม <b>${totalScr}</b> จอ`
+                 + (fail ? ` · <span style="color:var(--danger)">พลาด ${fail}</span>` : ''),
+               Math.round((i + 1) * 100 / n),
+               last ? (fail ? 'var(--warning)' : 'var(--success)') : 'var(--accent)');
+  }
+  toast(`ตั้งค่าจอเสร็จ ${ok}/${n} เครื่อง (รวม ${totalScr} จอ)`, ok === n ? 'success' : 'info');
+  setTimeout(mmProgressHide, 9000);
+}
+
+// ── พับทุกแอป / เรียงจอ MuMu ────────────────────────────────
+async function mumuMinimize(i) {
+  const a = (window._mumuAgents || [])[i];
+  if (!a) return;
+  const status = document.getElementById('mm_status_' + i);
+  status.innerHTML = '<span style="color:var(--accent)">⏳ กำลังพับหน้าต่าง...</span>';
+  const res = await mumuReq(a.agent_id, 'minimize_all', []);
+  status.innerHTML = res.error
+    ? `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`
+    : '<span style="color:#22c55e">✅ พับทุกแอปแล้ว</span>';
+}
+
+async function mumuArrange(i) {
+  const a = (window._mumuAgents || [])[i];
+  if (!a) return;
+  const status = document.getElementById('mm_status_' + i);
+  status.innerHTML = '<span style="color:var(--accent)">⏳ กำลังเรียงจอ...</span>';
+  const res = await mumuReq(a.agent_id, 'arrange', [], { cols: mumuCols(), gap: mumuGap(), size: mumuSize() });
+  if (res.error) { status.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`; return; }
+  const warn = (res.errors && res.errors.length)
+    ? ` <span style="color:var(--warning)">(${res.errors.length} จอย้ายไม่ได้)</span>` : '';
+  const skip = (res.skipped && res.skipped.length)
+    ? ` <span style="color:var(--text-dim)">· ข้ามตัวจัดการ ${res.skipped.length} หน้าต่าง</span>` : '';
+  status.innerHTML = `<span style="color:#22c55e">✅ เรียง ${res.count}/${res.total} จอ`
+    + ` เป็น ${res.cols}×${res.rows} (จอละ ${res.cell[0]}×${res.cell[1]})</span>${warn}${skip}`;
+}
+
+async function mumuMinimizeAll() {
+  const list = window._mumuAgents || [];
+  if (!list.length) return;
+  toast(`กำลังพับทุกแอปบน ${list.length} เครื่อง...`, 'info');
+  let ok = 0;
+  for (let i = 0; i < list.length; i++) {
+    const res = await mumuReq(list[i].agent_id, 'minimize_all', []);
+    if (!res.error) ok++;
+  }
+  toast(`พับทุกแอปแล้ว ${ok}/${list.length} เครื่อง`, ok === list.length ? 'success' : 'info');
+}
+
+async function mumuArrangeAll() {
+  const list = window._mumuAgents || [];
+  if (!list.length) return;
+  const c = mumuCols(), g = mumuGap(), sz = mumuSize();
+  toast(`กำลังเรียงจอบน ${list.length} เครื่อง...`, 'info');
+  let ok = 0;
+  for (let i = 0; i < list.length; i++) {
+    const res = await mumuReq(list[i].agent_id, 'arrange', [], { cols: c, gap: g, size: sz });
+    const st = document.getElementById('mm_status_' + i);
+    if (res.error) {
+      if (st) st.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`;
+    } else {
+      ok++;
+      if (st) st.innerHTML = `<span style="color:#22c55e">✅ เรียง ${res.count}/${res.total} จอ เป็น ${res.cols}×${res.rows}</span>`;
+    }
+  }
+  toast(`เรียงจอสำเร็จ ${ok}/${list.length} เครื่อง`, ok === list.length ? 'success' : 'info');
+}
+
+// ── ปุ่มลัดบนแถบบนสุด — กดได้จากทุกหน้า ไม่ต้องเข้าหน้า MuMu ก่อน ──
+// ยิงทีละเครื่อง ห้ามขนานกัน เพราะ mumuReq ดัก event 'request_sent' แบบ once
+// ถ้าส่งพร้อมกันหลายตัว response จะสลับกันไปเข้าคำขอผิดตัว
+async function quickAllAgents(sub, opts, verb) {
+  const list = (typeof agentsData !== 'undefined' && agentsData) ? agentsData.slice() : [];
+  if (!list.length) { toast('ยังไม่มีเครื่องลูกออนไลน์', 'info'); return; }
+  toast(`กำลัง${verb} ${list.length} เครื่อง...`, 'info');
+  let ok = 0;
+  const errs = [];
+  for (const a of list) {
+    const res = await mumuReq(a.agent_id, sub, [], opts);
+    if (res.error) errs.push((a.name || a.hostname || a.agent_id) + ': ' + res.error);
+    else ok++;
+  }
+  if (errs.length) {
+    console.warn('[' + verb + '] เครื่องที่ไม่สำเร็จ:', errs);
+    toast(`${verb}สำเร็จ ${ok}/${list.length} เครื่อง — ไม่สำเร็จ ${errs.length} (ดูรายละเอียดใน Console)`, 'info');
+  } else {
+    toast(`${verb}สำเร็จครบ ${ok} เครื่อง`, 'success');
+  }
+}
+
+function quickArrangeAll() {
+  return quickAllAgents('arrange', { cols: mumuCols(), gap: mumuGap(), size: mumuSize() }, 'เรียงจอ');
+}
+
+function quickMinimizeAll() {
+  return quickAllAgents('minimize_all', null, 'พับทุกแอป');
 }
 
 function openMumuDashboard() {
@@ -3344,6 +3666,9 @@ function openMumuDashboard() {
         <div class="mumu-actions">
           <button class="btn" onclick="mumuLoad(${i})">🔄 โหลดจอ</button>
           <button class="btn btn-primary" onclick="mumuOpenSel(${i})">▶️ เปิดที่เลือก</button>
+          <button class="btn" onclick="mumuArrange(${i})">🔲 เรียงจอ</button>
+          <button class="btn" onclick="mumuMinimize(${i})">🗕 พับทุกแอป</button>
+          <button class="btn" onclick="mmDisplay(${i})">⚙️ ตั้งค่าจอ</button>
           <button class="btn btn-danger" onclick="mumuClose(${i})">⛔ ปิดทั้งหมด</button>
         </div>
       </div>
@@ -3351,13 +3676,82 @@ function openMumuDashboard() {
       <div class="mumu-status" id="mm_status_${i}" style="font-size:12px; margin-top:8px"></div>
     </div>`;
   }).join('');
+  const dcfg = mmDispCfg();
   content.innerHTML = `
+    <div class="pick-panel" style="margin-bottom:14px">
+      <div class="pick-head">
+        <span class="pick-title">⚙️ ตั้งค่าจอ MuMu — ความละเอียด / FPS / CPU / RAM (ปล่อยว่าง = ไม่แตะค่าเดิม)</span>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:13px">
+        <label style="display:flex; align-items:center; gap:5px">กว้าง
+          <input type="number" id="mdW" min="240" max="3840" placeholder="960" value="${escAttr(dcfg.width)}" style="width:78px; padding:6px 8px" onchange="mmDispSave()"></label>
+        <label style="display:flex; align-items:center; gap:5px">สูง
+          <input type="number" id="mdH" min="240" max="2160" placeholder="540" value="${escAttr(dcfg.height)}" style="width:78px; padding:6px 8px" onchange="mmDispSave()"></label>
+        <label style="display:flex; align-items:center; gap:5px">DPI
+          <input type="number" id="mdDpi" min="80" max="640" placeholder="160" value="${escAttr(dcfg.dpi)}" style="width:70px; padding:6px 8px" onchange="mmDispSave()"></label>
+        <label style="display:flex; align-items:center; gap:5px; color:var(--accent); font-weight:600">FPS
+          <input type="number" id="mdFps" min="15" max="240" placeholder="60" value="${escAttr(dcfg.fps)}" style="width:70px; padding:6px 8px" onchange="mmDispSave()"></label>
+        <label style="display:flex; align-items:center; gap:5px">CPU core
+          <input type="number" id="mdCpu" min="1" max="16" placeholder="2" value="${escAttr(dcfg.cpu)}" style="width:64px; padding:6px 8px" onchange="mmDispSave()"></label>
+        <label style="display:flex; align-items:center; gap:5px">RAM GB
+          <input type="number" id="mdRam" min="1" max="32" placeholder="2" value="${escAttr(dcfg.ram)}" style="width:64px; padding:6px 8px" onchange="mmDispSave()"></label>
+        <label style="display:flex; align-items:center; gap:5px" title="สิทธิ์ root ในจอ (ปล่อย 'ไม่แตะ' = คงค่าเดิม)">root
+          <select id="mdRoot" style="padding:6px 8px; font-size:13px" onchange="mmDispSave()">
+            <option value=""${dcfg.root === '' ? ' selected' : ''}>— ไม่แตะ —</option>
+            <option value="1"${dcfg.root === '1' ? ' selected' : ''}>เปิด</option>
+            <option value="0"${dcfg.root === '0' ? ' selected' : ''}>ปิด</option>
+          </select></label>
+        <label style="display:flex; align-items:center; gap:5px" title="โหมดกราฟิกของจอ (Vulkan / DirectX) — ปล่อย 'ไม่แตะ' = คงค่าเดิม">renderer
+          <select id="mdRenderer" style="padding:6px 8px; font-size:13px" onchange="mmDispSave()">
+            <option value=""${dcfg.renderer === '' ? ' selected' : ''}>— ไม่แตะ —</option>
+            <option value="vk"${dcfg.renderer === 'vk' ? ' selected' : ''}>Vulkan</option>
+            <option value="dx"${dcfg.renderer === 'dx' ? ' selected' : ''}>DirectX</option>
+          </select></label>
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+          <input type="checkbox" id="mdRestart" ${dcfg.restart ? 'checked' : ''} style="width:auto; margin:0" onchange="mmDispSave()"> รีจอที่เปิดอยู่ให้เอง</label>
+        <button class="btn btn-primary" onclick="mmDisplayAll()">⚙️ ใช้กับทุกเครื่อง</button>
+      </div>
+      <div style="font-size:12px; color:var(--text-dim); margin-top:8px">
+        ค่าที่ปล่อยว่างจะไม่ถูกแตะ · ความละเอียดต้องใส่ครบทั้ง กว้าง+สูง+DPI ถึงจะมีผล · จอที่ปิดอยู่ค่าจะมีผลตอนเปิดครั้งถัดไป
+      </div>
+    </div>
     <div class="toolbar">
       <h2 style="flex:1; font-size:18px">🎮 MuMu Player 12 — เปิด/ปิด รายเครื่อง</h2>
       <button class="btn" onclick="mumuLoadAll()">🔄 โหลดจอทุกเครื่อง</button>
+      <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--text-dim)">
+        ขนาดจอ
+        <select id="mmSize" onchange="mumuSizeChanged()" title="ความกว้างต่อจอ"
+                style="padding:6px 8px; font-size:12px">
+          <option value="160">จิ๋ว 160px</option>
+          <option value="200">เล็กมาก 200px</option>
+          <option value="260" selected>เล็ก 260px</option>
+          <option value="340">กลาง 340px</option>
+          <option value="460">ใหญ่ 460px</option>
+          <option value="0">ยืดเต็มจอ</option>
+        </select>
+        คอลัมน์
+        <input id="mmCols" type="number" min="1" max="12" placeholder="auto" title="ปล่อยว่าง = คำนวณให้เอง"
+               style="width:64px; padding:6px 8px; font-size:12px">
+        ห่าง
+        <input id="mmGap" type="number" min="0" max="60" value="0" title="ระยะห่างระหว่างจอ (px)"
+               style="width:60px; padding:6px 8px; font-size:12px">
+      </span>
+      <button class="btn btn-primary" onclick="mumuOpenAllMachines()" title="สั่งเปิด MuMu ทุกจอ ของทุกเครื่องพร้อมกัน (กดทีเดียว)">▶️ เปิด MuMu ทุกจอ ทุกเครื่อง</button>
+      <button class="btn btn-primary" onclick="mumuArrangeAll()">🔲 เรียงจอทุกเครื่อง</button>
+      <button class="btn" onclick="mumuMinimizeAll()">🗕 พับทุกแอป ทุกเครื่อง</button>
       <button class="btn btn-danger" onclick="mumuCloseAll()">⛔ ปิด MuMu ทุกเครื่อง</button>
     </div>
+    <div id="mmProg" class="mm-prog" style="display:none">
+      <div class="mm-prog-top"><span id="mmProgMsg"></span><span id="mmProgPct" style="color:var(--text-dim)"></span></div>
+      <div class="mm-prog-track"><div id="mmProgBar" class="mm-prog-bar"></div></div>
+    </div>
     <div class="mumu-grid">${cards}</div>`;
+  // คืนค่าขนาดจอที่เคยเลือกไว้ ให้ตรงกับที่ปุ่มลัดบนแถบบนสุดใช้อยู่
+  const sizeSel = document.getElementById('mmSize');
+  const savedSize = localStorage.getItem(MM_SIZE_KEY);
+  if (sizeSel && savedSize !== null && [...sizeSel.options].some(o => o.value === savedSize)) {
+    sizeSel.value = savedSize;
+  }
 }
 
 async function mumuLoad(i) {
@@ -3366,20 +3760,46 @@ async function mumuLoad(i) {
   const body = document.getElementById('mm_body_' + i);
   document.getElementById('mm_status_' + i).innerHTML = '';
   body.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังโหลดรายชื่อจอ...</span>';
-  const res = await mumuReq(a.agent_id, 'list', []);
+  // เครื่องหลายจอ + รันบอทอยู่ MuMuManager ตอบช้า รอได้นานขึ้น (ให้มากกว่าฝั่ง agent)
+  const res = await mumuReq(a.agent_id, 'list', [], {}, 150000);
   if (res.error) { body.innerHTML = `<span style="color:var(--danger); font-size:12px">❌ ${escHtml(res.error)}</span>`; return; }
   const insts = res.instances || [];
   if (!insts.length) { body.innerHTML = '<span style="color:var(--warning); font-size:12px">ไม่พบ instance</span>'; return; }
-  body.innerHTML = '<div style="display:flex; flex-wrap:wrap; gap:8px">' +
-    insts.map(ins => `<label class="mumu-inst" title="${ins.running ? 'กำลังเปิดอยู่' : 'ปิดอยู่'}">
+  const running = insts.filter(x => x.running).length;
+  // หัวลิสต์: จำนวนจอ + เปิดกี่จอ + ปุ่มเลือกทุกจอ (ติ๊กทีเดียวทั้งการ์ด)
+  const head = `<div class="mumu-inst-head">
+      <span>🖥️ <b>${insts.length}</b> จอ · <span style="color:var(--success)">🟢 ${running} เปิด</span></span>
+      <label class="mumu-selall" title="ติ๊ก/ยกเลิกทุกจอในเครื่องนี้">
+        <input type="checkbox" onchange="mmToggleAll(${i}, this.checked)"> เลือกทุกจอ
+      </label>
+    </div>`;
+  // ชิปกระชับ: โชว์ #เลขจอ เด่นๆ (ชื่อเต็มอยู่ใน tooltip) ลงได้หลายอันต่อแถว การ์ดจะได้ไม่ยาว
+  const chips = insts.map(ins => `<label class="mumu-inst"
+      title="${escAttr(String(ins.name))}  ·  จอ #${escAttr(String(ins.index))}  ·  ${ins.running ? 'กำลังเปิดอยู่' : 'ปิดอยู่'}">
       <input type="checkbox" class="mm_chk_${i}" value="${escAttr(String(ins.index))}">
-      <span>${ins.running ? '🟢' : '⚪'} ${escHtml(String(ins.name))} <span style="color:var(--text-dim)">#${escHtml(String(ins.index))}</span></span>
-    </label>`).join('') + '</div>';
+      <span>${ins.running ? '🟢' : '⚪'} #${escHtml(String(ins.index))}</span>
+    </label>`).join('');
+  body.innerHTML = head + `<div class="mumu-inst-wrap">${chips}</div>`;
+}
+
+// ติ๊ก/ยกเลิกทุกจอในการ์ดเครื่องเดียว (ใช้กับปุ่ม "เปิดที่เลือก" / "ตั้งค่าจอ")
+function mmToggleAll(i, checked) {
+  document.querySelectorAll('.mm_chk_' + i).forEach(cb => { cb.checked = checked; });
 }
 
 async function mumuLoadAll() {
-  const n = (window._mumuAgents || []).length;
-  for (let i = 0; i < n; i++) await mumuLoad(i);   // ทำทีละเครื่อง กัน request ชนกัน
+  const agents = window._mumuAgents || [];
+  const n = agents.length;
+  if (!n) return;
+  mmProgress(`🔄 กำลังโหลดจอ... 0/<b>${n}</b> เครื่อง`, 0);
+  for (let i = 0; i < n; i++) {           // ทำทีละเครื่อง กัน request ชนกัน
+    const nm = agents[i].name || agents[i].hostname || agents[i].agent_id;
+    mmProgress(`🔄 กำลังโหลดจอ <b>${escHtml(nm)}</b> ... (เสร็จ ${i}/<b>${n}</b> เครื่อง)`,
+               Math.round(i * 100 / n));
+    await mumuLoad(i);
+  }
+  mmProgress(`✅ โหลดจอครบ <b>${n}</b> เครื่อง`, 100, 'var(--success)');
+  setTimeout(mmProgressHide, 6000);
 }
 
 async function mumuOpenSel(i) {
@@ -3421,6 +3841,59 @@ async function mumuCloseAll() {
       : `<span style="color:#22c55e">✅ ปิดแล้ว ${res.count || 0} process</span>`;
   }
   toast('สั่งปิด MuMu ทุกเครื่องแล้ว', 'success');
+}
+
+// ── แถบความคืบหน้าของหน้า MuMu (เปิดทุกจอ ฯลฯ) ──
+function mmProgress(msg, pct, color) {
+  const box = document.getElementById('mmProg');
+  if (!box) return;
+  box.style.display = '';
+  const m = document.getElementById('mmProgMsg'); if (m) m.innerHTML = msg;
+  const p = document.getElementById('mmProgPct'); if (p) p.textContent = pct >= 0 ? pct + '%' : '';
+  const bar = document.getElementById('mmProgBar');
+  if (bar) {
+    bar.style.width = Math.max(0, Math.min(100, pct < 0 ? 0 : pct)) + '%';
+    bar.style.background = color || 'var(--accent)';
+  }
+}
+function mmProgressHide() { const b = document.getElementById('mmProg'); if (b) b.style.display = 'none'; }
+
+// ▶️ เปิด MuMu "ทุกจอ" ของทุกเครื่องพร้อมกัน (กดทีเดียว) — ใช้ open_all ที่ agent มีอยู่แล้ว
+// เปิดหลายจอต่อเครื่อง booting ช้า จึงรอได้นาน (240 วิ/เครื่อง) แล้วค่อยรีเฟรชสถานะจอทีเดียว
+// มีแถบ progress บอกว่าเปิดไปกี่เครื่อง/รวมกี่จอแล้ว
+async function mumuOpenAllMachines() {
+  const agents = window._mumuAgents || [];
+  if (!agents.length) { toast('ยังไม่มีเครื่องลูกออนไลน์', 'info'); return; }
+  if (!confirm(`▶️ เปิด MuMu "ทุกจอ" ของทุกเครื่อง (${agents.length} เครื่อง) ?\nจอเยอะอาจใช้เวลาสักครู่`)) return;
+  let ok = 0, total = 0, failed = 0;
+  mmProgress(`▶️ กำลังเปิด MuMu ทุกจอ... 0/<b>${agents.length}</b> เครื่อง`, 0);
+  for (let i = 0; i < agents.length; i++) {
+    const a = agents[i];
+    const nm = a.name || a.hostname || a.agent_id;
+    const status = document.getElementById('mm_status_' + i);
+    if (status) status.innerHTML = '<span style="color:var(--accent)">⏳ กำลังเปิดทุกจอ...</span>';
+    mmProgress(`▶️ กำลังเปิด <b>${escHtml(nm)}</b> ... (เสร็จ ${i}/<b>${agents.length}</b> เครื่อง · รวม <b>${total}</b> จอ)`,
+               Math.round(i * 100 / agents.length));
+    const res = await mumuReq(a.agent_id, 'open_all', [], {}, 240000);
+    if (res.error) {
+      failed++;
+      if (status) status.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`;
+    } else {
+      ok++; total += (res.count || 0);
+      if (status) status.innerHTML = `<span style="color:#22c55e">✅ สั่งเปิด ${res.count || 0} จอแล้ว</span>`;
+    }
+    const doneN = i + 1, last = doneN === agents.length;
+    mmProgress(
+      `▶️ เปิดแล้ว <b>${doneN}</b>/<b>${agents.length}</b> เครื่อง · รวม <b>${total}</b> จอ`
+        + (failed ? ` · <span style="color:var(--danger)">พลาด ${failed}</span>` : ''),
+      Math.round(doneN * 100 / agents.length),
+      last ? (failed ? 'var(--warning)' : 'var(--success)') : 'var(--accent)');
+  }
+  // รีเฟรชสถานะจอทั้งหมดทีเดียว (ทำทีละเครื่องกัน request ชนกัน) หลังจอเริ่ม boot
+  setTimeout(() => { if (document.getElementById('mm_body_0')) mumuLoadAll(); }, 5000);
+  toast(`สั่งเปิด MuMu ทุกจอ: ${ok}/${agents.length} เครื่อง (รวม ${total} จอ)`,
+        ok === agents.length ? 'success' : 'info');
+  setTimeout(mmProgressHide, 9000);   // ซ่อนแถบหลังจบสักครู่
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -3614,14 +4087,29 @@ async function runStop(i, quiet) {
   // ส่งโปรเจกต์ไปด้วย เพื่อให้ agent กวาดฆ่า process จริงในโฟลเดอร์นั้นได้
   // แม้ตัว agent จะไม่ได้เป็นคนเปิดบอทเอง (เปิดจาก task scheduler / login.bat วนเอง)
   const res = await mcReq(a.agent_id, 'request_run_file',
-    { sub: 'stop', base_match: cfgStop.base, name: cfgStop.name }, 40000);
+    { sub: 'stop', base_match: cfgStop.base, name: cfgStop.name }, 120000);
   if (res.error) {
     if (el) el.innerHTML = `<span style="color:var(--danger); font-size:12px">❌ ${escHtml(res.error)}</span>`;
     if (!quiet) toast(res.error, 'error');
     return;
   }
-  if (el) el.innerHTML = `<span style="color:var(--text-dim); font-size:12px">⚪ หยุดแล้ว ${res.count || 0} งาน</span>`;
-  if (!quiet) toast(`หยุดแล้ว ${res.count || 0} งาน`, 'success');
+  const name = a.name || a.hostname || a.agent_id;
+  const stopped = res.count || 0;
+  const found = res.found || 0;
+  const errs = res.errors || [];
+  let msg, icon, color, kind;
+  if (errs.length) {                         // เจอโปรเซสแต่ฆ่าไม่สำเร็จ — บอกสาเหตุจริง
+    msg = `หยุดได้ ${stopped}/${found} — ${errs.join(' · ')}`;
+    icon = '❌'; color = 'var(--danger)'; kind = 'error';
+  } else if (stopped > 0) {
+    msg = `หยุดแล้ว ${stopped} งาน`;
+    icon = '⚪'; color = 'var(--success)'; kind = 'success';
+  } else {                                   // ไม่เจออะไรให้หยุดเลย
+    msg = res.note || 'ไม่พบโปรเซสที่กำลังรันอยู่ในโฟลเดอร์โปรเจกต์นี้';
+    icon = '⚠️'; color = 'var(--warning)'; kind = 'info';
+  }
+  if (el) el.innerHTML = `<span style="color:${color}; font-size:12px">${icon} ${escHtml(msg)}</span>`;
+  if (!quiet) toast(`${name}: ${msg}`, kind);
 }
 
 async function runStopAll() {
@@ -3675,6 +4163,8 @@ function mcSettings() {
     source: mcVal('mcSource') || 'server',
     name: mcVal('mcFile') || '',
     url: (mcVal('mcUrl') || '').trim(),
+    host: (mcVal('mcHost') || '').trim(),
+    hostFile: (mcVal('mcHostFile') || '').trim(),
     count: count,
     launch: lch ? lch.checked : true,
     close_first: cf ? cf.checked : true,
@@ -3684,11 +4174,49 @@ function mcSettings() {
 // สลับช่องกรอกตามแหล่งไฟล์ที่เลือก
 function mcToggleSource() {
   const s = mcVal('mcSource');
-  const srv = document.getElementById('mcSrcServer');
-  const lnk = document.getElementById('mcSrcLink');
-  if (srv) srv.style.display = s === 'server' ? '' : 'none';
-  if (lnk) lnk.style.display = s === 'server' ? 'none' : '';
+  const show = (id, on) => { const e = document.getElementById(id); if (e) e.style.display = on ? '' : 'none'; };
+  show('mcSrcServer', s === 'server');
+  show('mcSrcLink',   s === 'link');
+  show('mcSrcHost',   s === 'host');
+  show('mcHostHint',  s === 'host');
   mcSaveSettings();
+}
+
+// ถาม server ว่าเครื่องที่ IP นี้มีไฟล์อะไรให้ดึงบ้าง
+async function mcHostFiles() {
+  const host = (mcVal('mcHost') || '').trim();
+  const box = document.getElementById('mcHostHint');
+  if (!box) return;
+  if (!host) { box.innerHTML = '<span style="color:var(--warning)">ใส่ IP เครื่องต้นทางก่อน</span>'; return; }
+  box.innerHTML = '⏳ กำลังถาม...';
+  const d = await new Promise((resolve) => {
+    let done = false;
+    socket.once('host_files', (r) => { done = true; resolve(r || {}); });
+    socket.emit('request_host_files', { host: host });
+    setTimeout(() => { if (!done) resolve(null); }, 8000);
+  });
+  if (!d) { box.innerHTML = '<span style="color:var(--warning)">ถาม server ไม่สำเร็จ</span>'; return; }
+  if (d.error) { box.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(d.error)}</span>`; return; }
+  const fs = d.files || [];
+  const who = escHtml(d.name || host) + (d.online ? '' : ' <span style="color:var(--warning)">(ออฟไลน์อยู่)</span>');
+  if (!fs.length) {
+    box.innerHTML = `เครื่อง <b>${who}</b> — <span style="color:var(--warning)">ยังไม่มีไฟล์ที่โหลดครบ`
+      + ` ไฟล์ที่ยังโหลดไม่จบ (.part) ดึงไม่ได้ ต้องรอให้เครื่องนั้นโหลดจบก่อน</span>`;
+    return;
+  }
+  window._mcHostFiles = fs;
+  box.innerHTML = `เครื่อง <b>${who}</b> มี ${fs.length} ไฟล์พร้อมให้ดึง — กดเพื่อใส่ชื่อ: `
+    + fs.map((f, i) => `<a href="#" onclick="mcPickHostFile(${i});return false"`
+        + ` style="color:var(--accent)">${escHtml(f.name)} (${(f.size / 1073741824).toFixed(2)} GB)</a>`).join(' · ');
+}
+
+function mcPickHostFile(i) {
+  const f = (window._mcHostFiles || [])[i];
+  const el = document.getElementById('mcHostFile');
+  if (!f || !el) return;
+  el.value = f.name;
+  mcSaveSettings();
+  toast('ใส่ชื่อไฟล์ให้แล้ว: ' + f.name, 'success');
 }
 
 // ขอรายชื่อไฟล์ backup ที่วางไว้บน server
@@ -3713,9 +4241,18 @@ async function mcLoadServerFiles(selected) {
     if (hint) hint.innerHTML = `ยังไม่มีไฟล์ในโฟลเดอร์ <code>${escHtml(d.folder || 'mumu-backup')}</code> — เอาไฟล์ .mumudata (หรือ .zip) ไปวางในโฟลเดอร์นี้ที่เครื่อง server แล้วกดรีเฟรช`;
     return;
   }
-  sel.innerHTML = files.map(f =>
-    `<option value="${escAttr(f.name)}" ${f.name === selected ? 'selected' : ''}>${escHtml(f.name)} (${(f.size / 1073741824).toFixed(2)} GB)</option>`).join('');
-  if (hint) hint.innerHTML = `พบ ${files.length} ไฟล์ในโฟลเดอร์ <code>${escHtml(d.folder || '')}</code> · เครื่องลูกจะโหลดจาก server ผ่าน LAN (เร็วกว่าและไม่ติดโควต้า)`;
+  sel.innerHTML = files.map(f => {
+    const gb = (f.size / 1073741824).toFixed(2);
+    const where = f.source === 'peer' ? ` — 📡 อยู่บนเครื่องลูก ${f.peers} เครื่อง` : '';
+    return `<option value="${escAttr(f.name)}" ${f.name === selected ? 'selected' : ''}>${escHtml(f.name)} (${gb} GB)${where}</option>`;
+  }).join('');
+  if (hint) {
+    const nPeer = files.filter(f => f.source === 'peer').length;
+    const nSrv = files.length - nPeer;
+    hint.innerHTML = `พบ ${nSrv} ไฟล์บน server <code>${escHtml(d.folder || '')}</code>`
+      + (nPeer ? ` · อีก ${nPeer} ไฟล์อยู่บนเครื่องลูกแล้ว (📡 เลือกได้เลย ไม่ต้องเอาเข้า server)` : '')
+      + ` · เครื่องลูกจะดูดจากเพื่อนวง LAN เดียวกันก่อนเสมอ ไม่ออกเน็ตนอก ไม่ติดโควต้า`;
+  }
 }
 
 function mcSaveSettings() {
@@ -3782,15 +4319,26 @@ function openMumuCloneDashboard() {
       <div class="pick-head">
         <span class="pick-title">⚙️ ตั้งค่า — เลือกไฟล์ .mumudata (หรือ .zip ที่มี .mumudata ข้างใน) ที่จะให้ทุกเครื่องเอาไป restore</span>
       </div>
+      <div id="mcHostHint" style="font-size:12px; color:var(--text-dim); margin-bottom:8px; display:${cfg.source === 'host' ? '' : 'none'}">
+        กด "🔍 ดูไฟล์" เพื่อดูว่าเครื่องปลายทางมีไฟล์อะไรที่โหลดครบแล้วบ้าง
+      </div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">
         <select id="mcSource" class="btn project-select" style="${inputStyle}" onchange="mcToggleSource()">
           <option value="server" ${cfg.source !== 'link' ? 'selected' : ''}>📁 ไฟล์บน server (แนะนำ)</option>
           <option value="link" ${cfg.source === 'link' ? 'selected' : ''}>🔗 ลิงก์ภายนอก</option>
+          <option value="host" ${cfg.source === 'host' ? 'selected' : ''}>📡 ดึงจากเครื่องที่ระบุ IP</option>
         </select>
-        <span id="mcSrcServer" style="flex:1; min-width:260px; ${cfg.source === 'link' ? 'display:none' : ''}">
+        <span id="mcSrcServer" style="flex:1; min-width:260px; ${cfg.source === 'server' ? '' : 'display:none'}">
           <select id="mcFile" class="btn project-select" style="${inputStyle}; width:100%" onchange="mcSaveSettings()">
             <option value="">— กำลังโหลดรายชื่อไฟล์ —</option>
           </select>
+        </span>
+        <span id="mcSrcHost" style="flex:1; min-width:380px; display:${cfg.source === 'host' ? 'flex' : 'none'}; gap:8px">
+          <input type="text" id="mcHost" class="dash-search" style="flex:0 0 190px"
+                 placeholder="100.73.104.54 (หรือ ip:port)" value="${escAttr(cfg.host || '')}" oninput="mcSaveSettings()">
+          <input type="text" id="mcHostFile" class="dash-search" style="flex:1; min-width:150px"
+                 placeholder="ชื่อไฟล์ เช่น pes.mumudata" value="${escAttr(cfg.hostFile || '')}" oninput="mcSaveSettings()">
+          <button class="btn" style="white-space:nowrap" onclick="mcHostFiles()">🔍 ดูไฟล์</button>
         </span>
         <span id="mcSrcLink" style="flex:1; min-width:260px; ${cfg.source === 'link' ? '' : 'display:none'}">
           <input type="text" id="mcUrl" class="dash-search" style="width:100%" placeholder="https://drive.google.com/file/d/... หรือลิงก์ดาวน์โหลดตรง" value="${escAttr(cfg.url)}" oninput="mcSaveSettings()">
@@ -3971,7 +4519,20 @@ function mcRenderStatus(i, res) {
 // ตรวจว่าเลือกไฟล์/ลิงก์ครบหรือยัง คืนข้อความเตือนถ้ายังไม่ครบ
 function mcMissing(s) {
   if (s.source === 'server') return s.name ? '' : 'ยังไม่ได้เลือกไฟล์ backup บน server';
+  if (s.source === 'host') {
+    if (!s.host) return 'ยังไม่ได้ใส่ IP เครื่องต้นทาง';
+    if (!s.hostFile) return 'ยังไม่ได้ใส่ชื่อไฟล์ที่จะดึง';
+    return '';
+  }
   return s.url ? '' : 'ยังไม่ได้วางลิงก์ดาวน์โหลด';
+}
+
+// โหมด host ใช้ชื่อไฟล์จากช่องที่พิมพ์เอง ไม่ใช่จากดรอปดาวน์ไฟล์บน server
+function mcPayload(s) {
+  return { sub: 'start', source: s.source,
+           name: s.source === 'host' ? s.hostFile : s.name,
+           host: s.host, url: s.url, count: s.count,
+           launch: s.launch, close_first: s.close_first };
 }
 
 async function mcStart(i, quiet) {
@@ -3983,9 +4544,7 @@ async function mcStart(i, quiet) {
   mcSaveSettings();
   const el = document.getElementById('mc_status_' + i);
   if (el) el.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังสั่งงาน...</span>';
-  const res = await mcReq(a.agent_id, 'request_mumu_clone',
-    { sub: 'start', source: s.source, name: s.name, url: s.url, count: s.count,
-      launch: s.launch, close_first: s.close_first }, 30000);
+  const res = await mcReq(a.agent_id, 'request_mumu_clone', mcPayload(s), 30000);
   if (res.error) {
     if (el) el.innerHTML = `<span style="color:var(--danger); font-size:12px">❌ ${escHtml(res.error)}</span>`;
     if (!quiet) toast(`${a.name || a.hostname || a.agent_id}: ${res.error}`, 'error');
@@ -4000,7 +4559,9 @@ async function mcStartAll() {
   if (miss) { toast(miss, 'error'); return; }
   const idxs = mcIncluded();
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
-  const src = s.source === 'server' ? `ไฟล์บน server: ${s.name}` : 'ลิงก์ภายนอก';
+  const src = s.source === 'server' ? `ไฟล์บน server: ${s.name}`
+          : s.source === 'host'   ? `ดึงจากเครื่อง ${s.host} · ไฟล์ ${s.hostFile}`
+          : 'ลิงก์ภายนอก';
   if (!confirm(`🚀 เริ่ม clone ${s.count} จอ/เครื่อง ที่ ${idxs.length} เครื่อง ?\n${src}\nแต่ละเครื่องจะโหลดไฟล์เองแล้ว restore อัตโนมัติ`)) return;
   _mcBulkBusy = true;
   for (let n = 0; n < idxs.length; n++) {
@@ -4945,6 +5506,11 @@ let liveScope = 'ALL';
 let livePage = 0;
 let liveGen = 0;              // generation กันมี loop ซ้อนกัน
 const LIVE_PAGE_SIZE = 10;
+// เลือก "All PCs" = แสดงทุกจอที่เชื่อมอยู่ในหน้าเดียว (ไม่แบ่งหน้า) ดูภาพรวมง่ายๆ
+// ถ้าเจาะดูเครื่องเดียว (ซูม) ก็มีจอเดียวอยู่แล้ว ขนาดหน้าไม่มีผล
+function liveEffPageSize() {
+  return liveScope === 'ALL' ? Math.max(1, liveFilteredAgents().length) : LIVE_PAGE_SIZE;
+}
 
 function liveFilteredAgents() {
   const all = agentsData || [];
@@ -4952,10 +5518,11 @@ function liveFilteredAgents() {
 }
 function liveCurrentPageAgents() {
   const agents = liveFilteredAgents();
-  const totalPages = Math.max(1, Math.ceil(agents.length / LIVE_PAGE_SIZE));
+  const ps = liveEffPageSize();
+  const totalPages = Math.max(1, Math.ceil(agents.length / ps));
   if (livePage >= totalPages) livePage = totalPages - 1;
   if (livePage < 0) livePage = 0;
-  return agents.slice(livePage * LIVE_PAGE_SIZE, (livePage + 1) * LIVE_PAGE_SIZE);
+  return agents.slice(livePage * ps, (livePage + 1) * ps);
 }
 
 function openLiveView() {
@@ -4970,7 +5537,7 @@ function openLiveView() {
 function renderLiveView() {
   const content = document.getElementById('contentArea');
   const all = liveFilteredAgents();
-  const totalPages = Math.max(1, Math.ceil(all.length / LIVE_PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(all.length / liveEffPageSize()));
   if (livePage >= totalPages) livePage = totalPages - 1;
   const pageAgents = liveCurrentPageAgents();
 
@@ -5008,7 +5575,7 @@ function renderLiveView() {
   content.innerHTML = `
     <div class="toolbar">
       <h2 style="flex:1; font-size:18px">🖥️ PC Monitor — Live View
-        <span style="color:var(--text-dim); font-weight:400; font-size:13px">(${all.length} PCs${zoomed ? '' : ` · ${LIVE_PAGE_SIZE}/หน้า`})</span></h2>
+        <span style="color:var(--text-dim); font-weight:400; font-size:13px">(${all.length} PCs${zoomed ? '' : ' · ทุกจอในหน้าเดียว'})</span></h2>
       ${livePagerButtons(totalPages, zoomed)}
       <select class="btn project-select" onchange="liveScope=this.value; livePage=0; renderLiveView()">${options}</select>
     </div>
@@ -5028,7 +5595,7 @@ function livePagerButtons(totalPages, zoomed) {
 }
 
 function liveGoPage(p) {
-  const totalPages = Math.max(1, Math.ceil(liveFilteredAgents().length / LIVE_PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(liveFilteredAgents().length / liveEffPageSize()));
   livePage = Math.min(Math.max(0, p), totalPages - 1);
   renderLiveView();
 }
