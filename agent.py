@@ -370,6 +370,10 @@ def _dispatch_command(data):
             handle_count_prefix_ids(req_id, payload)
         elif action == "export_folder":
             handle_export_folder(req_id, payload)
+        elif action == "balance_pull":
+            handle_balance_pull(req_id, payload)
+        elif action == "balance_push":
+            handle_balance_push(req_id, payload)
         elif action == "list_ids":
             handle_list_ids(req_id, payload)
         elif action == "rename_file":
@@ -1314,6 +1318,118 @@ def _resolve_input_folder(match, subpath="input-id"):
         return _norm_path(COOKIE_INPUT_PATH)
     base = _resolve_game_base(match)
     return os.path.join(base, subpath) if base else None
+
+
+# ═══════════════════════════════════════════════════════════
+#  BALANCE — แบ่งไฟล์ input-id ให้เฉลี่ยเท่าๆ กันข้ามเครื่อง
+#  balance_pull: zip N ไฟล์แรก -> อัปขึ้น server (job) -> ลบต้นทาง (ย้ายออก)
+#  balance_push: โหลด zip (job) จาก server -> แตกลงโฟลเดอร์ input-id (ย้ายเข้า)
+#  ส่งผ่าน server ที่ agent เกาะอยู่จริง (_active_urls) — รองรับ failover
+# ═══════════════════════════════════════════════════════════
+
+def handle_balance_pull(req_id, data):
+    def _go():
+        import zipfile, tempfile, requests
+        base = (data.get("base_match") or "pes").strip().lower()
+        subpath = (data.get("subpath") or "input-id").strip()
+        count = int(data.get("count") or 0)
+        job = "".join(ch for ch in str(data.get("job") or "") if ch.isalnum() or ch in "-_")
+        folder = _resolve_input_folder(base, subpath)
+        if not folder or not os.path.isdir(folder) or not job:
+            send_response(req_id, {"error": f"ไม่พบโฟลเดอร์ {subpath} หรือไม่มี job"}); return
+        try:
+            picks = [os.path.join(folder, f) for f in sorted(os.listdir(folder))
+                     if os.path.isfile(os.path.join(folder, f))][:max(0, count)]
+        except Exception as e:
+            send_response(req_id, {"error": str(e)}); return
+        if not picks:
+            send_response(req_id, {"success": True, "moved": 0}); return
+        tmp = tempfile.NamedTemporaryFile(prefix="bal_", suffix=".zip", delete=False); tmp.close()
+        try:
+            with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+                for f in picks:
+                    zf.write(f, os.path.basename(f))
+            ok, last = False, None
+            for u in _active_urls():
+                try:
+                    with open(tmp.name, "rb") as fh:
+                        r = requests.post(u.rstrip("/") + "/balance-upload",
+                                          params={"job": job, "secret": AGENT_SECRET},
+                                          data=fh, timeout=600)
+                    r.raise_for_status(); ok = True; break
+                except Exception as e:
+                    last = e
+            if not ok:
+                send_response(req_id, {"error": f"อัปโหลดไม่สำเร็จ: {str(last)[:80]}"}); return
+            deleted = 0
+            for f in picks:
+                try:
+                    os.remove(f); deleted += 1
+                except Exception:
+                    pass
+            send_response(req_id, {"success": True, "moved": deleted})
+        except Exception as e:
+            send_response(req_id, {"error": str(e)[:120]})
+        finally:
+            try:
+                os.remove(tmp.name)
+            except Exception:
+                pass
+    _spawn_with_client(_go)
+
+
+def handle_balance_push(req_id, data):
+    def _go():
+        import zipfile, tempfile, requests
+        base = (data.get("base_match") or "pes").strip().lower()
+        subpath = (data.get("subpath") or "input-id").strip()
+        job = "".join(ch for ch in str(data.get("job") or "") if ch.isalnum() or ch in "-_")
+        folder = _resolve_input_folder(base, subpath)
+        if not folder or not job:
+            send_response(req_id, {"error": f"ไม่พบโฟลเดอร์ {subpath} หรือไม่มี job"}); return
+        os.makedirs(folder, exist_ok=True)
+        content, last = None, None
+        for u in _active_urls():
+            try:
+                r = requests.get(u.rstrip("/") + f"/balance-download/{job}",
+                                 params={"secret": AGENT_SECRET}, timeout=600)
+                if r.status_code == 200 and r.content[:2] == b"PK":
+                    content = r.content; break
+                last = f"HTTP {r.status_code}"
+            except Exception as e:
+                last = e
+        if content is None:
+            send_response(req_id, {"error": f"โหลด zip ไม่สำเร็จ: {str(last)[:80]}"}); return
+        tmp = tempfile.NamedTemporaryFile(prefix="balr_", suffix=".zip", delete=False); tmp.close()
+        added = 0
+        try:
+            with open(tmp.name, "wb") as f:
+                f.write(content)
+            with zipfile.ZipFile(tmp.name, "r") as zf:
+                for item in zf.infolist():
+                    if item.is_dir():
+                        continue
+                    name = os.path.basename(item.filename)
+                    if not name:
+                        continue
+                    dest = os.path.join(folder, name)
+                    if os.path.exists(dest):     # กันชื่อซ้ำ ไม่ให้ทับ
+                        stem, ext = os.path.splitext(name); k = 2
+                        while os.path.exists(os.path.join(folder, f"{stem}__{k}{ext}")):
+                            k += 1
+                        dest = os.path.join(folder, f"{stem}__{k}{ext}")
+                    with open(dest, "wb") as out:
+                        out.write(zf.read(item.filename))
+                    added += 1
+            send_response(req_id, {"success": True, "added": added})
+        except Exception as e:
+            send_response(req_id, {"error": str(e)[:120]})
+        finally:
+            try:
+                os.remove(tmp.name)
+            except Exception:
+                pass
+    _spawn_with_client(_go)
 
 
 def handle_list_ids(req_id, data):

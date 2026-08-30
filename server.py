@@ -723,6 +723,76 @@ def handle_request_export(data):
 
 
 # ═══════════════════════════════════════════════════════════
+#  BALANCE — แบ่งไฟล์ input-id ให้เฉลี่ยข้ามเครื่อง (agent → server → agent)
+#  pull: เครื่องต้นทาง zip N ไฟล์ อัปมาที่ /balance-upload (job) แล้วลบต้นทาง
+#  push: เครื่องปลายทางโหลด zip จาก /balance-download/<job> แล้วแตกลง input-id
+# ═══════════════════════════════════════════════════════════
+BALANCE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_balance")
+
+
+def _balance_path(job):
+    safe = "".join(ch for ch in str(job) if ch.isalnum() or ch in "-_")
+    return os.path.join(BALANCE_DIR, safe + ".zip") if safe else None
+
+
+def _balance_cleanup(max_age=3600):
+    """ลบไฟล์แบ่งที่ค้างเกิน 1 ชม. กันดิสก์บวม"""
+    try:
+        now = time.time()
+        for f in os.listdir(BALANCE_DIR):
+            p = os.path.join(BALANCE_DIR, f)
+            if os.path.isfile(p) and now - os.path.getmtime(p) > max_age:
+                os.remove(p)
+    except Exception:
+        pass
+
+
+@app.route("/balance-upload", methods=["POST"])
+def balance_upload():
+    """รับ zip ไฟล์ที่ย้ายออกจากเครื่องต้นทาง (พักไว้รอเครื่องปลายทางมาโหลด)"""
+    if request.args.get("secret") != AGENT_SECRET:
+        return jsonify({"error": "bad secret"}), 403
+    path = _balance_path(request.args.get("job", ""))
+    if not path:
+        return jsonify({"error": "bad job"}), 400
+    os.makedirs(BALANCE_DIR, exist_ok=True)
+    _balance_cleanup()
+    with open(path, "wb") as f:
+        f.write(request.get_data())
+    logger.info(f"⚖️ balance upload: {os.path.basename(path)} ({os.path.getsize(path)} bytes)")
+    return jsonify({"ok": True})
+
+
+@app.route("/balance-download/<job>")
+def balance_download(job):
+    """ส่ง zip ที่พักไว้ให้เครื่องปลายทาง"""
+    if request.args.get("secret") != AGENT_SECRET:
+        return ("bad secret", 403)
+    path = _balance_path(job)
+    if not path or not os.path.isfile(path):
+        return ("ไม่พบไฟล์แบ่ง (อาจหมดอายุแล้ว)", 404)
+    return send_file(path, mimetype="application/zip")
+
+
+@socketio.on("request_balance")
+def handle_request_balance(data):
+    """สั่งเครื่องเดียว pull (ย้ายออก) หรือ push (ย้ายเข้า) หนึ่งก้อน"""
+    op = data.get("op")
+    action = "balance_pull" if op == "pull" else "balance_push"
+    payload = {
+        "base_match": data.get("base_match", "pes"),
+        "subpath": data.get("subpath", "input-id"),
+        "job": data.get("job"),
+        "count": int(data.get("count") or 0),
+    }
+    req_id = send_to_agent(data.get("agent_id"), action, payload, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{data.get('agent_id')}' is offline"})
+
+
+# ═══════════════════════════════════════════════════════════
 #  MuMu BACKUP — เสิร์ฟไฟล์ .mumudata จาก server ให้เครื่องลูกโหลดตรงๆ
 #  เอาไฟล์ไปวางในโฟลเดอร์ mumu-backup ข้างๆ server.py แล้วเลือกจากหน้าเว็บได้เลย
 #  (เร็วกว่า Google Drive มากถ้าอยู่วง LAN เดียวกัน และไม่ติดโควต้าดาวน์โหลด)
@@ -2448,12 +2518,12 @@ async function openFolderDash(kind) {
     const name = a.name || a.hostname || a.agent_id;
     const ir = await countFolderOnAgent(a.agent_id, cfg.subpath, cfg.base);
     if (ir && ir.error) {
-      perAgent.push({ name, error: ir.error });
+      perAgent.push({ name, agentId: a.agent_id, error: ir.error });
     } else {
       onlineCount++;
       const cnt = (ir && typeof ir.total === 'number') ? ir.total : 0;
       total += cnt;
-      perAgent.push({ name, count: cnt, exists: ir ? ir.exists : undefined });
+      perAgent.push({ name, agentId: a.agent_id, count: cnt, exists: ir ? ir.exists : undefined });
     }
   }
   renderFolderDash(kind, perAgent, agents.length, onlineCount, total);
@@ -2462,6 +2532,7 @@ async function openFolderDash(kind) {
 function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
   const cfg = FOLDER_DASH[kind];
   const content = document.getElementById('contentArea');
+  _lastFolderDash = { kind, perAgent, onlineCount, total };
   const cards = perAgent.map(p => {
     if (p.error) {
       return `<div class="mid-card" data-name="${escHtml(p.name)}">
@@ -2525,7 +2596,124 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
         ไฟล์ชื่อซ้ำกันข้ามเครื่องจะเติมชื่อเครื่องต่อท้ายให้ ไม่มีไฟล์หาย
       </div>
     </div>
+
+    <div class="pick-panel" style="margin-top:14px; border:1px solid var(--accent)">
+      <div class="pick-head">
+        <span class="pick-title">⚖️ แบ่งไฟล์ ${escHtml(cfg.label)} ให้พอดี
+          <span style="color:var(--text-dim); font-weight:400">— เกลี่ยไฟล์ให้ทุกเครื่องมีเท่าๆ กัน (ย้ายข้ามเครื่องตรงๆ)</span></span>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <span id="balHint" style="font-size:12px; color:var(--text-secondary)">
+          ${onlineCount >= 2 ? ('เป้าหมาย ~' + Math.floor(total / Math.max(1, onlineCount)).toLocaleString() + ' ไฟล์/เครื่อง จาก ' + onlineCount + ' เครื่องที่พร้อม')
+                             : 'ต้องมีเครื่องพร้อมอย่างน้อย 2 เครื่อง'}
+        </span>
+        <button class="btn btn-primary" id="balBtn" onclick="runBalance('${kind}')" ${onlineCount >= 2 && total > 0 ? '' : 'disabled'}>
+          ⚖️ แบ่งไฟล์ให้พอดี</button>
+      </div>
+      <div id="balProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="balMsg" style="color:var(--text-secondary)"></span>
+          <span id="balPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="balBar" style="width:0%"></div></div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        ย้ายจริง (ไม่ใช่ก๊อป) — เครื่องที่มีเยอะจะโอนไฟล์ให้เครื่องที่มีน้อย จนทุกเครื่องเท่ากัน
+      </div>
+    </div>
   `;
+}
+
+// ⚖️ คำนวณแผนแบ่งไฟล์: ทุกเครื่องควรมีเท่าๆ กัน → moves [{from,to,count}]
+let _lastFolderDash = null;
+function computeBalancePlan(perAgent) {
+  const live = (perAgent || []).filter(p => p && !p.error && p.exists !== false && typeof p.count === 'number' && p.agentId);
+  const n = live.length;
+  if (n < 2) return { moves: [], live, target: 0, total: 0 };
+  const total = live.reduce((s, p) => s + p.count, 0);
+  const base = Math.floor(total / n);
+  const rem = total - base * n;
+  // เครื่องที่มีไฟล์เยอะกว่าได้เศษก่อน → ย้ายน้อยที่สุด
+  const order = live.slice().sort((a, b) => b.count - a.count);
+  const desired = new Map();
+  order.forEach((p, idx) => desired.set(p, base + (idx < rem ? 1 : 0)));
+  const givers = [], takers = [];
+  live.forEach(p => {
+    const d = p.count - desired.get(p);
+    if (d > 0) givers.push({ p, left: d });
+    else if (d < 0) takers.push({ p, need: -d });
+  });
+  const moves = [];
+  let gi = 0, ti = 0;
+  while (gi < givers.length && ti < takers.length) {
+    const g = givers[gi], t = takers[ti];
+    const c = Math.min(g.left, t.need);
+    if (c > 0) moves.push({ fromId: g.p.agentId, fromName: g.p.name, toId: t.p.agentId, toName: t.p.name, count: c });
+    g.left -= c; t.need -= c;
+    if (g.left <= 0) gi++;
+    if (t.need <= 0) ti++;
+  }
+  return { moves, live, target: base, rem, total };
+}
+
+async function runBalance(kind) {
+  const cfg = FOLDER_DASH[kind];
+  const dash = _lastFolderDash;
+  if (!dash || dash.kind !== kind) { alert('ข้อมูลหมดอายุ กด 🔄 รีเฟรชก่อน'); return; }
+  const plan = computeBalancePlan(dash.perAgent);
+  if (!plan.moves.length) { alert('ไฟล์เฉลี่ยดีอยู่แล้ว ไม่ต้องแบ่ง 👍'); return; }
+  const totalMove = plan.moves.reduce((s, m) => s + m.count, 0);
+  if (!confirm(`จะเกลี่ยไฟล์ ${cfg.label} ให้เท่าๆ กัน\n` +
+      `• เครื่องพร้อม: ${plan.live.length}\n` +
+      `• เป้าหมาย ~${plan.target.toLocaleString()} ไฟล์/เครื่อง\n` +
+      `• ย้ายทั้งหมด ${totalMove.toLocaleString()} ไฟล์ (${plan.moves.length} รอบ)\n\n` +
+      `⚠️ เป็นการ "ย้าย" จริง (ต้นทางจะลดลง) — เริ่มเลยไหม?`)) return;
+
+  const btn = document.getElementById('balBtn');
+  const prog = document.getElementById('balProg');
+  const bar = document.getElementById('balBar');
+  const msg = document.getElementById('balMsg');
+  const pct = document.getElementById('balPct');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ กำลังแบ่ง...'; }
+  if (prog) prog.style.display = 'block';
+  const setP = (i, text) => {
+    const p = Math.round(i / plan.moves.length * 100);
+    if (bar) bar.style.width = p + '%';
+    if (pct) pct.textContent = p + '%';
+    if (msg) msg.textContent = text;
+  };
+  setP(0, 'เริ่ม...');
+
+  let okMoves = 0, movedFiles = 0;
+  const errs = [];
+  for (let i = 0; i < plan.moves.length; i++) {
+    const m = plan.moves[i];
+    const job = 'bal_' + Date.now().toString(36) + '_' + i;
+    setP(i, `[${i + 1}/${plan.moves.length}] ${m.fromName} → ${m.toName} (${m.count} ไฟล์)`);
+    // 1) ต้นทาง: zip N ไฟล์ อัปขึ้น server แล้วลบต้นทาง
+    const pull = await mcReq(m.fromId, 'request_balance',
+      { op: 'pull', job, count: m.count, base_match: cfg.base, subpath: cfg.subpath }, 600000);
+    if (pull.error || !pull.success) { errs.push(`${m.fromName}: ${pull.error || 'pull ล้มเหลว'}`); continue; }
+    const moved = pull.moved || 0;
+    if (!moved) continue;
+    // 2) ปลายทาง: โหลด zip มาแตกลง input-id (retry กันไฟล์ค้างบน server)
+    let push = { error: 'ยังไม่เริ่ม' };
+    for (let k = 0; k < 3; k++) {
+      push = await mcReq(m.toId, 'request_balance',
+        { op: 'push', job, base_match: cfg.base, subpath: cfg.subpath }, 600000);
+      if (push.success) break;
+    }
+    if (push.error || !push.success) {
+      errs.push(`${m.toName}: รับไฟล์ไม่สำเร็จ (${push.error || '-'}) — ไฟล์พักไว้บน server 1 ชม. job=${job}`);
+      continue;
+    }
+    okMoves++; movedFiles += (push.added || moved);
+  }
+  setP(plan.moves.length, `เสร็จ: ย้าย ${movedFiles.toLocaleString()} ไฟล์ (${okMoves}/${plan.moves.length} รอบ)`);
+  if (pct) pct.textContent = '100%';
+  if (errs.length) alert('⚠️ มีบางรอบไม่สำเร็จ:\n' + errs.slice(0, 8).join('\n'));
+  else alert(`✅ แบ่งไฟล์เสร็จ! ย้าย ${movedFiles.toLocaleString()} ไฟล์ ทุกเครื่องเท่าๆ กันแล้ว`);
+  setTimeout(() => openFolderDash(kind), 800);   // รีเฟรชนับใหม่
 }
 
 // โหลดโฟลเดอร์แบนๆ (fast-random / input-id / backup) ของทุกเครื่องรวมเป็น zip เดียว
