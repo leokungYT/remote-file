@@ -52,8 +52,11 @@ _cfg = _load_config()
 #   บางทีเป็น IP ภายใน — ไม่สม่ำเสมอ  ใช้ IP ตรงๆ จะวิ่งตรงผ่าน Tailscale เสมอ (นิ่ง)
 #   *** เปิด VPN ต้องตั้ง Bypasser ให้ Tailscale ข้าม VPN ด้วย (add tailscaled.exe) ***
 #   ถ้า Tailscale IP ของ server เปลี่ยน แก้บรรทัดนี้ (ดู `tailscale ip -4` ที่เครื่อง server)
-_TS_HOST_URL = {"server": "http://100.80.76.47:5000",
-                "nuuboy": "http://100.80.76.47:5000"}
+#   หมายเหตุ: ไม่ต้องใส่ backup IP ตายๆ ค้างไว้ (เช่น nuuboy ที่ไม่ได้รัน server) เพราะ
+#   จะทำให้ upload/operation ที่ไล่ SERVER_URLS ไปโดนตัวที่ตายแล้ว fail — failover ใช้
+#   discovery หา server ในวงเอาเอง (probe :5000) พอแล้ว
+_TS_HOST_URL = {"server": "http://100.80.76.47:5000",   # เครื่องแม่ (Tailscale: server)
+                "nuuboy": "http://100.80.76.47:5000"}   # ชี้แม่เหมือนกัน (dedup เหลือตัวเดียว)
 
 
 def _rewrite_ts_host(u):
@@ -180,6 +183,31 @@ def _any_connected():
 
 def _connected_count():
     return sum(1 for c in _clients.values() if c.connected)
+
+
+def _source_server_url():
+    """URL ของ server ที่ส่งคำสั่งนี้มา (map จาก _local.client) — None ถ้าไม่มี context"""
+    c = _current_client()
+    if c is not None:
+        for url, cl in _clients.items():
+            if cl is c:
+                return url
+    return None
+
+
+def _active_urls():
+    """server ที่ควรใช้ทำ HTTP op (upload/โหลด agent.py) เรียงตามความเหมาะ:
+       1) server ต้นทางของคำสั่ง  2) server ที่เกาะอยู่จริง  3) SERVER_URLS (fallback)
+       สำคัญตอน failover: agent เกาะ server ตัวใหม่ (discovery) แล้ว จะได้ไม่ยิงไป IP แม่ที่ตาย"""
+    seen, out = set(), []
+    src = _source_server_url()
+    cands = ([src] if src else []) + \
+            [u for u, ok in _client_connected.items() if ok] + list(SERVER_URLS)
+    for u in cands:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out or list(SERVER_URLS)
 
 
 def _disconnect_all():
@@ -1183,7 +1211,7 @@ def handle_export_folder(req_id, data):
 
         # อัปขึ้น server (ลองทุก URL จนกว่าจะสำเร็จ)
         import requests
-        urls = [upload_url] if upload_url else [u.rstrip("/") + "/export-upload" for u in SERVER_URLS]
+        urls = [upload_url] if upload_url else [u.rstrip("/") + "/export-upload" for u in _active_urls()]
         last_err = None
         ok = False
         for u in urls:
@@ -3824,7 +3852,7 @@ def _download_new_agent():
     here = os.path.dirname(os.path.abspath(__file__))
     dest = os.path.join(here, "agent.py")
     last_err = None
-    for url in SERVER_URLS:
+    for url in _active_urls():
         try:
             r = requests.get(url.rstrip("/") + "/agent.py", timeout=30)
             r.raise_for_status()
@@ -3901,7 +3929,7 @@ def _startup_autoupdate():
     changed = False
     try:
         import requests
-        for url in SERVER_URLS:   # ลองทีละ server จนกว่าจะเจอที่ตอบได้
+        for url in _active_urls():   # ลองทีละ server (ต้นทาง/เกาะอยู่ก่อน) จนกว่าจะเจอที่ตอบได้
             try:
                 r = requests.get(url.rstrip("/") + "/agent.py", timeout=8)
                 if r.status_code != 200 or not r.content:
@@ -3960,14 +3988,94 @@ def _connect_loop(url, client):
             time.sleep(min(300, RECONNECT_DELAY * (2 ** min(fails - 1, 6))))
 
 
+def _spawn_connect(url):
+    """เปิด thread เชื่อมต่อ server 1 ตัว (กันซ้ำ — ถ้าต่อ url นี้อยู่แล้วไม่ทำใหม่)"""
+    if not url or url in _clients:
+        return False
+    client = _make_client(url)
+    _clients[url] = client
+    _client_connected[url] = False
+    threading.Thread(target=_connect_loop, args=(url, client),
+                     daemon=True, name=f"conn:{url}").start()
+    return True
+
+
+def _tailscale_exe():
+    for p in (r"C:\Program Files\Tailscale\tailscale.exe",
+              r"C:\Program Files (x86)\Tailscale\tailscale.exe"):
+        if os.path.exists(p):
+            return p
+    return shutil.which("tailscale")
+
+
+def _discover_server_urls(timeout_each=3, workers=12):
+    """ค้นหาเครื่องในวง Tailscale ที่ "รัน server ของเราอยู่" (ตอบ /agent.py ที่ :5000)
+       คืน list ['http://<ip>:5000', ...] — รัน start_server.bat เครื่องไหนก็เจอ
+       (เช็ก marker ของ agent.py กันไปเจอบริการอื่นที่บังเอิญเปิด :5000)"""
+    ts = _tailscale_exe()
+    if not ts:
+        return []
+    try:
+        out, _ = _run_hidden([ts, "status"], timeout=15)
+    except Exception:
+        return []
+    import re
+    ips = []
+    for line in (out or "").splitlines():
+        m = re.match(r"\s*(100\.\d+\.\d+\.\d+)\s+\S", line)
+        if m and "offline" not in line.lower():
+            ips.append(m.group(1))
+    if not ips:
+        return []
+    import requests
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def probe(ip):
+        try:
+            r = requests.get(f"http://{ip}:5000/agent.py", timeout=timeout_each)
+            # marker อยู่ท้ายไฟล์ ต้องเช็กทั้ง content (เครื่องที่ไม่ใช่ server จะ refuse เร็ว ไม่โหลด)
+            if r.status_code == 200 and b"RemoteFileManagerAgent_SingleInstance" in r.content:
+                return f"http://{ip}:5000"
+        except Exception:
+            pass
+        return None
+
+    found = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for f in as_completed([ex.submit(probe, ip) for ip in ips]):
+            try:
+                u = f.result()
+            except Exception:
+                u = None
+            if u:
+                found.append(u)
+    return found
+
+
+def _discover_and_connect_loop():
+    """ถ้าต่อ server ไหนไม่ได้เลย → ค้นหา server ในวง Tailscale มาต่อเอง
+       ทำให้ "รัน start_server.bat เครื่องไหนก็ได้ = เป็นเครื่องแม่" (แม่ดับ ยกไปรันเครื่องอื่น
+       agent เจอเองแล้วต่อกลับ)  ปกติ (ต่อแม่ได้อยู่) จะไม่ probe เลย — ไม่เปลือง"""
+    time.sleep(20)                      # ให้ตัว seed (แม่/สำรอง) ลองต่อก่อน
+    while True:
+        try:
+            if not _any_connected():    # ไม่มี server ไหนต่อติดเลย
+                for u in _discover_server_urls():
+                    if _spawn_connect(u):
+                        logger.info(f"🔎 เจอ server ในวง Tailscale: {u} — ต่อเพิ่ม")
+        except Exception as e:
+            logger.info(f"(discovery ข้าม: {e})")
+        time.sleep(45)
+
+
 def agent_loop():
-    """เชื่อมต่อทุก server พร้อมกัน (แต่ละเครื่องมี thread เชื่อมต่อของตัวเอง)"""
+    """เชื่อมต่อทุก server พร้อมกัน (แต่ละเครื่องมี thread เชื่อมต่อของตัวเอง)
+       + thread ค้นหา server ในวง (เผื่อแม่ดับแล้วยกไปรันเครื่องอื่น)"""
     for url in SERVER_URLS:
-        client = _make_client(url)
-        _clients[url] = client
-        _client_connected[url] = False
-        threading.Thread(target=_connect_loop, args=(url, client),
-                         daemon=True, name=f"conn:{url}").start()
+        _spawn_connect(url)
+    _spawn_connect("http://127.0.0.1:5000")   # เผื่อเครื่องนี้รัน server เอง (เป็นทั้ง server+agent)
+    threading.Thread(target=_discover_and_connect_loop, daemon=True,
+                     name="discover").start()
     # คง thread นี้ไว้ (thread เชื่อมต่อจริงเป็น daemon แยกต่างหาก)
     while True:
         time.sleep(3600)
