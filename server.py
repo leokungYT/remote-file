@@ -986,6 +986,20 @@ def serve_autoupdate_bat():
     return send_file(p, mimetype="text/plain", as_attachment=False)
 
 
+@app.route("/server.py")
+def serve_server_py():
+    """ให้เครื่องที่จะเป็นแม่ดาวน์โหลด server.py ตัวล่าสุด (ย้ายแม่ไปเครื่องอื่น)"""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py")
+    return send_file(p, mimetype="text/plain", as_attachment=False)
+
+
+@app.route("/update-server.bat")
+def serve_update_server_bat():
+    """ตัวช่วยย้ายแม่: รันที่เครื่องปลายทาง -> ดึง server.py ใหม่ + รีสตาร์ท server"""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update-server.bat")
+    return send_file(p, mimetype="text/plain", as_attachment=False)
+
+
 @app.route("/login", methods=["POST"])
 def login():
     password = request.form.get("password", "")
