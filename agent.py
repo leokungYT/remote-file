@@ -3516,13 +3516,15 @@ def _host_of(url):
 
 def _server_candidates(prefer=None):
     """เรียงลำดับ server ที่จะลองโหลดไฟล์:
-       1) ตัวที่สั่งงานเข้ามา  2) ตัวที่ socket ยังเชื่อมต่ออยู่  3) ที่เหลือ
-       (เดิมไล่ตามลำดับใน config ดื้อๆ เลยไปโดน server ที่ติดต่อไม่ได้ก่อน)"""
-    def rank(u):
-        if prefer and u == prefer:
-            return 0
-        return 1 if _client_connected.get(u) else 2
-    return sorted([u for u in SERVER_URLS if u], key=rank)
+       1) ตัวที่สั่งงานเข้ามา  2) แม่ที่ไลฟ์จริง (source/เชื่อมอยู่/discover เจอ)  3) SERVER_URLS
+       สำคัญตอนย้ายแม่: agent เกาะแม่ตัวใหม่ (เช่น discover เจอ) ที่ไม่ได้อยู่ใน SERVER_URLS
+       ก็ต้องเอามาโหลดไฟล์ได้ ไม่งั้นจะไปยิงแต่ IP แม่เก่าใน config ที่ตายแล้ว"""
+    seen, out = set(), []
+    for u in ([prefer] if prefer else []) + _active_urls() + list(SERVER_URLS):
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
 def _server_backup_url(name, prefer=None):
