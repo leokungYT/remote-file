@@ -123,6 +123,7 @@ DEFAULT_ALLOWED_PATHS = [
     "Desktop/pes",
     "Desktop/cookie-run",
     "Desktop/main",        # เกม Line Ranger
+    "Desktop/bot-tiket",   # โฟลเดอร์ bot-tiket (ส่งไฟล์ + dashboard + รัน start.bat)
 ]
 _env_allowed = os.environ.get("ALLOWED_PATHS", "").strip()
 _cfg_allowed = _cfg.get("allowed_paths")

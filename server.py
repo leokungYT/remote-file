@@ -2041,8 +2041,10 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openRangerDashboard()">🏹 Dashboard Line Ranger</button>
     <button class="btn" onclick="openRangerFindDashboard()">🔎 Line Ranger-Find</button>
     <button class="btn" onclick="openFastRandomDashboard()">🎲 fast-random</button>
+    <button class="btn" onclick="openBottiketDashboard()">🎫 Dashboard bot-tiket</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
     <button class="btn" onclick="openBroadcastBackup()">💾 ส่งเข้า backup (ทุกเครื่อง)</button>
+    <button class="btn" onclick="openBroadcastBottiket()">🎫 ส่งเข้า bot-tiket (ทุกเครื่อง)</button>
     <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
     <button class="btn" onclick="quickArrangeAll()" title="เรียงหน้าต่าง MuMu เป็นตารางเต็มจอ ทุกเครื่อง">🔲 เรียงจอ</button>
     <button class="btn" onclick="quickMinimizeAll()" title="ย่อทุกหน้าต่างลง taskbar ทุกเครื่อง">🗕 พับทุกแอป</button>
@@ -2484,12 +2486,14 @@ const FOLDER_DASH = {
   inputid: { subpath: 'input-id', base: 'pes', title: '📥 Dashboard input-id — ไฟล์ที่เหลือรายเครื่อง', label: 'input-id', reopen: 'openInputIdDashboard' },
   backup:  { subpath: 'backup',   base: 'main', title: '🗄️ Dashboard Backup — ไฟล์ backup รายเครื่อง (Line Ranger)', label: 'backup', reopen: 'openBackupDashboard' },
   fastrandom: { subpath: 'fast-random', base: 'pes', title: '🎲 Dashboard fast-random — รวมทุกเครื่อง', label: 'fast-random', reopen: 'openFastRandomDashboard' },
+  bottiket: { subpath: 'bot-tiket', base: 'bot-tiket', title: '🎫 Dashboard bot-tiket — ไฟล์รายเครื่อง', label: 'bot-tiket', reopen: 'openBottiketDashboard', runbat: 'start.bat' },
 };
-let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL' };
+let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL' };
 
 function openInputIdDashboard() { return openFolderDash('inputid'); }
 function openBackupDashboard() { return openFolderDash('backup'); }
 function openFastRandomDashboard() { return openFolderDash('fastrandom'); }
+function openBottiketDashboard() { return openFolderDash('bottiket'); }
 
 // นับไฟล์ในโฟลเดอร์ <base>/<subpath> ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
 function countFolderOnAgent(agentId, subpath, base) {
@@ -2635,7 +2639,75 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
         ย้ายจริง (ไม่ใช่ก๊อป) — เครื่องที่มีเยอะจะโอนไฟล์ให้เครื่องที่มีน้อย จนทุกเครื่องเท่ากัน
       </div>
     </div>
+
+    ${cfg.runbat ? `
+    <div class="pick-panel" style="margin-top:14px; border:1px solid var(--warning)">
+      <div class="pick-head">
+        <span class="pick-title">▶️ รัน <b>${escHtml(cfg.runbat)}</b> ทุกเครื่อง
+          <span style="color:var(--text-dim); font-weight:400">— สั่งเปิด/หยุด ${escHtml(cfg.runbat)} ในโฟลเดอร์ ${escHtml(cfg.base)} ของทุกเครื่อง (เหมือนดับเบิลคลิก)</span></span>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <span style="font-size:12px; color:var(--text-secondary)">รันบน ${totalMachines} เครื่อง (ทีละเครื่อง)</span>
+        <span style="display:flex; gap:8px">
+          <button class="btn" style="border-color:var(--danger); color:var(--danger)" id="rbStopBtn" onclick="runBatAll('${kind}', true)">⏹️ หยุดทุกเครื่อง</button>
+          <button class="btn btn-primary" id="rbBtn" onclick="runBatAll('${kind}', false)">▶️ รัน ${escHtml(cfg.runbat)} ทุกเครื่อง</button>
+        </span>
+      </div>
+      <div id="rbProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="rbProgMsg" style="color:var(--text-secondary)"></span>
+          <span id="rbPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="rbBar" style="width:0%"></div></div>
+      </div>
+    </div>` : ''}
   `;
+}
+
+// ▶️ รัน/หยุด .bat (เช่น start.bat) ในโฟลเดอร์ dashboard ทุกเครื่อง (ทีละเครื่อง กัน request_sent ชนกัน)
+async function runBatAll(kind, stop) {
+  const cfg = FOLDER_DASH[kind];
+  if (!cfg || !cfg.runbat) return;
+  const agents = (agentsData || []);
+  if (!agents.length) { toast('ไม่มีเครื่องออนไลน์', 'info'); return; }
+  const verb = stop ? 'หยุด' : 'รัน';
+  if (!confirm(`${stop ? '⏹️' : '▶️'} ${verb} ${cfg.runbat} ทุกเครื่อง (${agents.length} เครื่อง) ?`)) return;
+
+  const btn = document.getElementById('rbBtn');
+  const sbtn = document.getElementById('rbStopBtn');
+  const prog = document.getElementById('rbProg');
+  const bar = document.getElementById('rbBar');
+  const msg = document.getElementById('rbProgMsg');
+  const pct = document.getElementById('rbPct');
+  if (btn) btn.disabled = true;
+  if (sbtn) sbtn.disabled = true;
+  if (prog) prog.style.display = 'block';
+  const setP = (i, text) => {
+    const p = Math.round(i / agents.length * 100);
+    if (bar) bar.style.width = p + '%';
+    if (pct) pct.textContent = p + '%';
+    if (msg) msg.textContent = text;
+  };
+
+  let ok = 0, fail = 0;
+  const errs = [];
+  for (let i = 0; i < agents.length; i++) {
+    const a = agents[i];
+    const nm = a.name || a.hostname || a.agent_id;
+    setP(i, `[${i + 1}/${agents.length}] ${nm}`);
+    // start.bat อยู่ในโฟลเดอร์ subpath (เช่น bot-tiket/bot-tiket) ที่เดียวกับไฟล์ที่ส่งไป
+    const runName = (cfg.subpath && cfg.subpath !== cfg.runbat) ? (cfg.subpath + '/' + cfg.runbat) : cfg.runbat;
+    const r = await mcReq(a.agent_id, 'request_run_file',
+      { sub: stop ? 'stop' : 'start', base_match: cfg.base, name: runName, hidden: false, force: true }, 60000);
+    if (r && !r.error && (r.success || r.started || r.already_running || r.stopped)) ok++;
+    else { fail++; errs.push(`${nm}: ${(r && r.error) || 'ไม่ตอบ'}`); }
+  }
+  setP(agents.length, `เสร็จ: สำเร็จ ${ok} · ล้มเหลว ${fail}`);
+  if (pct) pct.textContent = '100%';
+  if (btn) btn.disabled = false;
+  if (sbtn) sbtn.disabled = false;
+  if (fail) alert(`⚠️ ${verb} ${cfg.runbat} — ล้มเหลว ${fail} เครื่อง:\n` + errs.slice(0, 8).join('\n'));
+  else toast(`✅ ${verb} ${cfg.runbat} ครบ ${ok} เครื่อง`, 'success');
 }
 
 // ⚖️ คำนวณแผนแบ่งไฟล์: ทุกเครื่องควรมีเท่าๆ กัน → moves [{from,to,count}]
@@ -5081,12 +5153,15 @@ const BC_TARGETS = {
             title: 'ส่งเข้า input-id — เลือกเกม + เครื่อง', game: 'cookie-run' },
   backup: { subpath: 'backup',   label: 'backup',   icon: '💾',
             title: 'ส่งเข้า backup — เลือกเกม + เครื่อง', game: 'main' },
+  bottiket: { subpath: 'bot-tiket', label: 'bot-tiket', icon: '🎫',
+            title: 'ส่งเข้า bot-tiket — ส่งครั้งแรกไปทุกเครื่อง', game: 'bot-tiket' },
 };
 let _bcTarget = 'input';
 function bcCfg() { return BC_TARGETS[_bcTarget] || BC_TARGETS.input; }
 
 function openBroadcastInput()  { return openBroadcastPanel('input'); }
 function openBroadcastBackup() { return openBroadcastPanel('backup'); }
+function openBroadcastBottiket() { return openBroadcastPanel('bottiket'); }
 
 function openBroadcastPanel(kind) {
   _bcTarget = BC_TARGETS[kind] ? kind : 'input';
@@ -5107,6 +5182,7 @@ function openBroadcastPanel(kind) {
         ${gameOpt('ro', '🗡️ RO')}
         ${gameOpt('cookie-run', '🍪 Cookie-Run')}
         ${gameOpt('main', '🎮 Line Ranger')}
+        ${gameOpt('bot-tiket', '🎫 bot-tiket')}
       </select>
       <button class="btn" onclick="updateSelectedAgents()" title="ดึงโค้ดใหม่จาก GitHub + รีสตาร์ท agent">⬆️ อัปเดต agent (เครื่องที่เลือก)</button>
       <button class="btn" style="border-color:var(--danger); color:var(--danger)" onclick="clearInputAll()">🗑️ Clear ${cfg.label} (เครื่องที่เลือก)</button>
