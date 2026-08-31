@@ -55,8 +55,7 @@ _cfg = _load_config()
 #   หมายเหตุ: ไม่ต้องใส่ backup IP ตายๆ ค้างไว้ (เช่น nuuboy ที่ไม่ได้รัน server) เพราะ
 #   จะทำให้ upload/operation ที่ไล่ SERVER_URLS ไปโดนตัวที่ตายแล้ว fail — failover ใช้
 #   discovery หา server ในวงเอาเอง (probe :5000) พอแล้ว
-_TS_HOST_URL = {"server": "http://100.80.76.47:5000",   # เครื่องแม่ (Tailscale: server)
-                "nuuboy": "http://100.80.76.47:5000"}   # ชี้แม่เหมือนกัน (dedup เหลือตัวเดียว)
+_TS_HOST_URL = {"server": "http://100.80.76.47:5000"}   # เครื่องแม่ (Tailscale: server)
 
 
 def _rewrite_ts_host(u):
@@ -4364,9 +4363,9 @@ def main():
     if SERVER_URLS == ["http://YOUR_SERVER_IP:5000"]:
         print("\n⚠️  กรุณาตั้งค่า server ก่อน!")
         print("   แก้ในไฟล์ config.json:")
-        print('   "server_urls": ["http://server:5000", "http://nuuboy:5000"]')
+        print('   "server_urls": ["http://server:5000"]')
         print("   หรือตั้ง environment variable:")
-        print('   set SERVER_URLS=http://server:5000,http://nuuboy:5000')
+        print('   set SERVER_URLS=http://server:5000')
         print()
         sys.exit(1)
 
