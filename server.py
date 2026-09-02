@@ -2494,7 +2494,7 @@ const FOLDER_DASH = {
 let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL' };
 
 function openInputIdDashboard() { return openFolderDash('inputid'); }
-function openBackupDashboard() { return openFolderDash('backup'); }
+function openBackupDashboard() { return openBackupRich(); }   // Backup โชว์ breakdown ข้างในแบบ PES (นับ .xml)
 function openFastRandomDashboard() { return openFolderDash('fastrandom'); }
 function openBottiketDashboard() { return openFolderDash('bottiket'); }
 
@@ -2981,6 +2981,177 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
 }
 
 // ═══════════════════════════════════════════════════════════
+//  DASHBOARD BACKUP — โชว์ข้างในโฟลเดอร์ main/backup เหมือน PES (นับไฟล์ .xml ตามชื่อฮีโร่)
+//  กดการ์ด = ดูรายเครื่อง + โหลดไฟล์ (ใช้ rfOpenDetail src='backup')
+// ═══════════════════════════════════════════════════════════
+const BACKUP_CFG = { subpath: 'backup', base: 'main', label: 'backup' };
+let _backupScope = 'ALL';
+let _backupCache = null;
+
+// นับไฟล์ .xml ในโฟลเดอร์ main/backup ของเครื่องนั้น ตามชื่อฮีโร่หน้าไฟล์ (ไม่ throw — คืน object เสมอ)
+function countBackupOnAgent(agentId) {
+  return new Promise((resolve) => {
+    let settled = false;
+    socket.once('request_sent', (data) => {
+      const rid = data.request_id;
+      socket.once('response_' + rid, (resp) => { settled = true; resolve(resp || {}); });
+    });
+    socket.emit('request_count_prefix_ids', {
+      agent_id: agentId, subpath: BACKUP_CFG.subpath, base_match: BACKUP_CFG.base,
+      exts: ['.xml'], by: 'filename',
+    });
+    setTimeout(() => { if (!settled) resolve({ error: 'timeout' }); }, 20000);
+  });
+}
+
+async function openBackupRich() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const allAgents = agentsData || [];
+  if (_backupScope !== 'ALL' && !allAgents.some(a => a.agent_id === _backupScope)) _backupScope = 'ALL';
+  const agents = _backupScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _backupScope);
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🗄️ Dashboard Backup — ไฟล์ .xml ในโฟลเดอร์ ${BACKUP_CFG.label}</h2>
+      ${pcSelectHtml(_backupScope, '_backupScope=this.value; openBackupRich()')}
+      <button class="btn btn-primary" onclick="openBackupRich()">🔄 รีเฟรช</button>
+    </div>
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+
+  if (!allAgents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+
+  const comboTotals = {};
+  const perAgent = [];
+  let grandTotal = 0, matchedTotal = 0, onlineCount = 0;
+
+  for (const a of agents) {
+    const name = a.name || a.hostname || a.agent_id;
+    const res = await countBackupOnAgent(a.agent_id);
+    if (!res || res.error) { perAgent.push({ name, error: String((res && res.error) || 'ไม่ตอบกลับ') }); continue; }
+    onlineCount++;
+    grandTotal += res.total_files || 0;
+    matchedTotal += res.matched_files || 0;
+    const combos = res.combos || {};
+    for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
+    perAgent.push({
+      name, total: res.total_files || 0, matched: res.matched_files || 0, exists: res.exists,
+      byGroup: { [BACKUP_CFG.label]: combos },   // เก็บ combo รายเครื่องไว้ให้หน้ารายละเอียดแจกแจง
+    });
+  }
+  // cache สำหรับกดการ์ดดูรายละเอียด (โครงเดียวกับ _rfCache — ใช้ชุดเดียวชื่อ 'backup')
+  _backupCache = {
+    groupCombos: { [BACKUP_CFG.label]: comboTotals },
+    groupFiles: { [BACKUP_CFG.label]: grandTotal },
+    perAgent,
+  };
+  renderBackupDash(comboTotals, grandTotal, matchedTotal, perAgent, agents.length, onlineCount);
+}
+
+function renderBackupDash(comboTotals, grandTotal, matchedTotal, perAgent, totalMachines, onlineCount) {
+  const content = document.getElementById('contentArea');
+  _folderScope['backup'] = _backupScope;   // ให้ปุ่มโหลด .zip (fdExport) ใช้ scope เดียวกัน
+
+  // combo ตามที่อยู่ในชื่อไฟล์จริง (kikoru+Kafka นับเป็นชุดเดียว)
+  const combos = Object.keys(comboTotals)
+    .map(k => ({ name: k, count: comboTotals[k] }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  // รวมรายชื่อ — ชื่อเดียวกันคนละ combo บวกกัน
+  const nameTotals = {}, nameCombos = {};
+  combos.forEach(c => c.name.split('+').map(s => s.trim()).filter(Boolean).forEach(n => {
+    nameTotals[n] = (nameTotals[n] || 0) + c.count;
+    nameCombos[n] = (nameCombos[n] || 0) + 1;
+  }));
+  const names = Object.keys(nameTotals).map(n => ({ name: n, count: nameTotals[n], combos: nameCombos[n] }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  const nameCards = names.length ? names.map(n => `
+    <div class="hero-card rg-card with-img clickable" data-name="${escHtml(n.name)}"
+         onclick="rfOpenDetail('name', '${escAttr(n.name)}', 'backup')" title="กดดูรายเครื่อง + โหลดไฟล์">
+      ${heroImgs(n.name)}
+      <div class="hero-name" title="${escHtml(n.name)}">${escHtml(n.name)}</div>
+      <div class="hero-count">${n.count.toLocaleString()}</div>
+      <div class="hero-sub">${n.combos} แบบ</div>
+    </div>`).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ยังไม่พบชื่อฮีโร่ในไฟล์ .xml</h3></div>';
+
+  const comboCards = combos.length ? combos.map(c => {
+    const parts = c.name.split('+').filter(Boolean);
+    return `<div class="hero-card rg-card with-img clickable${parts.length > 1 ? ' combo' : ''}" data-name="${escHtml(c.name)}"
+      onclick="rfOpenDetail('combo', '${escAttr(c.name)}', 'backup')" title="กดดูรายเครื่อง + โหลดไฟล์">
+      ${heroImgs(c.name)}
+      <div class="hero-name" title="${escHtml(c.name)}">${escHtml(c.name)}</div>
+      <div class="hero-count">${c.count.toLocaleString()}</div>
+      <div class="hero-sub">${parts.length > 1 ? parts.length + ' ชื่อ/ไฟล์' : 'ชื่อเดียว'}</div>
+    </div>`;
+  }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ .xml ที่มีชื่อฮีโร่</h3></div>';
+
+  const agentRows = perAgent.map(p => {
+    let right;
+    if (p.error) {
+      right = '<span style="color:var(--danger)">' + escHtml(p.error) + '</span>';
+    } else if (p.exists === false) {
+      right = '<span style="color:var(--warning)">ไม่พบโฟลเดอร์ ' + BACKUP_CFG.label + '</span>';
+    } else {
+      right = '<span title="ไฟล์ .xml ที่มีชื่อฮีโร่"><b style="color:var(--success)">' + (p.matched || 0).toLocaleString() + '</b> มีชื่อฮีโร่</span>'
+            + '<span style="color:var(--text-dim); margin:0 10px">·</span>'
+            + '<span style="color:var(--text-secondary)" title="ไฟล์ .xml ทั้งหมดในโฟลเดอร์ ' + BACKUP_CFG.label + '">🗂️ <b>' + (p.total || 0).toLocaleString() + '</b> ไฟล์ .xml</span>';
+    }
+    return '<div class="agent-stat"><span>🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
+  }).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🗄️ Dashboard Backup</h2>
+      ${pcSelectHtml(_backupScope, '_backupScope=this.value; openBackupRich()')}
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อ / combo..." oninput="filterRangerCards(this.value)">
+      <button class="btn btn-primary" onclick="openBackupRich()">🔄 รีเฟรช</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
+      <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ .xml ใน backup รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">.xml ที่มีชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${combos.length}</div></div>
+    </div>
+    <h3 style="margin:4px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ทุกเครื่อง <span style="color:var(--text-dim); font-weight:400">(กดชื่อเพื่อดูรายเครื่อง + โหลดไฟล์)</span></h3>
+    <div class="hero-grid big">${nameCards}</div>
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">แยกตามไฟล์ (combo) — ไฟล์ที่มี 2 ชื่อนับเป็นชุดเดียว</h3>
+    <div class="hero-grid big">${comboCards}</div>
+    <div id="rangerNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
+
+    <div class="pick-panel" style="margin-top:18px">
+      <div class="pick-head">
+        <span class="pick-title">📦 โหลดไฟล์ .xml ใน backup ทั้งหมดเป็น .zip ไฟล์เดียว
+          <span style="color:var(--text-dim); font-weight:400">— รวมจาก ${onlineCount} เครื่อง · ${grandTotal.toLocaleString()} ไฟล์</span></span>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer">
+          <input type="checkbox" id="fdMove" style="width:auto">
+          <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
+        </label>
+        <button class="btn btn-primary" id="fdBtn" onclick="fdExport('backup')" ${grandTotal ? '' : 'disabled'}>
+          📦 โหลดทั้งหมด (${grandTotal.toLocaleString()} ไฟล์)</button>
+      </div>
+      <div id="fdProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="fdMsg" style="color:var(--text-secondary)"></span>
+          <span id="fdPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="fdBar" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — จำนวนไฟล์ .xml ในโฟลเดอร์ ${BACKUP_CFG.label}</h3>
+    <div class="agent-stats">${agentRows}</div>
+  `;
+}
+
+// ═══════════════════════════════════════════════════════════
 //  หาตัว LINE RANGER — เหมือน Dashboard Line Ranger แต่แยกตามโฟลเดอร์ย่อยใน backup-id
 //  backup-id\ranger, backup-id\ranger(2), ... เลือกดูทีละชุดจาก dropdown
 //  แต่ละชุดมี combo ของตัวเอง ไม่ปนกัน
@@ -3074,6 +3245,8 @@ const DETAIL_SRC = {
   pes:    { cfg: () => ({ subpath: 'found-hero', base: 'pes', label: 'found-hero' }),
             mode: 'file', nameMode: 'file', scope: () => 'ALL',
             group: () => 'ALL', cache: () => _pesCache, unit: 'โฟลเดอร์' },
+  backup: { cfg: () => BACKUP_CFG, mode: 'file', nameMode: 'file', scope: () => _backupScope,
+            group: () => 'ALL', cache: () => _backupCache, unit: 'ชุด' },
 };
 let _detailSrc = 'ranger';
 
@@ -3176,8 +3349,8 @@ function rfExport(kind, key, src) {
   const cfg = S.cfg();
   const move = !!(document.getElementById('rfExportMove') || {}).checked;
   return rfRunExport({
-    // หน้า PES คัดเป็นรายไฟล์ (ชื่ออยู่ในชื่อไฟล์) ส่วน Line Ranger คัดเป็นโฟลเดอร์
-    mode: (src === 'pes') ? 'file' : kind,
+    // หน้า PES + Backup คัดเป็นรายไฟล์ (ชื่ออยู่ในชื่อไฟล์) ส่วน Line Ranger คัดเป็นโฟลเดอร์
+    mode: (src === 'pes' || src === 'backup') ? 'file' : kind,
     submode: (kind === 'name') ? 'name' : 'combo',
     key: key, move: move,
     subpath: cfg.subpath, base: cfg.base, scope: S.scope(),

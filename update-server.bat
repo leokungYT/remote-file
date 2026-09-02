@@ -1,13 +1,14 @@
 @echo off
 setlocal enabledelayedexpansion
-title Update RFM server.py from master (100.80.76.47)
+title Update RFM server.py from GitHub
 
 REM ================================================================
-REM  รันไฟล์นี้ที่เครื่อง pc_1 (Admin cmd) เพื่อดึง server.py ใหม่
-REM  จากเครื่องแม่ปัจจุบัน (100.80.76.47) แล้วรีสตาร์ท server ให้เอง
+REM  Run this on the MASTER pc (pc_1, Admin cmd) to pull the latest
+REM  server.py from GitHub and restart the server.
+REM  (GitHub instead of the old master 100.80.76.47 which is retired.)
 REM ================================================================
 
-set "MASTER=http://100.80.76.47:5000"
+set "MASTER=https://raw.githubusercontent.com/leokungYT/remote-file/main"
 
 REM --- หา repo (โฟลเดอร์ที่มี server.py + start_server.bat) ---
 set "REPO="
@@ -45,8 +46,8 @@ set "WEB_PASSWORD=nuuboyshop"
 set "SERVER_PORT=5000"
 start "RFM-Server" cmd /k python server.py
 
-echo [4/4] เสร็จ! เปิดเว็บ http://100.73.104.54:5000 (หรือ IP เครื่องนี้) - build ต้องเป็นวันนี้
-echo        พอ pc_1 ขึ้นแล้ว ค่อยบอกให้ปิดเครื่องแม่ (100.80.76.47) ได้เลย
+echo [4/4] Done! Open http://localhost:5000 on this pc - build (top-left) must be today.
+echo        Backup dashboard now shows the .xml breakdown inside like PES.
 echo.
 timeout /t 4 /nobreak >nul
 endlocal

@@ -2,10 +2,14 @@
 cd /d "%~dp0"
 
 :: ================= DEFAULT MASTER IP =================
-:: 100.73.104.54 = pc_1 (the master). Reachable by all PCs via Tailscale.
-:: NOTE: the master pc MUST keep WARP OFF (WARP breaks its Tailscale).
+:: 192.168.1.121 = pc_1 (the master) on the LOCAL LAN.
+:: Use the LAN IP (not Tailscale 100.73.104.54) because WARP/VPN on the
+:: bot PCs breaks Tailscale, but WARP does NOT capture 192.168.x (LAN),
+:: so the agent stays connected even while a bot has WARP ON.
+:: All bot PCs are on the 192.168.1.0/24 LAN with pc_1.
+:: NOTE: the master pc (pc_1) MUST keep WARP OFF.
 :: If the master ever changes, edit this one line only.
-set "DEFAULT_IP=100.73.104.54"
+set "DEFAULT_IP=192.168.1.121"
 :: ====================================================
 
 echo ==================================================
