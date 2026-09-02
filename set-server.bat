@@ -1,25 +1,36 @@
 @echo off
-chcp 65001 >nul
 cd /d "%~dp0"
-echo ================================================
-echo    ตั้งเครื่องแม่ (server) ที่ agent จะเกาะ
-echo ================================================
-echo    ตัวอย่าง IP ที่ใส่:
-echo      192.168.1.121   = IP วง LAN ของเครื่องแม่  (รอด WARP)
-echo      100.80.76.47    = Tailscale ของเครื่องแม่
+echo ==================================================
+echo    SET MASTER SERVER (that this agent connects to)
+echo ==================================================
+echo    Example:
+echo      192.168.1.121   = master LAN IP  (survives WARP)
+echo      100.80.76.47    = master Tailscale IP
 echo.
-set /p "SRVIP=พิมพ์ IP เครื่องแม่ แล้วกด Enter: "
-if "%SRVIP%"=="" echo (ยกเลิก - ไม่ได้ใส่ IP) & pause & exit /b
+set "SRVIP="
+set /p "SRVIP=Type master IP then press Enter: "
+if not defined SRVIP (
+    echo.
+    echo [CANCEL] no IP entered.
+    echo.
+    pause
+    goto :end
+)
 
+echo.
+echo Writing config.json ...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0set-server.ps1" -ip "%SRVIP%"
 
 echo.
-echo กำลังรีสตาร์ท agent ให้ใช้ค่าใหม่...
+echo Restarting agent ...
 powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'pythonw.exe' -and $_.CommandLine -like '*agent.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 start "" pythonw agent.py
 
 echo.
-echo [OK] เสร็จ! agent เกาะ http://%SRVIP%:5000 แล้ว
-echo      (ยังมี LAN auto-discovery + Funnel เป็นตัวสำรองอัตโนมัติด้วย)
-echo      ถ้า IP เป็นวง LAN -^> เปิด WARP ก็ยังเกาะได้
-pause
+echo [OK] Done. Agent now connects to http://%SRVIP%:5000
+echo      (LAN auto-discovery + Funnel are automatic backups too)
+echo.
+
+:end
+echo (press any key to close)
+pause >nul
