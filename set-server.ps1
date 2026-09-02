@@ -3,13 +3,21 @@ param(
     [Parameter(Mandatory=$true)][string]$ip,
     [string]$name
 )
+
+# --- ทำความสะอาด input: ตัด http:// https:// , เอาเฉพาะ host (ตัด path/slash และ :port) ---
+$h = $ip.Trim()
+$h = $h -replace '^\s*https?://', ''      # ตัด http:// หรือ https://
+$h = ($h -split '[/\\]')[0]                # เอาส่วนก่อน / หรือ \
+$h = ($h -split ':')[0]                    # เอาส่วนก่อน : (ตัด port ถ้าใส่มา)
+$h = $h.Trim()
+
 $p = Join-Path $PSScriptRoot 'config.json'
 if (Test-Path $p) {
     try { $c = Get-Content -Raw $p -ErrorAction Stop | ConvertFrom-Json } catch { $c = [pscustomobject]@{} }
 } else {
     $c = [pscustomobject]@{}
 }
-$url = "http://{0}:5000" -f $ip
+$url = "http://{0}:5000" -f $h
 $c | Add-Member -NotePropertyName server_urls -NotePropertyValue @($url) -Force
 if ($name) {
     $c | Add-Member -NotePropertyName name -NotePropertyValue $name -Force
