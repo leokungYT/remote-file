@@ -4179,6 +4179,7 @@ const RUN_PROJECTS = [
   { key: 'pes', label: '⚽ pes' },
   { key: 'main', label: '🏹 main (Line Ranger)' },
   { key: 'cookie-run', label: '🍪 cookie-run' },
+  { key: 'bot-tiket', label: '🎫 bot-tiket', file: 'bot-tiket\\run.bat' },
 ];
 
 function runCfg() {
@@ -4194,6 +4195,20 @@ function runCfg() {
 
 function runSaveCfg() {
   try { localStorage.setItem('runCfg', JSON.stringify(runCfg())); } catch (e) {}
+}
+
+function runOnProjectChange() {
+  // เปลี่ยนโปรเจกต์ → เติมไฟล์เริ่มต้นของโปรเจกต์นั้นให้อัตโนมัติ (เช่น bot-tiket -> bot-tiket\run.bat)
+  const sel = document.getElementById('runProject');
+  const fileEl = document.getElementById('runFile');
+  const proj = RUN_PROJECTS.find(p => p.key === (sel ? sel.value : ''));
+  if (proj && proj.file && fileEl) {
+    const defaults = ['login.bat'].concat(RUN_PROJECTS.map(p => p.file).filter(Boolean));
+    const cur = (fileEl.value || '').trim();
+    if (!cur || defaults.includes(cur)) fileEl.value = proj.file;
+  }
+  runSaveCfg();
+  runLoadFiles();
 }
 
 function runIncluded() {
@@ -4252,7 +4267,7 @@ function openRunFileDashboard() {
         <span class="pick-title">⚙️ เลือกโปรเจกต์และไฟล์ที่จะรัน (ไฟล์ต้องอยู่ในโฟลเดอร์โปรเจกต์ของเครื่องลูก)</span>
       </div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">
-        <select id="runProject" class="btn project-select" style="${inputStyle}" onchange="runSaveCfg(); runLoadFiles()">${projOpts}</select>
+        <select id="runProject" class="btn project-select" style="${inputStyle}" onchange="runOnProjectChange()">${projOpts}</select>
         <input type="text" id="runFile" list="runFileList" class="dash-search" style="flex:1; min-width:200px"
                placeholder="login.bat" value="${escAttr(cfg.name)}" oninput="runSaveCfg()">
         <datalist id="runFileList"></datalist>
