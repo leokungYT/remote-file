@@ -2489,7 +2489,7 @@ const FOLDER_DASH = {
   inputid: { subpath: 'input-id', base: 'pes', title: '📥 Dashboard input-id — ไฟล์ที่เหลือรายเครื่อง', label: 'input-id', reopen: 'openInputIdDashboard' },
   backup:  { subpath: 'backup',   base: 'main', title: '🗄️ Dashboard Backup — ไฟล์ backup รายเครื่อง (Line Ranger)', label: 'backup', reopen: 'openBackupDashboard' },
   fastrandom: { subpath: 'fast-random', base: 'pes', title: '🎲 Dashboard fast-random — รวมทุกเครื่อง', label: 'fast-random', reopen: 'openFastRandomDashboard' },
-  bottiket: { subpath: 'bot-tiket', base: 'bot-tiket', title: '🎫 Dashboard bot-tiket — ไฟล์รายเครื่อง', label: 'bot-tiket', reopen: 'openBottiketDashboard', runbat: 'start.bat' },
+  bottiket: { subpath: 'bot-tiket', filesub: 'bot-tiket\\backup', base: 'bot-tiket', title: '🎫 Dashboard bot-tiket — ไฟล์ backup รายเครื่อง (.xml)', label: 'bot-tiket backup', reopen: 'openBottiketDashboard', runbat: 'start.bat' },
 };
 let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL' };
 
@@ -2537,7 +2537,7 @@ async function openFolderDash(kind) {
   let total = 0, onlineCount = 0;
   for (const a of agents) {
     const name = a.name || a.hostname || a.agent_id;
-    const ir = await countFolderOnAgent(a.agent_id, cfg.subpath, cfg.base);
+    const ir = await countFolderOnAgent(a.agent_id, cfg.filesub || cfg.subpath, cfg.base);
     if (ir && ir.error) {
       perAgent.push({ name, agentId: a.agent_id, error: ir.error });
     } else {
@@ -2781,7 +2781,7 @@ async function runBalance(kind) {
     setP(i, `[${i + 1}/${plan.moves.length}] ${m.fromName} → ${m.toName} (${m.count} ไฟล์)`);
     // 1) ต้นทาง: zip N ไฟล์ อัปขึ้น server แล้วลบต้นทาง
     const pull = await mcReq(m.fromId, 'request_balance',
-      { op: 'pull', job, count: m.count, base_match: cfg.base, subpath: cfg.subpath }, 600000);
+      { op: 'pull', job, count: m.count, base_match: cfg.base, subpath: cfg.filesub || cfg.subpath }, 600000);
     if (pull.error || !pull.success) { errs.push(`${m.fromName}: ${pull.error || 'pull ล้มเหลว'}`); continue; }
     const moved = pull.moved || 0;
     if (!moved) continue;
@@ -2789,7 +2789,7 @@ async function runBalance(kind) {
     let push = { error: 'ยังไม่เริ่ม' };
     for (let k = 0; k < 3; k++) {
       push = await mcReq(m.toId, 'request_balance',
-        { op: 'push', job, base_match: cfg.base, subpath: cfg.subpath }, 600000);
+        { op: 'push', job, base_match: cfg.base, subpath: cfg.filesub || cfg.subpath }, 600000);
       if (push.success) break;
     }
     if (push.error || !push.success) {
@@ -2811,7 +2811,7 @@ function fdExport(kind) {
   const move = !!(document.getElementById('fdMove') || {}).checked;
   return rfRunExport({
     mode: 'flat', key: '', move: move,
-    subpath: cfg.subpath, base: cfg.base,
+    subpath: cfg.filesub || cfg.subpath, base: cfg.base,
     scope: _folderScope[kind],
     label: (move ? 'move_' : '') + cfg.label,
     fileName: (move ? 'move_' : '') + cfg.label + '.zip',
