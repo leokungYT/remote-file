@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 
 :: ================= DEFAULT MASTER IP =================
-:: ถ้าเครื่องแม่ย้าย IP ค่อยแก้บรรทัดนี้บรรทัดเดียว
+:: If the master ever changes IP, edit this one line only.
 set "DEFAULT_IP=192.168.1.121"
 :: ====================================================
 
@@ -11,17 +11,17 @@ echo    CONNECT AGENT TO MASTER
 echo    (default master = %DEFAULT_IP%)
 echo ==================================================
 echo.
-echo 1) Master IP  --  แค่กด Enter เพื่อใช้ %DEFAULT_IP%
+echo 1) Master IP  --  just press Enter to use %DEFAULT_IP%
 set "SRVIP=%DEFAULT_IP%"
 set /p "SRVIP=   [Enter = %DEFAULT_IP%] : "
 
 echo.
-echo 2) UNIQUE name for THIS pc  (ห้ามซ้ำเครื่องอื่น เช่น pc_15, pc_16)
+echo 2) UNIQUE name for THIS pc  (must differ on every PC, e.g. pc_15, pc_16)
 set "PCNAME="
 set /p "PCNAME=   Name : "
 if not defined PCNAME (
     echo.
-    echo [CANCEL] ยังไม่ได้ใส่ชื่อ - ยกเลิก
+    echo [CANCEL] no name entered.
     echo.
     goto :end
 )

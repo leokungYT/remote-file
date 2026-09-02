@@ -1,14 +1,15 @@
-# อัปเดต server_urls (+ ชื่อเครื่องถ้าใส่) ใน config.json — เก็บ field อื่นครบ. ถูกเรียกจาก set-server.bat
+# Update server_urls (and name if given) in config.json, keeping the other fields.
+# Called by set-server.bat
 param(
     [Parameter(Mandatory=$true)][string]$ip,
     [string]$name
 )
 
-# --- ทำความสะอาด input: ตัด http:// https:// , เอาเฉพาะ host (ตัด path/slash และ :port) ---
+# Clean the input: strip http:// or https:// , keep host only (drop path/slash and :port)
 $h = $ip.Trim()
-$h = $h -replace '^\s*https?://', ''      # ตัด http:// หรือ https://
-$h = ($h -split '[/\\]')[0]                # เอาส่วนก่อน / หรือ \
-$h = ($h -split ':')[0]                    # เอาส่วนก่อน : (ตัด port ถ้าใส่มา)
+$h = $h -replace '^\s*https?://', ''
+$h = ($h -split '[/\\]')[0]
+$h = ($h -split ':')[0]
 $h = $h.Trim()
 
 $p = Join-Path $PSScriptRoot 'config.json'
