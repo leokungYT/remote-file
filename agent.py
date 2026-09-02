@@ -4176,6 +4176,59 @@ def _discover_server_urls(timeout_each=3, workers=12):
     return found
 
 
+def _lan_subnets():
+    """/24 ของ IP LAN ส่วนตัวที่เครื่องนี้มี — เอาไว้สแกนหา server ในวงเดียวกัน
+       (LAN ไม่โดน VPN/WARP กิน เพราะ WARP ยกเว้น RFC1918 โดยดีฟอลต์)"""
+    import socket as _sock
+    subs = []
+    try:
+        for info in _sock.getaddrinfo(_sock.gethostname(), None, _sock.AF_INET):
+            ip = info[4][0]
+            try:
+                o2 = int(ip.split(".")[1])
+            except Exception:
+                o2 = 0
+            if ip.startswith("192.168.") or ip.startswith("10.") or (ip.startswith("172.") and 16 <= o2 <= 31):
+                sub = ".".join(ip.split(".")[:3])
+                if sub not in subs:
+                    subs.append(sub)
+    except Exception:
+        pass
+    return subs
+
+
+def _discover_lan_servers(timeout_each=1.0, workers=48):
+    """สแกน subnet /24 ในวง LAN หา server ของเรา (:5000 ที่ตอบ /agent.py + มี marker)
+       ใช้ตอน Tailscale ล่ม (เช่น WARP เปิด) — เกาะแม่ผ่าน LAN ได้ นิ่งกว่า Funnel เยอะ"""
+    subs = _lan_subnets()
+    if not subs:
+        return []
+    import requests
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def probe(ip):
+        try:
+            r = requests.get(f"http://{ip}:5000/agent.py", timeout=timeout_each)
+            if r.status_code == 200 and b"RemoteFileManagerAgent_SingleInstance" in r.content:
+                return f"http://{ip}:5000"
+        except Exception:
+            pass
+        return None
+
+    found = []
+    for sub in subs:
+        ips = [f"{sub}.{i}" for i in range(1, 255)]
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for f in as_completed([ex.submit(probe, ip) for ip in ips]):
+                try:
+                    u = f.result()
+                except Exception:
+                    u = None
+                if u and u not in found:
+                    found.append(u)
+    return found
+
+
 def _discover_and_connect_loop():
     """ถ้าต่อ server ไหนไม่ได้เลย → ค้นหา server ในวง Tailscale มาต่อเอง
        ทำให้ "รัน start_server.bat เครื่องไหนก็ได้ = เป็นเครื่องแม่" (แม่ดับ ยกไปรันเครื่องอื่น
@@ -4187,11 +4240,15 @@ def _discover_and_connect_loop():
                 for u in _discover_server_urls():
                     if _spawn_connect(u):
                         logger.info(f"🔎 เจอ server ในวง Tailscale: {u} — ต่อเพิ่ม")
-                # ยังไม่ติดอีก (เช่น VPN/WARP เปิด → Tailscale ใช้ไม่ได้) → เกาะแม่ผ่าน Funnel
-                # (public HTTPS รอด VPN). ต่อเฉพาะตอนนี้ พอ Tailscale กลับมา ตัวนี้ยังอยู่แต่ dedup ที่ server
+                # ยังไม่ติด (เช่น WARP เปิด → Tailscale ล่ม) → หา server ในวง LAN (นิ่งสุด + รอด WARP)
+                if not _any_connected():
+                    for u in _discover_lan_servers():
+                        if _spawn_connect(u):
+                            logger.info(f"🏠 เจอ server ในวง LAN: {u} — เกาะผ่าน LAN (นิ่ง + รอด WARP)")
+                # LAN ก็ไม่เจอ → ตัวสุดท้าย: Funnel (public HTTPS รอด WARP แต่ flap บ้าง)
                 if not _any_connected() and FUNNEL_URL:
                     if _spawn_connect(FUNNEL_URL):
-                        logger.info(f"🌐 Tailscale ล่ม/VPN เปิด — เกาะแม่ผ่าน Funnel: {FUNNEL_URL}")
+                        logger.info(f"🌐 Tailscale/LAN ล่ม — เกาะแม่ผ่าน Funnel: {FUNNEL_URL}")
         except Exception as e:
             logger.info(f"(discovery ข้าม: {e})")
         time.sleep(45)
