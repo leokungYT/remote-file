@@ -1,29 +1,27 @@
 @echo off
 cd /d "%~dp0"
+
+:: ================= DEFAULT MASTER IP =================
+:: ถ้าเครื่องแม่ย้าย IP ค่อยแก้บรรทัดนี้บรรทัดเดียว
+set "DEFAULT_IP=192.168.1.121"
+:: ====================================================
+
 echo ==================================================
-echo    SET MASTER SERVER + UNIQUE NAME for this PC
+echo    CONNECT AGENT TO MASTER
+echo    (default master = %DEFAULT_IP%)
 echo ==================================================
-echo    Master LAN IP example: 192.168.1.121  (survives WARP)
 echo.
-set "SRVIP="
-set /p "SRVIP=1) Type master IP then Enter: "
-if not defined SRVIP (
-    echo.
-    echo [CANCEL] no IP entered.
-    echo.
-    goto :end
-)
+echo 1) Master IP  --  แค่กด Enter เพื่อใช้ %DEFAULT_IP%
+set "SRVIP=%DEFAULT_IP%"
+set /p "SRVIP=   [Enter = %DEFAULT_IP%] : "
 
 echo.
-echo    IMPORTANT: give THIS pc a UNIQUE name (different on every PC),
-echo    otherwise 2 PCs with the same name show as ONE in the dashboard.
-echo    Example: pc_2  pc_3  pc_20
-echo.
+echo 2) UNIQUE name for THIS pc  (ห้ามซ้ำเครื่องอื่น เช่น pc_15, pc_16)
 set "PCNAME="
-set /p "PCNAME=2) Type UNIQUE name for this PC then Enter: "
+set /p "PCNAME=   Name : "
 if not defined PCNAME (
     echo.
-    echo [CANCEL] no name entered.
+    echo [CANCEL] ยังไม่ได้ใส่ชื่อ - ยกเลิก
     echo.
     goto :end
 )
@@ -38,8 +36,8 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $
 start "" pythonw agent.py
 
 echo.
-echo [OK] Done.  name=%PCNAME%   server=http://%SRVIP%:5000
-echo      (this PC should now appear as "%PCNAME%" in the dashboard)
+echo [OK] Done.   name=%PCNAME%   server=http://%SRVIP%:5000
+echo      (this PC should appear as "%PCNAME%" in the dashboard)
 echo.
 
 :end
