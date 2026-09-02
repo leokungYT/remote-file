@@ -2,8 +2,10 @@
 cd /d "%~dp0"
 
 :: ================= DEFAULT MASTER IP =================
-:: If the master ever changes IP, edit this one line only.
-set "DEFAULT_IP=192.168.1.121"
+:: 100.73.104.54 = pc_1 (the master). Reachable by all PCs via Tailscale.
+:: NOTE: the master pc MUST keep WARP OFF (WARP breaks its Tailscale).
+:: If the master ever changes, edit this one line only.
+set "DEFAULT_IP=100.73.104.54"
 :: ====================================================
 
 echo ==================================================
