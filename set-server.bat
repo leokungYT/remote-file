@@ -1,25 +1,36 @@
 @echo off
 cd /d "%~dp0"
 echo ==================================================
-echo    SET MASTER SERVER (that this agent connects to)
+echo    SET MASTER SERVER + UNIQUE NAME for this PC
 echo ==================================================
-echo    Example:
-echo      192.168.1.121   = master LAN IP  (survives WARP)
-echo      100.80.76.47    = master Tailscale IP
+echo    Master LAN IP example: 192.168.1.121  (survives WARP)
 echo.
 set "SRVIP="
-set /p "SRVIP=Type master IP then press Enter: "
+set /p "SRVIP=1) Type master IP then Enter: "
 if not defined SRVIP (
     echo.
     echo [CANCEL] no IP entered.
     echo.
-    pause
+    goto :end
+)
+
+echo.
+echo    IMPORTANT: give THIS pc a UNIQUE name (different on every PC),
+echo    otherwise 2 PCs with the same name show as ONE in the dashboard.
+echo    Example: pc_2  pc_3  pc_20
+echo.
+set "PCNAME="
+set /p "PCNAME=2) Type UNIQUE name for this PC then Enter: "
+if not defined PCNAME (
+    echo.
+    echo [CANCEL] no name entered.
+    echo.
     goto :end
 )
 
 echo.
 echo Writing config.json ...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0set-server.ps1" -ip "%SRVIP%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0set-server.ps1" -ip "%SRVIP%" -name "%PCNAME%"
 
 echo.
 echo Restarting agent ...
@@ -27,8 +38,8 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $
 start "" pythonw agent.py
 
 echo.
-echo [OK] Done. Agent now connects to http://%SRVIP%:5000
-echo      (LAN auto-discovery + Funnel are automatic backups too)
+echo [OK] Done.  name=%PCNAME%   server=http://%SRVIP%:5000
+echo      (this PC should now appear as "%PCNAME%" in the dashboard)
 echo.
 
 :end
