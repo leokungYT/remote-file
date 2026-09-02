@@ -101,6 +101,12 @@ def _parse_server_urls():
 
 SERVER_URLS = _parse_server_urls()
 SERVER_URL = SERVER_URLS[0]   # server หลัก (ใช้ตอนแสดงผล/auto-update)
+
+# Funnel สาธารณะของแม่ (HTTPS ผ่าน public internet) = "สำรอง" ตอน Tailscale ล่ม
+# เคสหลัก: เปิด Cloudflare WARP/VPN แล้ว VPN กินทราฟฟิก Tailscale จนเข้าแม่ตรงๆ (100.x) ไม่ได้
+# Funnel เป็น HTTPS ธรรมดา → รอด VPN. ต่อเฉพาะตอนไม่มี server ไหนต่อติดเลย (ประหยัด + กันซ้ำ)
+FUNNEL_URL = (os.environ.get("FUNNEL_URL") or _cfg.get("funnel_url")
+              or "https://server.tail8db58a.ts.net").strip().rstrip("/")
 AGENT_SECRET = os.environ.get("AGENT_SECRET") or _cfg.get("agent_secret") or "my-agent-secret-2024"
 AGENT_ID = os.environ.get("AGENT_ID") or _cfg.get("agent_id") or ""  # ปล่อยว่าง = ใช้ชื่อเครื่อง
 AGENT_NAME = os.environ.get("AGENT_NAME") or _cfg.get("name") or ""  # ชื่อที่แสดงในเว็บ (ปล่อยว่าง = ใช้ hostname)
@@ -4181,6 +4187,11 @@ def _discover_and_connect_loop():
                 for u in _discover_server_urls():
                     if _spawn_connect(u):
                         logger.info(f"🔎 เจอ server ในวง Tailscale: {u} — ต่อเพิ่ม")
+                # ยังไม่ติดอีก (เช่น VPN/WARP เปิด → Tailscale ใช้ไม่ได้) → เกาะแม่ผ่าน Funnel
+                # (public HTTPS รอด VPN). ต่อเฉพาะตอนนี้ พอ Tailscale กลับมา ตัวนี้ยังอยู่แต่ dedup ที่ server
+                if not _any_connected() and FUNNEL_URL:
+                    if _spawn_connect(FUNNEL_URL):
+                        logger.info(f"🌐 Tailscale ล่ม/VPN เปิด — เกาะแม่ผ่าน Funnel: {FUNNEL_URL}")
         except Exception as e:
             logger.info(f"(discovery ข้าม: {e})")
         time.sleep(45)

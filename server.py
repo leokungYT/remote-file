@@ -79,14 +79,10 @@ def handle_agent_register(data):
     agent_id = data.get("agent_id", f"agent-{len(agents)+1}")
     new_name = data.get("name", "")
 
-    # ลบเฉพาะ connection เก่าที่เป็น "เครื่องเดียวกันจริง" (agent_id + name ตรงกัน) กัน zombie
-    # แต่ไม่เตะเครื่องคนละชื่อที่ hostname/agent_id บังเอิญซ้ำกันออก
-    stale_sids = [sid for sid, info in agents.items()
-                  if info.get("agent_id") == agent_id and info.get("name", "") == new_name
-                  and sid != request.sid]
-    for sid in stale_sids:
-        agents.pop(sid, None)
-        logger.info(f"🧹 แทนที่ connection เก่าของ {agent_id}/{new_name} (sid {sid[:6]}…)")
+    # ไม่ลบ connection เก่าที่ agent_id ซ้ำ — เครื่องเดียวอาจเกาะ 2 ทางพร้อมกันได้
+    # (Tailscale ตรง + Funnel สำรองตอน VPN/WARP เปิด) เพื่อ redundancy
+    # ตัวซ้ำแสดงครั้งเดียวที่ get_agents_list (dedup ตาม agent_id) ส่วน sid ที่หลุดจริง
+    # จะโดน disconnect handler เตะออกเอง (zombie ค้างสั้นๆ จนถึง ping timeout ก็ถูก dedup บังไว้)
 
     agents[request.sid] = {
         "agent_id": agent_id,
@@ -432,6 +428,13 @@ def handle_screenshot_req(data):
 # ═══════════════════════════════════════════════════════════
 
 def get_agents_list():
+    # dedup ตาม agent_id — เครื่องเดียวอาจเกาะหลายทาง (Tailscale + Funnel) แสดงครั้งเดียว (ตัวที่ต่อล่าสุด)
+    latest = {}
+    for info in agents.values():
+        aid = info.get("agent_id")
+        cur = latest.get(aid)
+        if cur is None or info.get("connected_at", "") >= cur.get("connected_at", ""):
+            latest[aid] = info
     return [
         {
             "agent_id": info["agent_id"],
@@ -442,7 +445,7 @@ def get_agents_list():
             "connected_at": info["connected_at"],
             "allowed_paths": info.get("allowed_paths", []),
         }
-        for sid, info in agents.items()
+        for info in latest.values()
     ]
 
 
