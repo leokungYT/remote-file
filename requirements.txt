@@ -4,6 +4,7 @@
 # === สำหรับเครื่องหลัก (Server) ===
 flask==3.1.1
 flask-socketio==5.5.1
+simple-websocket==1.1.0   # ให้ server รับ WebSocket ได้ (ไม่มี = agent ผ่าน tunnel ใช้ polling อย่างเดียว)
 
 # === สำหรับเครื่องลูก (Agent) ===
 python-socketio[client]==5.12.1

@@ -15,3 +15,13 @@ _exports/
 mumu-backup/
 mumu-cache/
 _run_state.json
+
+# master tunnel (pc_1) - secret + runtime files, never commit
+github-token.txt
+cloudflare-token.txt
+tunnel-url.txt
+tunnel-fixed-url.txt
+master-tunnel.log
+cloudflared.log
+cloudflared.out.log
+*.bak

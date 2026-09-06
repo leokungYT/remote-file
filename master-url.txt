@@ -1,0 +1,9 @@
+# Remote File Manager - public entry of the master server ("pointer")
+#
+# This copy on branch main is only a template. The LIVE copy is on branch "pointer"
+# and is rewritten by master-tunnel.ps1 on the master pc every time its Cloudflare
+# quick tunnel gets a new hostname:
+#   https://raw.githubusercontent.com/leokungYT/remote-file/pointer/master-url.txt
+#
+# Agents read the first line that is not empty and does not start with '#'.
+# (agent.py: MASTER_POINTER_URL / _fetch_pointer_urls)

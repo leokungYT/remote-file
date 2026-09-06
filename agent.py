@@ -107,6 +107,38 @@ SERVER_URL = SERVER_URLS[0]   # server หลัก (ใช้ตอนแสด
 # Funnel เป็น HTTPS ธรรมดา → รอด VPN. ต่อเฉพาะตอนไม่มี server ไหนต่อติดเลย (ประหยัด + กันซ้ำ)
 FUNNEL_URL = (os.environ.get("FUNNEL_URL") or _cfg.get("funnel_url")
               or "https://server.tail8db58a.ts.net").strip().rstrip("/")
+
+# ทางเข้า "สาธารณะ" ของแม่ — ใช้เมื่อ Tailscale และ LAN ไปไม่ถึงเลย (เช่น WARP เปิดทั้งแม่ pc_1 และลูก)
+#   แม่รัน master-tunnel.ps1 (ติดตั้งด้วย setup-master-tunnel.bat) → เปิด Cloudflare quick tunnel มาที่ :5000
+#   แล้วเขียน URL ลง GitHub branch "pointer" ไฟล์ master-url.txt — URL ของ quick tunnel สุ่มใหม่ทุกครั้ง
+#   ที่ tunnel รีสตาร์ท จึง hardcode ไม่ได้ ลูกต้องอ่านจาก pointer ทุกครั้งที่หลุด
+#   (raw.githubusercontent.com และ Cloudflare เข้าถึงได้แม้ WARP เปิด — WARP ก็คือ Cloudflare เอง)
+#   ทำไมไม่ใช้ ngrok: แผนฟรีจำกัด 1 GB + 20k request/เดือน — socket.io 24 ชม. ของ 20+ เครื่องชนเพดานในไม่กี่วัน
+#   ทำไม Funnel ใช้ไม่ได้: Funnel ต้องพึ่ง Tailscale ของแม่ ซึ่ง WARP บนแม่ฆ่าทิ้ง (และโดเมนเป็นของเครื่องเก่า)
+#   ปิดได้ด้วย env MASTER_POINTER_URL= (ว่าง) หรือ config "master_pointer_url": ""
+_ptr = os.environ.get("MASTER_POINTER_URL")
+if _ptr is None:
+    _ptr = _cfg.get("master_pointer_url")
+if _ptr is None:
+    _ptr = "https://raw.githubusercontent.com/leokungYT/remote-file/pointer/master-url.txt"
+MASTER_POINTER_URL = str(_ptr).strip()
+
+
+def _url_list(raw):
+    """แปลง list หรือ string (คั่น , หรือ ;) เป็น list URL ที่สะอาด ไม่ซ้ำ คงลำดับ"""
+    if isinstance(raw, str):
+        raw = raw.replace(";", ",").split(",")
+    out = []
+    for u in (raw or []):
+        u = str(u).strip().rstrip("/")
+        if u and u not in out:
+            out.append(u)
+    return out
+
+
+# URL สำรองแบบตายตัว (ลองหลังสุด): env FALLBACK_URLS (คั่น ,) > config "fallback_urls" > [FUNNEL_URL]
+FALLBACK_URLS = (_url_list(os.environ.get("FALLBACK_URLS", "")) or _url_list(_cfg.get("fallback_urls"))
+                 or ([FUNNEL_URL] if FUNNEL_URL else []))
 AGENT_SECRET = os.environ.get("AGENT_SECRET") or _cfg.get("agent_secret") or "my-agent-secret-2024"
 AGENT_ID = os.environ.get("AGENT_ID") or _cfg.get("agent_id") or ""  # ปล่อยว่าง = ใช้ชื่อเครื่อง
 AGENT_NAME = os.environ.get("AGENT_NAME") or _cfg.get("name") or ""  # ชื่อที่แสดงในเว็บ (ปล่อยว่าง = ใช้ hostname)
@@ -223,6 +255,58 @@ def _disconnect_all():
                 c.disconnect()
         except Exception:
             pass
+
+
+def _drop_url(url):
+    """เลิกต่อ url นี้ถาวร (เช่น quick tunnel URL เก่าที่ตายไปแล้ว): ตัดการเชื่อมต่อ/ยกเลิก reconnect
+       และถอดออกจากทะเบียน — thread _connect_loop ของมันจะเห็น _rfm_stop แล้วจบตัวเอง"""
+    client = _clients.pop(url, None)
+    _client_connected.pop(url, None)
+    if client is None:
+        return
+    client._rfm_stop = True
+    try:
+        if client.connected:
+            client.disconnect()
+        else:
+            ab = getattr(client, "_reconnect_abort", None)
+            if ab is not None:
+                ab.set()      # ปลุก reconnect loop ภายในของ socketio ให้เลิกลอง
+    except Exception:
+        pass
+
+
+def _sleep_unless_stopped(client, secs):
+    """หลับตาม backoff แต่ตื่นทันทีถ้า client นี้ถูก _drop_url ไปแล้ว (ไม่ต้องรอจนครบ 5 นาที)"""
+    end = time.time() + secs
+    while time.time() < end and not getattr(client, "_rfm_stop", False):
+        time.sleep(min(2, max(0.1, end - time.time())))
+
+
+def _fetch_pointer_urls(timeout=8):
+    """อ่าน URL ทางเข้าสาธารณะของแม่จาก pointer (GitHub raw) — คืน [] ถ้าอ่านไม่ได้
+       รูปแบบไฟล์: บรรทัดละ URL, บรรทัดว่าง/ขึ้นต้น # = ข้าม
+       ใส่ cache-buster กัน CDN ของ raw.githubusercontent เสิร์ฟค่าเก่า (cache 5 นาที)"""
+    if not MASTER_POINTER_URL:
+        return []
+    try:
+        import requests
+        sep = "&" if "?" in MASTER_POINTER_URL else "?"
+        r = requests.get(f"{MASTER_POINTER_URL}{sep}v={int(time.time() // 20)}", timeout=timeout,
+                         headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+        if r.status_code != 200:
+            return []
+        out = []
+        for line in r.text.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            s = s.split()[0].rstrip("/")
+            if s.lower().startswith(("http://", "https://")) and s not in out:
+                out.append(s)
+        return out
+    except Exception:
+        return []
 
 
 def _spawn_with_client(target):
@@ -4088,14 +4172,21 @@ def _connect_loop(url, client):
        server ที่ตายแล้ว (เช่นตัวสำรองที่เลิกใช้) จะถอยห่างขึ้นเรื่อยๆ สูงสุด 5 นาที
        ไม่งั้น log จะเต็มไปด้วยข้อความ 'เชื่อมต่อไม่ได้' ทุก 5 วิ จนอ่านของจริงไม่เจอ"""
     fails = 0
-    while True:
+    while not getattr(client, "_rfm_stop", False):     # ถูก _drop_url → จบ thread
         try:
             if fails == 0:
                 logger.info(f"🔗 Connecting to {url}...")
-            # Funnel/HTTPS วิ่งผ่าน relay/proxy — WebSocket มักหลุดกลางคัน (ต่อได้แวบเดียวแล้วตัด)
-            # จึงใช้ polling ที่ทนกว่า (แต่ละ request สั้นๆ ผ่าน proxy ได้นิ่งกว่า)
-            # ต่อตรงในวง Tailscale (http เป็น IP) ใช้ WebSocket เร็วกว่าได้เลย
-            _tr = ["polling"] if url.lower().startswith("https") else ["websocket", "polling"]
+            # ผ่าน tunnel/proxy (https):
+            #   - Funnel (*.ts.net) วิ่งผ่าน relay — WebSocket มักหลุดกลางคัน จึงใช้ polling ล้วน
+            #   - Cloudflare tunnel (pointer) รองรับ WebSocket ดี → เริ่ม polling แล้วให้ upgrade เป็น
+            #     websocket เองถ้า server รองรับ (engineio ใช้ transport "ตัวแรก" ในลิสต์เป็นตัวเปิด —
+            #     ถ้าเริ่ม websocket ตรงๆ แล้ว server/proxy ไม่รองรับ มันจะไม่ถอยมา polling ให้)
+            # ต่อตรงในวง Tailscale/LAN (http เป็น IP) เปิด WebSocket ตรงๆ เร็วกว่าได้เลย
+            lu = url.lower()
+            if lu.startswith("https"):
+                _tr = ["polling"] if ".ts.net" in lu else ["polling", "websocket"]
+            else:
+                _tr = ["websocket", "polling"]
             client.connect(url, transports=_tr)
             fails = 0
             client.wait()
@@ -4105,11 +4196,11 @@ def _connect_loop(url, client):
             if fails <= 2 or fails % 10 == 0:      # เตือนแค่ช่วงแรกกับเป็นระยะ
                 logger.warning(f"[{url}] เชื่อมต่อไม่ได้ ({fails} ครั้ง): {str(e)[:60]} "
                                f"— ลองใหม่ใน {delay}s")
-            time.sleep(delay)
+            _sleep_unless_stopped(client, delay)
         except Exception as e:
             fails += 1
             logger.error(f"[{url}] ผิดพลาด: {str(e)[:80]}")
-            time.sleep(min(300, RECONNECT_DELAY * (2 ** min(fails - 1, 6))))
+            _sleep_unless_stopped(client, min(300, RECONNECT_DELAY * (2 ** min(fails - 1, 6))))
 
 
 def _spawn_connect(url):
@@ -4229,10 +4320,15 @@ def _discover_lan_servers(timeout_each=1.0, workers=48):
     return found
 
 
+_pointer_urls = set()      # URL ที่ได้จาก pointer รอบล่าสุด (ไว้ตัดตัวเก่าที่ตายทิ้ง)
+_pointer_warned = False
+
+
 def _discover_and_connect_loop():
-    """ถ้าต่อ server ไหนไม่ได้เลย → ค้นหา server ในวง Tailscale มาต่อเอง
+    """ถ้าต่อ server ไหนไม่ได้เลย → หาแม่เองตามลำดับ Tailscale → LAN → pointer (ทางเข้าสาธารณะ) → URL สำรอง
        ทำให้ "รัน start_server.bat เครื่องไหนก็ได้ = เป็นเครื่องแม่" (แม่ดับ ยกไปรันเครื่องอื่น
        agent เจอเองแล้วต่อกลับ)  ปกติ (ต่อแม่ได้อยู่) จะไม่ probe เลย — ไม่เปลือง"""
+    global _pointer_urls, _pointer_warned
     time.sleep(20)                      # ให้ตัว seed (แม่/สำรอง) ลองต่อก่อน
     while True:
         try:
@@ -4245,10 +4341,31 @@ def _discover_and_connect_loop():
                     for u in _discover_lan_servers():
                         if _spawn_connect(u):
                             logger.info(f"🏠 เจอ server ในวง LAN: {u} — เกาะผ่าน LAN (นิ่ง + รอด WARP)")
-                # LAN ก็ไม่เจอ → ตัวสุดท้าย: Funnel (public HTTPS รอด WARP แต่ flap บ้าง)
-                if not _any_connected() and FUNNEL_URL:
-                    if _spawn_connect(FUNNEL_URL):
-                        logger.info(f"🌐 Tailscale/LAN ล่ม — เกาะแม่ผ่าน Funnel: {FUNNEL_URL}")
+                # Tailscale + LAN ไปไม่ถึง (เช่น WARP เปิดทั้งแม่และลูก, ลูกอยู่คนละวง LAN)
+                # → อ่านทางเข้าสาธารณะของแม่ (Cloudflare tunnel) จาก pointer บน GitHub
+                if not _any_connected() and MASTER_POINTER_URL:
+                    ptr = _fetch_pointer_urls()
+                    if ptr:
+                        _pointer_warned = False
+                        for u in list(_pointer_urls - set(ptr)):
+                            if not _client_connected.get(u):
+                                _drop_url(u)        # tunnel รีสตาร์ท → URL เก่าตายแล้ว เลิกลอง
+                        _pointer_urls = set(ptr)
+                        for u in ptr:
+                            if _spawn_connect(u):
+                                logger.info(f"🌐 Tailscale/LAN ไปไม่ถึงแม่ — เกาะผ่านทางเข้าสาธารณะ (pointer): {u}")
+                        for _ in range(10):         # ให้เวลาต่อสักครู่ ก่อนไปลอง URL สำรอง
+                            if _any_connected():
+                                break
+                            time.sleep(1)
+                    elif not _pointer_warned:
+                        _pointer_warned = True
+                        logger.info(f"(อ่าน pointer ทางเข้าสาธารณะไม่ได้: {MASTER_POINTER_URL})")
+                # ตัวสุดท้าย: URL สำรองตายตัว (Funnel เก่า — ใช้ได้เฉพาะตอนแม่กลับไปรันบน node "server")
+                if not _any_connected():
+                    for u in FALLBACK_URLS:
+                        if _spawn_connect(u):
+                            logger.info(f"🌐 เกาะแม่ผ่าน URL สำรอง: {u}")
         except Exception as e:
             logger.info(f"(discovery ข้าม: {e})")
         time.sleep(45)

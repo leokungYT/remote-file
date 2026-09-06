@@ -190,3 +190,18 @@ file-manager/
 ├── requirements.txt   ← dependencies
 └── README.md          ← ไฟล์นี้
 ```
+
+## ทางเข้าสำรองตอนเปิด WARP ทั้งแม่และลูก (Cloudflare tunnel + pointer บน GitHub)
+
+เครื่องแม่ (pc_1) รันบอทที่เปิด Cloudflare WARP ตลอด → WARP ฆ่า Tailscale ของแม่ → ลูกที่อยู่คนละวง LAN เข้าแม่ไม่ได้
+(Funnel เก่าก็ใช้ไม่ได้ เพราะต้องพึ่ง Tailscale ของแม่เหมือนกัน) จึงเพิ่มทางเข้า "สาธารณะ" ที่ไม่พึ่ง Tailscale:
+
+1. บนแม่: `master-tunnel.ps1` (ติดตั้งครั้งเดียวด้วย `setup-master-tunnel.bat` → scheduled task `RemoteFileTunnel`)
+   เปิด Cloudflare quick tunnel มาที่ :5000 แล้วเขียน URL ลง GitHub branch `pointer` ไฟล์ `master-url.txt`
+   (ต้องมี `github-token.txt` = fine-grained token ของ repo นี้ สิทธิ์ Contents: Read and write — ไม่ขึ้น git)
+2. ลูก (`agent.py`): ถ้าต่อ Tailscale และ LAN ไม่ได้เลย จะอ่าน `MASTER_POINTER_URL` แล้วต่อผ่าน tunnel นั้น
+   (quick tunnel URL สุ่มใหม่ทุกครั้งที่รีสตาร์ท agent จึงอ่านจาก pointer ทุกครั้งที่หลุด ไม่ hardcode)
+3. ลำดับที่ agent หาแม่: Tailscale → LAN /24 → pointer (Cloudflare tunnel) → `FALLBACK_URLS` (Funnel เก่า)
+
+ทำไมไม่ใช้ ngrok: แผนฟรี (ก.พ. 2026) จำกัด 1 GB + 20,000 request/เดือน — socket.io ของ 20+ เครื่อง 24 ชม. ชนเพดานในไม่กี่วัน
+ถ้ามีโดเมนใน Cloudflare อยู่แล้ว ใส่ token ของ named tunnel ใน `cloudflare-token.txt` + URL คงที่ใน `tunnel-fixed-url.txt` จะได้ URL ไม่เปลี่ยน
