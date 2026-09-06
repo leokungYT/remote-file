@@ -283,30 +283,65 @@ def _sleep_unless_stopped(client, secs):
         time.sleep(min(2, max(0.1, end - time.time())))
 
 
+def _parse_pointer_text(text):
+    """รูปแบบไฟล์ pointer: บรรทัดละ URL, บรรทัดว่าง/ขึ้นต้น # = ข้าม, เอาเฉพาะ http(s) ไม่ซ้ำ คงลำดับ"""
+    out = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        s = s.split()[0].rstrip("/")
+        if s.lower().startswith(("http://", "https://")) and s not in out:
+            out.append(s)
+    return out
+
+
+def _pointer_api_url():
+    """raw.githubusercontent.com/<owner>/<repo>/<ref>/<path> → GitHub Contents API URL (None ถ้าไม่ใช่ raw ของ GitHub)
+       raw ของ GitHub มี CDN cache ~5 นาที (วัดจริงได้ ~4 นาที cache-buster ไม่ช่วย) ส่วน API ตอบสดทันที"""
+    import re
+    m = re.match(r"^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/([^?#]+)$", MASTER_POINTER_URL)
+    if not m:
+        return None
+    owner, repo, ref, path = m.groups()
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}"
+
+
+_pointer_etag = None     # ETag ของ pointer รอบล่าสุด (conditional request → 304 ไม่นับ rate limit ของ GitHub API)
+_pointer_cache = []      # ค่าที่ parse ได้ครั้งล่าสุดจาก API (ใช้ซ้ำตอนได้ 304)
+
+
 def _fetch_pointer_urls(timeout=8):
-    """อ่าน URL ทางเข้าสาธารณะของแม่จาก pointer (GitHub raw) — คืน [] ถ้าอ่านไม่ได้
-       รูปแบบไฟล์: บรรทัดละ URL, บรรทัดว่าง/ขึ้นต้น # = ข้าม
-       ใส่ cache-buster กัน CDN ของ raw.githubusercontent เสิร์ฟค่าเก่า (cache 5 นาที)"""
+    """อ่าน URL ทางเข้าสาธารณะของแม่จาก pointer — คืน [] ถ้าอ่านไม่ได้
+       1) GitHub Contents API (สดทันที; ส่ง If-None-Match → 304 ฟรี ไม่กิน 60 req/ชม./IP)
+       2) raw.githubusercontent (เผื่อ API โดน rate limit/ล่ม — ค่าอาจเก่าได้ถึง ~5 นาที)"""
+    global _pointer_etag, _pointer_cache
     if not MASTER_POINTER_URL:
         return []
+    import requests
+    api = _pointer_api_url()
+    if api:
+        try:
+            h = {"Accept": "application/vnd.github.raw", "User-Agent": "rfm-agent"}
+            if _pointer_etag:
+                h["If-None-Match"] = _pointer_etag
+            r = requests.get(api, timeout=timeout, headers=h)
+            if r.status_code == 304:
+                return list(_pointer_cache)
+            if r.status_code == 200:
+                _pointer_etag = r.headers.get("ETag")
+                _pointer_cache = _parse_pointer_text(r.text)
+                return list(_pointer_cache)
+        except Exception:
+            pass
     try:
-        import requests
-        sep = "&" if "?" in MASTER_POINTER_URL else "?"
-        r = requests.get(f"{MASTER_POINTER_URL}{sep}v={int(time.time() // 20)}", timeout=timeout,
-                         headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
-        if r.status_code != 200:
-            return []
-        out = []
-        for line in r.text.splitlines():
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            s = s.split()[0].rstrip("/")
-            if s.lower().startswith(("http://", "https://")) and s not in out:
-                out.append(s)
-        return out
+        r = requests.get(MASTER_POINTER_URL, timeout=timeout,
+                         headers={"Cache-Control": "no-cache", "Pragma": "no-cache", "User-Agent": "rfm-agent"})
+        if r.status_code == 200:
+            return _parse_pointer_text(r.text)
     except Exception:
-        return []
+        pass
+    return []
 
 
 def _spawn_with_client(target):
