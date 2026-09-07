@@ -2054,6 +2054,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openMumuCloneDashboard()">🧬 Clone MuMu</button>
     <button class="btn" onclick="openRunFileDashboard()">▶️ รันไฟล์ .bat</button>
     <button class="btn" onclick="openBotUpdateDashboard()">⬆️ อัปเดตบอท (ติ๊กเลือกเครื่อง)</button>
+    <button class="btn" onclick="openBotUpdateDashboard('lgr')" title="ดึงโค้ด Line Ranger ตัวล่าสุดจาก GitHub (leokungYT/main) มาทับโฟลเดอร์ main ของเครื่องที่ติ๊ก">🏹 อัปเดต LGR (ติ๊กเลือกเครื่อง)</button>
     <button class="btn" onclick="openLiveView()">🖥️ Live View</button>
     <span class="status-badge status-online" id="connStatus">● เชื่อมต่อแล้ว</span>
   </div>
@@ -5727,6 +5728,204 @@ async function buSendBat(agentId, base) {
   return uploadToInput(agentId, 'force-update.bat', BU_FORCE_BAT.length, b64, base, '.');
 }
 
+// ── โหมดของหน้า "อัปเดตบอท": 'bot' = force-update.bat (pes) · 'lgr' = autoupdate-lg.bat (Line Ranger จาก GitHub)
+//    แต่ละโหมดจำค่าที่ตั้งแยกกันใน localStorage จะได้ไม่ทับกัน
+let _buMode = 'bot';
+const BU_MODES = {
+  bot: { key: 'botUpdateCfg',    base: 'pes',  name: 'force-update.bat',  title: '⬆️ อัปเดตบอท — ติ๊กเลือกเฉพาะเครื่องที่ต้องการ' },
+  lgr: { key: 'botUpdateCfgLgr', base: 'main', name: 'autoupdate-lg.bat', title: '🏹 อัปเดต LGR (Line Ranger) จาก GitHub — ติ๊กเลือกเฉพาะเครื่องที่ต้องการ' },
+};
+
+// เนื้อไฟล์ autoupdate-lg.bat ที่เว็บส่งไปทับในโฟลเดอร์ main ของเครื่องลูก "ทุกครั้ง" ก่อนรัน (ASCII ล้วน)
+//   ต่างจาก autoupdate-lg.bat ตัวเดิมบน Desktop ของ pc_1 ตรงที่:
+//   - อัปเดต "โฟลเดอร์ที่ไฟล์นี้อยู่" (%~dp0) แทน .\main — run_file รันไฟล์โดย cwd = โฟลเดอร์โปรเจกต์
+//     ตัวเดิมจะไปสร้าง main\main ซ้อน
+//   - ไม่ taskkill python.exe ทั้งเครื่อง (จะฆ่า agent/server/บอทเกมอื่นไปด้วย) — ให้ agent หยุดเฉพาะบอทใน
+//     โฟลเดอร์ main ผ่านคำสั่ง stop ก่อนรันแทน
+//   - ไม่ pause (ไม่มีคนกดที่เครื่องลูก) และเขียนผลลง autoupdate-lg.log บรรทัดแรก (OK/ERROR) ให้เว็บอ่านกลับ
+const BU_LGR_BAT = [
+  '@echo off',
+  'title AUTO UPDATE - Line Ranger (LGR) from GitHub',
+  'cd /d "%~dp0"',
+  'set "REPO_URL=https://github.com/leokungYT/main/archive/refs/heads/main.zip"',
+  'set "ZIP_NAME=main_update.zip"',
+  'set "EXTRACT_DIR=update_temp"',
+  'set "LOG=%~dp0autoupdate-lg.log"',
+  '> "%LOG%" echo RUNNING %date% %time%',
+  'echo [1/5] Stopping adb (file locks) ...',
+  'taskkill /f /im adb.exe >nul 2>&1',
+  'if exist "%ZIP_NAME%" del /q "%ZIP_NAME%"',
+  'if exist "%EXTRACT_DIR%" rd /s /q "%EXTRACT_DIR%"',
+  'echo [2/5] Downloading latest version from GitHub ...',
+  'curl -k -L --retry 3 --retry-delay 3 --connect-timeout 15 "%REPO_URL%" -o "%ZIP_NAME%" >nul 2>&1',
+  "if not exist \"%ZIP_NAME%\" powershell -NoProfile -Command \"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try { Invoke-WebRequest -Uri '%REPO_URL%' -OutFile '%ZIP_NAME%' -UseBasicParsing -TimeoutSec 60 } catch { exit 1 }\" >nul 2>&1",
+  'if not exist "%ZIP_NAME%" goto dlfail',
+  'echo [3/5] Extracting ...',
+  "powershell -NoProfile -Command \"Expand-Archive -Path '%ZIP_NAME%' -DestinationPath '%EXTRACT_DIR%' -Force\" >nul 2>&1",
+  'set "SRC="',
+  'for /d %%f in ("%EXTRACT_DIR%\\*") do set "SRC=%%f"',
+  'if not defined SRC goto exfail',
+  'echo [4/5] Copying new files over this folder (backup / backup-id are kept) ...',
+  'if exist "%SRC%\\backup" rd /s /q "%SRC%\\backup"',
+  'if exist "%SRC%\\backup-id" rd /s /q "%SRC%\\backup-id"',
+  'if exist "%SRC%\\autoupdate-lg.bat" del /q "%SRC%\\autoupdate-lg.bat"',
+  'if exist "img" rd /s /q "img"',
+  'xcopy /s /e /y /c "%SRC%\\*" "%~dp0." >nul',
+  'if errorlevel 1 goto cpfail',
+  'echo [5/5] Cleaning up ...',
+  'del /q "%ZIP_NAME%" >nul 2>&1',
+  'rd /s /q "%EXTRACT_DIR%" >nul 2>&1',
+  '> "%LOG%" echo OK updated %date% %time%',
+  'echo Update Successful',
+  'exit /b 0',
+  ':dlfail',
+  '> "%LOG%" echo ERROR download failed (check internet / DNS on this pc)',
+  'exit /b 1',
+  ':exfail',
+  '> "%LOG%" echo ERROR extract failed (zip corrupt or PowerShell Expand-Archive missing)',
+  'del /q "%ZIP_NAME%" >nul 2>&1',
+  'exit /b 1',
+  ':cpfail',
+  '> "%LOG%" echo ERROR copy failed (some files locked - is the bot still running?)',
+  'del /q "%ZIP_NAME%" >nul 2>&1',
+  'rd /s /q "%EXTRACT_DIR%" >nul 2>&1',
+  'exit /b 1',
+  ''
+].join('\r\n');
+
+async function buSendLgrBat(agentId, base, name) {
+  const b64 = btoa(BU_LGR_BAT);
+  return uploadToInput(agentId, name || 'autoupdate-lg.bat', BU_LGR_BAT.length, b64, base, '.');
+}
+
+// ส่งไฟล์อัปเดตตามโหมดของหน้า
+function buSendAny(agentId, cfg) {
+  return _buMode === 'lgr' ? buSendLgrBat(agentId, cfg.base, cfg.name) : buSendBat(agentId, cfg.base);
+}
+
+// path เต็มของโฟลเดอร์โปรเจกต์บนเครื่องนั้น (จาก allowed_paths ที่ agent ส่งมาตอน register)
+function buBasePath(a, base) {
+  const want = String(base || '').toLowerCase();
+  for (const p of (a.allowed_paths || [])) {
+    const s = String(p).replace(/[\\\/]+$/, '');
+    const bn = s.split(/[\\\/]/).pop().toLowerCase();
+    if (bn === want) return s;
+  }
+  return null;
+}
+
+// อ่านไฟล์ข้อความเล็กๆ จากเครื่องลูก (เช่น log ผลอัปเดต) — เข้าคิวเดียวกับ mcReq กัน request_sent สลับเครื่อง
+function buReadText(agentId, path, waitMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v || {}); } };
+    _mcChain = _mcChain.then(() => new Promise((next) => {
+      let sent = false;
+      const onSent = (d) => {
+        sent = true;
+        const rid = d.request_id;
+        const chunks = [];
+        const onChunk = (c) => {
+          if (c.error) { socket.off('file_chunk_' + rid, onChunk); done({ error: c.error }); return; }
+          chunks.push(c.data || '');
+          if (c.is_last) { socket.off('file_chunk_' + rid, onChunk); done({ text: atob(chunks.join('')) }); }
+        };
+        socket.on('file_chunk_' + rid, onChunk);
+        socket.once('response_' + rid, (resp) => {
+          if (resp && resp.error) { socket.off('file_chunk_' + rid, onChunk); done({ error: resp.error }); }
+        });
+        setTimeout(() => { socket.off('file_chunk_' + rid, onChunk); done({ error: 'หมดเวลาอ่านไฟล์' }); }, waitMs || 20000);
+        next();
+      };
+      socket.once('request_sent', onSent);
+      setTimeout(() => {
+        if (!sent) { socket.off('request_sent', onSent); done({ error: 'เครื่องไม่ออนไลน์หรือไม่ตอบ' }); next(); }
+      }, 8000);
+      socket.emit('request_download', { agent_id: agentId, path: path });
+    }));
+  });
+}
+
+// รอจนงาน (pid ของ cmd ที่รัน .bat) หายจากรายการ status ของ agent — คืน true = จบแล้ว, false = หมดเวลา
+async function buWaitJob(agentId, base, pid, maxMs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < (maxMs || 300000)) {
+    await new Promise(r => setTimeout(r, 5000));
+    const st = await mcReq(agentId, 'request_run_file', { sub: 'status', base_match: base }, 15000);
+    if (st.error) continue;
+    if (!(st.jobs || []).some(j => j.pid === pid)) return true;
+  }
+  return false;
+}
+
+// อัปเดต LGR หนึ่งเครื่อง: หยุดบอทใน main → ส่ง autoupdate-lg.bat → รัน → รอจบ → อ่านผลจาก log → (เปิดบอทใหม่)
+async function buUpdateOneLgr(i, quiet) {
+  const a = _buAgents[i];
+  if (!a) return false;
+  const cfg = buCfg();
+  const el = document.getElementById('bu_status_' + i);
+  const setSt = (html) => { if (el) el.innerHTML = html; };
+  const mname = a.name || a.hostname || a.agent_id;
+  const S = (c, t) => '<span style="color:var(--' + c + '); font-size:12px">' + t + '</span>';
+  const fail = (t) => { setSt(S('danger', '❌ ' + escHtml(t))); if (!quiet) toast(mname + ': ' + t, 'error'); return false; };
+
+  if (cfg.stopFirst) {
+    setSt(S('accent', '⏹️ หยุดบอทใน ' + escHtml(cfg.base) + ' ก่อน...'));
+    const st = await mcReq(a.agent_id, 'request_run_file', { sub: 'stop', base_match: cfg.base }, 60000);
+    if (st.error) return fail('หยุดบอทไม่ได้: ' + st.error);
+    if (st.note) return fail(st.note);
+  }
+
+  setSt(S('accent', '📤 ส่ง ' + escHtml(cfg.name) + ' ...'));
+  try {
+    await buSendLgrBat(a.agent_id, cfg.base, cfg.name);
+  } catch (e) {
+    return fail('ส่งไฟล์ไม่สำเร็จ: ' + String(e.message || e));
+  }
+
+  setSt(S('accent', '⏳ กำลังดึงโค้ดใหม่จาก GitHub (leokungYT/main)...'));
+  const run = await mcReq(a.agent_id, 'request_run_file',
+    { sub: 'start', base_match: cfg.base, name: cfg.name, hidden: false, force: true }, 60000);
+  if (run.error) return fail(run.error);
+
+  const finished = await buWaitJob(a.agent_id, cfg.base, run.pid, 300000);
+  const base = buBasePath(a, cfg.base);
+  let verdict = null;
+  if (base) {
+    const r = await buReadText(a.agent_id, base + '\\autoupdate-lg.log', 20000);
+    if (r && r.text) verdict = (r.text.split(/\r?\n/)[0] || '').trim();
+  }
+  if (!finished && (!verdict || /^RUNNING/.test(verdict))) return fail('อัปเดตนานเกิน 5 นาที ยังไม่จบ (ดูหน้าต่างที่เครื่องนั้น)');
+  if (!verdict) return fail('รันแล้วแต่อ่านผลไม่ได้ (ไม่มี autoupdate-lg.log ในโฟลเดอร์ ' + cfg.base + ')');
+  if (!/^OK/.test(verdict)) return fail(verdict.replace(/^ERROR\s*/, ''));
+
+  let msg = S('success', '✅ อัปเดต LGR เสร็จ (' + escHtml(verdict.replace(/^OK updated\s*/, '')) + ')');
+  setSt(msg);
+
+  if (cfg.restart) {
+    setSt(msg + ' ' + S('accent', '· ⏳ เปิด ' + escHtml(cfg.restart) + '...'));
+    const rs = await mcReq(a.agent_id, 'request_run_file',
+      { sub: 'start', base_match: cfg.base, name: cfg.restart, hidden: false }, 60000);
+    msg += ' ' + (rs.error
+      ? S('warning', '· ⚠️ เปิดบอท: ' + escHtml(rs.error))
+      : S('success', '· ▶️ เปิด ' + escHtml(cfg.restart) + ' แล้ว (PID ' + escHtml(String(rs.pid || '')) + ')'));
+    setSt(msg);
+  }
+
+  if (cfg.alsoAgent) {
+    setSt(msg + ' ' + S('accent', '· ⏳ อัปเดต agent...'));
+    try {
+      await updateOneAgent(a.agent_id);
+      setSt(msg + ' ' + S('success', '· ✅ agent อัปเดตแล้ว'));
+    } catch (e) {
+      setSt(msg + ' ' + S('warning', '· ⚠️ agent: ' + escHtml(String(e.message || e))));
+    }
+  }
+
+  if (!quiet) toast(mname + ': อัปเดต LGR เสร็จ', 'success');
+  return true;
+}
+
 async function buSendBatSelected() {
   const idxs = buIncluded();
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'error'); return; }
@@ -5735,11 +5934,11 @@ async function buSendBatSelected() {
   for (const i of idxs) {
     const a = _buAgents[i];
     const el = document.getElementById('bu_status_' + i);
-    if (el) el.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังส่ง force-update.bat ...</span>';
+    if (el) el.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังส่ง ' + escHtml(cfg.name) + ' ...</span>';
     try {
-      await buSendBat(a.agent_id, cfg.base);
+      await buSendAny(a.agent_id, cfg);
       ok++;
-      if (el) el.innerHTML = '<span style="color:var(--success); font-size:12px">📤 ส่ง force-update.bat แล้ว</span>';
+      if (el) el.innerHTML = '<span style="color:var(--success); font-size:12px">📤 ส่ง ' + escHtml(cfg.name) + ' แล้ว</span>';
     } catch (e) {
       if (el) el.innerHTML = '<span style="color:var(--danger); font-size:12px">❌ ส่งไฟล์ไม่สำเร็จ: ' + escHtml(String(e.message || e)) + '</span>';
     }
@@ -5748,18 +5947,20 @@ async function buSendBatSelected() {
 }
 
 function buCfg() {
-  const sel  = document.getElementById('buProject');
-  const file = document.getElementById('buFile');
-  const also = document.getElementById('buAlsoAgent');
+  const M = BU_MODES[_buMode] || BU_MODES.bot;
+  const g = (id) => document.getElementById(id);
+  const sel = g('buProject'), file = g('buFile'), also = g('buAlsoAgent'), stop = g('buStopFirst'), rs = g('buRestart');
   const name = file ? (file.value || '').trim() : '';
   return {
-    base: sel ? sel.value : 'pes',
-    name: name || 'force-update.bat',
+    base: sel ? sel.value : M.base,
+    name: name || M.name,
     alsoAgent: also ? also.checked : false,
+    stopFirst: stop ? stop.checked : true,          // โหมด LGR: หยุดบอทใน main ก่อนอัปเดต
+    restart: rs ? (rs.value || '').trim() : '',     // โหมด LGR: ไฟล์ที่จะเปิดหลังอัปเดต (ว่าง = ไม่เปิด)
   };
 }
 
-function buSaveCfg() { try { localStorage.setItem('botUpdateCfg', JSON.stringify(buCfg())); } catch (e) {} }
+function buSaveCfg() { try { localStorage.setItem((BU_MODES[_buMode] || BU_MODES.bot).key, JSON.stringify(buCfg())); } catch (e) {} }
 
 function buIncluded() {
   const out = [];
@@ -5780,7 +5981,9 @@ function buCount() {
   if (el) el.textContent = 'ติ๊กไว้ ' + buIncluded().length + ' / ' + _buAgents.length + ' เครื่อง';
 }
 
-function openBotUpdateDashboard() {
+function openBotUpdateDashboard(mode) {
+  _buMode = (mode === 'lgr') ? 'lgr' : 'bot';
+  const M = BU_MODES[_buMode];
   currentAgent = null;
   document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
   const content = document.getElementById('contentArea');
@@ -5790,8 +5993,8 @@ function openBotUpdateDashboard() {
     return;
   }
 
-  let cfg = { base: 'pes', name: 'force-update.bat', alsoAgent: false };
-  try { cfg = Object.assign(cfg, JSON.parse(localStorage.getItem('botUpdateCfg') || '{}')); } catch (e) {}
+  let cfg = { base: M.base, name: M.name, alsoAgent: false, stopFirst: true, restart: '' };
+  try { cfg = Object.assign(cfg, JSON.parse(localStorage.getItem(M.key) || '{}')); } catch (e) {}
 
   const inputStyle = 'background:var(--bg-card); border:1px solid var(--border); color:var(--text-primary); border-radius:8px; padding:8px 10px';
   const projOpts = RUN_PROJECTS.map(p =>
@@ -5816,8 +6019,8 @@ function openBotUpdateDashboard() {
 
   content.innerHTML =
     '<div class="toolbar">' +
-      '<h2 style="flex:1; font-size:18px">⬆️ อัปเดตบอท — ติ๊กเลือกเฉพาะเครื่องที่ต้องการ</h2>' +
-      '<button class="btn btn-primary" onclick="openBotUpdateDashboard()">🔄 รีเฟรช</button>' +
+      '<h2 style="flex:1; font-size:18px">' + M.title + '</h2>' +
+      '<button class="btn btn-primary" onclick="openBotUpdateDashboard(\'' + _buMode + '\')">🔄 รีเฟรช</button>' +
     '</div>' +
     '<div class="pick-panel" style="margin-bottom:14px">' +
       '<div class="pick-head">' +
@@ -5825,19 +6028,32 @@ function openBotUpdateDashboard() {
       '</div>' +
       '<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">' +
         '<select id="buProject" class="btn project-select" style="' + inputStyle + '" onchange="buSaveCfg()">' + projOpts + '</select>' +
-        '<input type="text" id="buFile" class="dash-search" style="flex:1; min-width:220px" placeholder="force-update.bat" value="' + escAttr(cfg.name) + '" oninput="buSaveCfg()">' +
+        '<input type="text" id="buFile" class="dash-search" style="flex:1; min-width:220px" placeholder="' + escAttr(M.name) + '" value="' + escAttr(cfg.name) + '" oninput="buSaveCfg()">' +
         '<label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; white-space:nowrap">' +
           '<input type="checkbox" id="buAlsoAgent"' + (cfg.alsoAgent ? ' checked' : '') + ' style="width:auto; margin:0" onchange="buSaveCfg()"> อัปเดต agent ด้วย' +
         '</label>' +
       '</div>' +
+      (_buMode !== 'lgr' ? '' :
+        '<div style="display:flex; gap:14px; flex-wrap:wrap; align-items:center; margin-top:10px">' +
+          '<label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; white-space:nowrap">' +
+            '<input type="checkbox" id="buStopFirst"' + (cfg.stopFirst !== false ? ' checked' : '') + ' style="width:auto; margin:0" onchange="buSaveCfg()"> หยุดบอท LGR ก่อนอัปเดต (เฉพาะที่รันจากโฟลเดอร์ main)' +
+          '</label>' +
+          '<label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap">เปิดบอทหลังอัปเดต:' +
+            '<input type="text" id="buRestart" class="dash-search" style="width:220px" placeholder="ว่าง = ไม่เปิด (เช่น login_uid.bat)" value="' + escAttr(cfg.restart || '') + '" oninput="buSaveCfg()">' +
+          '</label>' +
+        '</div>') +
       '<div style="font-size:12px; color:var(--text-dim); margin-top:8px; line-height:1.6">' +
-        '• <b>เครื่องที่ไม่ติ๊ก จะไม่ถูกแตะเลย</b> — เครื่องที่ตั้งค่า/ใช้ฟังก์ชันคนละแบบจะไม่โดนทับ<br>' +
-        '• <b>force-update.bat</b> = ปิดบอทที่ค้าง → ดึงโค้ดใหม่แบบเงียบ → เปิดบอทใหม่ (มีในบอท 3.3.2 ขึ้นไป)<br>' +
-        '• เครื่องที่ยังเป็นเวอร์ชันเก่า เปลี่ยนชื่อไฟล์เป็น <b>login.bat</b> ได้ (ต้องไม่มีบอทรันอยู่ ไม่งั้นจะเปิดซ้อน)' +
+        (_buMode === 'lgr'
+          ? '• <b>เครื่องที่ไม่ติ๊ก จะไม่ถูกแตะเลย</b><br>' +
+            '• ดึงโค้ด Line Ranger ตัวล่าสุดจาก <b>github.com/leokungYT/main</b> มาทับโฟลเดอร์ <b>main</b> ของเครื่องนั้น (เก็บ backup / backup-id ไว้, ล้าง img แล้วใส่ของใหม่)<br>' +
+            '• ไฟล์ autoupdate-lg.bat ถูกส่งจากเว็บไปทับทุกครั้ง ไม่ต้องมีอยู่ในเครื่องก่อน · ผลลัพธ์ (สำเร็จ/ล้มเหลว) อ่านกลับมาแสดงที่การ์ดของแต่ละเครื่อง'
+          : '• <b>เครื่องที่ไม่ติ๊ก จะไม่ถูกแตะเลย</b> — เครื่องที่ตั้งค่า/ใช้ฟังก์ชันคนละแบบจะไม่โดนทับ<br>' +
+            '• <b>force-update.bat</b> = ปิดบอทที่ค้าง → ดึงโค้ดใหม่แบบเงียบ → เปิดบอทใหม่ (มีในบอท 3.3.2 ขึ้นไป)<br>' +
+            '• เครื่องที่ยังเป็นเวอร์ชันเก่า เปลี่ยนชื่อไฟล์เป็น <b>login.bat</b> ได้ (ต้องไม่มีบอทรันอยู่ ไม่งั้นจะเปิดซ้อน)') +
       '</div>' +
       '<div class="pick-head" style="margin:12px 0 0">' +
         '<button class="btn btn-primary" onclick="buUpdateSelected()">⬆️ อัปเดตเครื่องที่ติ๊ก</button>' +
-        '<button class="btn" onclick="buSendBatSelected()" title="ส่งไฟล์ force-update.bat ไปวางในโฟลเดอร์โปรเจกต์ของเครื่องที่ติ๊ก">📤 ส่งไฟล์ให้เครื่องที่ติ๊ก</button>' +
+        '<button class="btn" onclick="buSendBatSelected()" title="ส่งไฟล์ ' + escAttr(cfg.name) + ' ไปวางในโฟลเดอร์โปรเจกต์ของเครื่องที่ติ๊ก">📤 ส่งไฟล์ให้เครื่องที่ติ๊ก</button>' +
         '<span id="buCount" style="font-size:12px; color:var(--text-dim); margin-left:6px">ติ๊กไว้ 0 / ' + _buAgents.length + ' เครื่อง</span>' +
         '<span style="flex:1"></span>' +
         '<button class="btn" onclick="buTickAll(true)">ติ๊กทุกเครื่อง</button>' +
@@ -5856,6 +6072,8 @@ async function buUpdateOne(i, quiet) {
   const el = document.getElementById('bu_status_' + i);
   const setSt = (html) => { if (el) el.innerHTML = html; };
   const mname = a.name || a.hostname || a.agent_id;
+
+  if (_buMode === 'lgr') return buUpdateOneLgr(i, quiet);
 
   const runOnce = () => mcReq(a.agent_id, 'request_run_file',
     { sub: 'start', base_match: cfg.base, name: cfg.name, hidden: false }, 60000);
@@ -5917,7 +6135,10 @@ async function buUpdateSelected() {
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง (ติ๊กเครื่องที่จะอัปเดตก่อน)', 'error'); return; }
   const cfg = buCfg();
   const names = idxs.map(i => (_buAgents[i].name || _buAgents[i].hostname || _buAgents[i].agent_id)).join('\n  • ');
-  if (!confirm('สั่งอัปเดต ' + idxs.length + ' เครื่องที่ติ๊กไว้ ?\n\nจะรัน "' + cfg.name + '" ในโปรเจกต์ ' + cfg.base +
+  const modeNote = _buMode !== 'lgr' ? '' :
+    ' (ดึงจาก GitHub leokungYT/main' + (cfg.stopFirst ? ' · หยุดบอทก่อน' : '') +
+    (cfg.restart ? ' · เปิด ' + cfg.restart + ' หลังเสร็จ' : '') + ')';
+  if (!confirm('สั่งอัปเดต ' + idxs.length + ' เครื่องที่ติ๊กไว้ ?\n\nจะรัน "' + cfg.name + '" ในโปรเจกต์ ' + cfg.base + modeNote +
                (cfg.alsoAgent ? ' + อัปเดต agent ด้วย' : '') + '\n\n  • ' + names + '\n\nเครื่องที่ไม่ได้ติ๊กจะไม่ถูกแตะ')) return;
 
   let ok = 0;
