@@ -57,6 +57,20 @@ _cfg = _load_config()
 #   discovery หา server ในวงเอาเอง (probe :5000) พอแล้ว
 _TS_HOST_URL = {"server": "http://100.80.76.47:5000"}   # เครื่องแม่ (Tailscale: server)
 
+# แม่ pc_1 ทาง LAN — ใส่ให้ทุกเครื่อง "เสมอ" (นำหน้า) ไม่ต้องแก้ config.json ทีละเครื่อง
+#   เหตุผล: WARP ไม่แตะวง 192.168.x (exclude โดยดีฟอลต์) ทางนี้จึงรอดตอนเปิด WARP ทั้งแม่และลูก
+#   ส่วนทาง Tailscale (100.x) ตายเมื่อแม่เปิด WARP — เครื่องบอททุกตัวอยู่วง 192.168.1.0/24 เดียวกับ pc_1
+#   เครื่องที่ไม่ได้อยู่วงนี้แค่ต่อไม่ติด (backoff เงียบๆ) ไม่มีผลอื่น  ถ้า IP LAN ของแม่เปลี่ยน แก้ตรงนี้
+#   ปิด/เปลี่ยนได้ด้วย env LAN_MASTER_URLS (คั่น , ว่าง = ไม่ใส่) หรือ config "lan_master_urls"
+_lan_raw = os.environ.get("LAN_MASTER_URLS")
+if _lan_raw is None:
+    _lan_raw = _cfg.get("lan_master_urls")
+if _lan_raw is None:
+    _lan_raw = ["http://192.168.1.121:5000"]
+if isinstance(_lan_raw, str):
+    _lan_raw = _lan_raw.replace(";", ",").split(",")
+LAN_MASTER_URLS = [str(u).strip().rstrip("/") for u in (_lan_raw or []) if str(u).strip()]
+
 
 def _rewrite_ts_host(u):
     """http://server:5000 / http://nuuboy:5000 -> http://100.80.76.47:5000 (Tailscale IP ตรงๆ)"""
@@ -96,6 +110,9 @@ def _parse_server_urls():
         if u and u not in seen:
             seen.add(u)
             urls.append(u)
+    # ทาง LAN ของแม่นำหน้าเสมอ (รอด WARP) — ที่เหลือ (Tailscale ฯลฯ) ต่อพร้อมกันเป็นทางที่สอง
+    lan = [u for u in LAN_MASTER_URLS if u not in seen]
+    urls = lan + urls
     return urls or ["http://YOUR_SERVER_IP:5000"]
 
 
