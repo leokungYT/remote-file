@@ -2491,8 +2491,10 @@ const FOLDER_DASH = {
   backup:  { subpath: 'backup',   base: 'main', title: '🗄️ Dashboard Backup — ไฟล์ backup รายเครื่อง (Line Ranger)', label: 'backup', reopen: 'openBackupDashboard' },
   fastrandom: { subpath: 'fast-random', base: 'pes', title: '🎲 Dashboard fast-random — รวมทุกเครื่อง', label: 'fast-random', reopen: 'openFastRandomDashboard' },
   bottiket: { subpath: 'bot-tiket', filesub: 'bot-tiket\\backup', base: 'bot-tiket', title: '🎫 Dashboard bot-tiket — ไฟล์ backup รายเครื่อง (.xml)', label: 'bot-tiket backup', reopen: 'openBottiketDashboard', runbat: 'start.bat' },
+  // ปุ่ม "โหลดทั้งหมด" ของหน้า Dashboard Line Ranger (backup-id ทั้งโฟลเดอร์ รวมทุกชุดย่อย เก็บโครงโฟลเดอร์ไว้ใน zip)
+  rangerid: { subpath: 'backup-id', base: 'main', title: '🏹 Dashboard Line Ranger', label: 'backup-id', reopen: 'openRangerDashboard' },
 };
-let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL' };
+let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL', rangerid: 'ALL' };
 
 function openInputIdDashboard() { return openFolderDash('inputid'); }
 function openBackupDashboard() { return openBackupRich(); }   // Backup โชว์ breakdown ข้างในแบบ PES (นับ .xml)
@@ -2905,6 +2907,7 @@ async function openRangerDashboard() {
 
 function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, totalMachines, onlineCount) {
   const content = document.getElementById('contentArea');
+  _folderScope['rangerid'] = _rangerScope;   // ให้ปุ่มโหลด .zip (fdExport) ใช้เครื่องที่เลือกอยู่ชุดเดียวกัน
 
   // 1) combo (ตามที่อยู่ในชื่อไฟล์จริง) — kikoru+Kafka นับเป็นชุดเดียว ไม่แตกออก
   const combos = Object.keys(comboTotals)
@@ -2976,6 +2979,29 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">แยกตามไฟล์ (combo) — ไฟล์ที่มี 2 ชื่อจะนับเป็นชุดเดียว เช่น kikoru+Kafka</h3>
     <div class="hero-grid big">${comboCards}</div>
     <div id="rangerNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบชื่อที่ค้นหา</div>
+
+    <div class="pick-panel" style="margin-top:18px">
+      <div class="pick-head">
+        <span class="pick-title">📦 โหลด ${RANGER_CFG.label} ทั้งหมดเป็น .zip ไฟล์เดียว
+          <span style="color:var(--text-dim); font-weight:400">— รวมจาก ${onlineCount} เครื่อง · ${grandTotal.toLocaleString()} ไฟล์ (ทุกชุดย่อย เก็บโครงโฟลเดอร์ไว้)</span></span>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer">
+          <input type="checkbox" id="fdMove" style="width:auto">
+          <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
+        </label>
+        <button class="btn btn-primary" id="fdBtn" onclick="fdExport('rangerid')" ${grandTotal ? '' : 'disabled'}>
+          📦 โหลดทั้งหมด (${grandTotal.toLocaleString()} ไฟล์)</button>
+      </div>
+      <div id="fdProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="fdMsg" style="color:var(--text-secondary)"></span>
+          <span id="fdPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="fdBar" style="width:0%"></div></div>
+      </div>
+    </div>
+
     <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — ${RANGER_CFG.label}</h3>
     <div class="agent-stats">${agentRows}</div>
   `;
