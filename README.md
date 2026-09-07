@@ -205,3 +205,11 @@ file-manager/
 
 ทำไมไม่ใช้ ngrok: แผนฟรี (ก.พ. 2026) จำกัด 1 GB + 20,000 request/เดือน — socket.io ของ 20+ เครื่อง 24 ชม. ชนเพดานในไม่กี่วัน
 ถ้ามีโดเมนใน Cloudflare อยู่แล้ว ใส่ token ของ named tunnel ใน `cloudflare-token.txt` + URL คงที่ใน `tunnel-fixed-url.txt` จะได้ URL ไม่เปลี่ยน
+
+## WARP กับ Tailscale อยู่ด้วยกันได้ (สูตรจริง 7 ก.ย. 2026)
+
+สาเหตุที่ "เปิด WARP แล้ว Tailscale ตาย" (เจอใน tailscaled.log ของ pc_1): tailscaled ผูกซ็อกเก็ตกับการ์ดแลนตรงๆ
+แล้วไฟร์วอลล์ของ WARP ปล่อยเฉพาะทราฟฟิกที่วิ่งผ่าน tunnel → ทุกการต่อไป control plane และ DERP relay โดน
+`WSAEACCES (forbidden by its access permissions)` ทางแก้: สั่ง WARP ยกเว้นปลายทางของ Tailscale (split tunnel)
+รัน `warp-allow-tailscale.bat` บนทุกเครื่องที่ใช้ WARP (แม่และบอท) ครั้งเดียว ตั้งค่าค้างอยู่ใน WARP เอง
+ผลที่ยืนยันบน pc_1: WARP Connected + Tailscale Online + เห็นครบทุกเครื่องจาก node อื่น

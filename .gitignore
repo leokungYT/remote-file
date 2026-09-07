@@ -25,3 +25,4 @@ master-tunnel.log
 cloudflared.log
 cloudflared.out.log
 *.bak
+warp-allow-tailscale.log
