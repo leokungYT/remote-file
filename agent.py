@@ -2854,8 +2854,42 @@ def _win_aspect(u, wins, default=0.70):
     return min(3.0, max(0.3, vals[len(vals) // 2]))
 
 
-def _mumu_arrange(cols=0, gap=0, size=0):
-    """เรียงหน้าต่าง MuMu เป็นตาราง ไม่ทับ taskbar
+def _mumu_arrange(cols=0, gap=0, size=0, mode="mumu"):
+    """เรียงหน้าต่าง MuMu
+       mode="mumu" (ค่าเริ่มต้น) -> ใช้ปุ่ม Arrange ของ MuMu เอง = `MuMuManager.exe sort`
+                                   (MuMuManager 5.x: "sort - Layout player windows to sort")
+                                   ถ้าหา MuMuManager ไม่เจอ/สั่งไม่ผ่าน จะถอยไปเรียงตารางเองให้
+       mode="grid"                -> เรียงตารางเอง (Win32) ตาม cols/gap/size เหมือนเดิม"""
+    if (mode or "mumu") != "grid":
+        mgr = _mumu_manager_path()
+        if mgr:
+            try:
+                out, rc = _run_hidden([mgr, "sort"], timeout=60)
+                text = (out or "").strip()
+                ok = (rc == 0) and not _mumu_is_help(text)
+                # MuMuManager 5.x ตอบ {"errcode": 0, "errmsg": ""} เมื่อสำเร็จ — errcode อื่น = ไม่ผ่าน
+                try:
+                    j = json.loads(text) if text.startswith("{") else {}
+                    if isinstance(j, dict) and "errcode" in j:
+                        ok = ok and int(j.get("errcode") or 0) == 0
+                except Exception:
+                    pass
+                if ok:
+                    n = len(_win_mumu_windows() or [])
+                    logger.info(f"  MuMu arrange: ใช้ Arrange ของ MuMu (sort) — จอที่เปิดอยู่ {n}")
+                    return {"success": True, "mode": "mumu", "count": n,
+                            "message": f"เรียงด้วย Arrange ของ MuMu ({n} จอ)"}
+                logger.warning(f"  MuMu sort ไม่ผ่าน (rc={rc}): {text[:120]} — ถอยไปเรียงตารางเอง")
+            except Exception as e:
+                logger.warning(f"  MuMu sort ผิดพลาด: {e} — ถอยไปเรียงตารางเอง")
+    res = _mumu_arrange_grid(cols, gap, size)
+    if isinstance(res, dict) and res.get("success"):
+        res.setdefault("mode", "grid")
+    return res
+
+
+def _mumu_arrange_grid(cols=0, gap=0, size=0):
+    """เรียงหน้าต่าง MuMu เป็นตาราง ไม่ทับ taskbar (โหมดกำหนดเอง)
 
        size > 0  -> โหมดจอเล็ก: ตรึงความกว้างไว้เท่านี้ แล้วอัดชิดมุมซ้ายบน
                     ที่เหลือของเดสก์ท็อปปล่อยว่าง (คงสัดส่วนเดิมของ MuMu)
@@ -2977,7 +3011,8 @@ def handle_mumu_control(req_id, data):
                     keepalive=data.get("keepalive"),
                     restart=bool(data.get("restart", True)))
             elif sub == "arrange":
-                res = _mumu_arrange(data.get("cols"), data.get("gap"), data.get("size"))
+                res = _mumu_arrange(data.get("cols"), data.get("gap"), data.get("size"),
+                                    mode=(data.get("mode") or "mumu"))
             else:
                 res = {"error": f"คำสั่ง mumu ไม่รู้จัก: {sub}"}
         except Exception as e:

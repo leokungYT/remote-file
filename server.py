@@ -361,6 +361,7 @@ def handle_mumu_req(data):
         "cols": data.get("cols", 0),        # sub=arrange: จำนวนคอลัมน์ (0 = ให้คำนวณเอง)
         "gap": data.get("gap", 0),          # sub=arrange: ระยะห่างระหว่างจอ (px)
         "size": data.get("size", 0),        # sub=arrange: ความกว้างต่อจอ (0 = ยืดเต็มจอ)
+        "mode": data.get("mode", "mumu"),   # sub=arrange: mumu = ปุ่ม Arrange ของ MuMu (sort), grid = ตารางกำหนดเอง
         # sub=display: ตั้งค่าจอ MuMu (ค่าที่ไม่ส่ง/None = ไม่แตะของเดิม)
         "width": data.get("width"), "height": data.get("height"),
         "dpi": data.get("dpi"), "fps": data.get("fps"),
@@ -2051,7 +2052,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openBroadcastBackup()">💾 ส่งเข้า backup (ทุกเครื่อง)</button>
     <button class="btn" onclick="openBroadcastBottiket()">🎫 ส่งเข้า bot-tiket (ทุกเครื่อง)</button>
     <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
-    <button class="btn" onclick="quickArrangeAll()" title="เรียงหน้าต่าง MuMu เป็นตารางเต็มจอ ทุกเครื่อง">🔲 เรียงจอ</button>
+    <button class="btn" onclick="quickArrangeAll()" title="เรียงหน้าต่าง MuMu ทุกเครื่อง — ค่าเริ่มต้นใช้ปุ่ม Arrange ของ MuMu เอง (เปลี่ยนเป็นตารางเองได้ในหน้า MuMu)">🔲 เรียงจอ</button>
     <button class="btn" onclick="quickMinimizeAll()" title="ย่อทุกหน้าต่างลง taskbar ทุกเครื่อง">🗕 พับทุกแอป</button>
     <button class="btn" onclick="openMumuCloneDashboard()">🧬 Clone MuMu</button>
     <button class="btn" onclick="openRunFileDashboard()">▶️ รันไฟล์ .bat</button>
@@ -4064,19 +4065,42 @@ async function mumuMinimize(i) {
     : '<span style="color:#22c55e">✅ พับทุกแอปแล้ว</span>';
 }
 
+// ── วิธีเรียงจอ: 'mumu' = ปุ่ม Arrange ของ MuMu เอง (MuMuManager sort) — ค่าเริ่มต้น
+//                'grid' = เรียงตารางเองตาม ขนาดจอ/คอลัมน์/ห่าง (แบบเดิม)
+const MM_ARR_KEY = 'mumuArrMode';
+function mumuArrMode() {
+  const el = document.getElementById('mmArrMode');
+  let v = el ? el.value : '';
+  if (!v) { try { v = localStorage.getItem(MM_ARR_KEY) || ''; } catch (e) {} }
+  return v === 'grid' ? 'grid' : 'mumu';
+}
+function mumuArrModeChanged() {
+  try { localStorage.setItem(MM_ARR_KEY, mumuArrMode()); } catch (e) {}
+  // ช่องขนาด/คอลัมน์/ห่าง ใช้เฉพาะแบบตาราง — หรี่ไว้ตอนใช้ Arrange ของ MuMu
+  const dim = mumuArrMode() === 'mumu';
+  ['mmSize', 'mmCols', 'mmGap'].forEach(id => { const e = document.getElementById(id); if (e) e.style.opacity = dim ? '0.45' : '1'; });
+}
+function mumuArrOpts() {
+  return { mode: mumuArrMode(), cols: mumuCols(), gap: mumuGap(), size: mumuSize() };
+}
+function mumuArrText(res) {
+  if (res.mode === 'mumu') return `✅ เรียงด้วย Arrange ของ MuMu (${res.count} จอ)`;
+  const cell = (res.cell && res.cell.length === 2) ? ` (จอละ ${res.cell[0]}×${res.cell[1]})` : '';
+  return `✅ เรียง ${res.count}/${res.total} จอ เป็น ${res.cols}×${res.rows}${cell}`;
+}
+
 async function mumuArrange(i) {
   const a = (window._mumuAgents || [])[i];
   if (!a) return;
   const status = document.getElementById('mm_status_' + i);
   status.innerHTML = '<span style="color:var(--accent)">⏳ กำลังเรียงจอ...</span>';
-  const res = await mumuReq(a.agent_id, 'arrange', [], { cols: mumuCols(), gap: mumuGap(), size: mumuSize() });
+  const res = await mumuReq(a.agent_id, 'arrange', [], mumuArrOpts());
   if (res.error) { status.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`; return; }
   const warn = (res.errors && res.errors.length)
     ? ` <span style="color:var(--warning)">(${res.errors.length} จอย้ายไม่ได้)</span>` : '';
   const skip = (res.skipped && res.skipped.length)
     ? ` <span style="color:var(--text-dim)">· ข้ามตัวจัดการ ${res.skipped.length} หน้าต่าง</span>` : '';
-  status.innerHTML = `<span style="color:#22c55e">✅ เรียง ${res.count}/${res.total} จอ`
-    + ` เป็น ${res.cols}×${res.rows} (จอละ ${res.cell[0]}×${res.cell[1]})</span>${warn}${skip}`;
+  status.innerHTML = `<span style="color:#22c55e">${mumuArrText(res)}</span>${warn}${skip}`;
 }
 
 async function mumuMinimizeAll() {
@@ -4094,17 +4118,17 @@ async function mumuMinimizeAll() {
 async function mumuArrangeAll() {
   const list = window._mumuAgents || [];
   if (!list.length) return;
-  const c = mumuCols(), g = mumuGap(), sz = mumuSize();
+  const opts = mumuArrOpts();
   toast(`กำลังเรียงจอบน ${list.length} เครื่อง...`, 'info');
   let ok = 0;
   for (let i = 0; i < list.length; i++) {
-    const res = await mumuReq(list[i].agent_id, 'arrange', [], { cols: c, gap: g, size: sz });
+    const res = await mumuReq(list[i].agent_id, 'arrange', [], opts);
     const st = document.getElementById('mm_status_' + i);
     if (res.error) {
       if (st) st.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`;
     } else {
       ok++;
-      if (st) st.innerHTML = `<span style="color:#22c55e">✅ เรียง ${res.count}/${res.total} จอ เป็น ${res.cols}×${res.rows}</span>`;
+      if (st) st.innerHTML = `<span style="color:#22c55e">${mumuArrText(res)}</span>`;
     }
   }
   toast(`เรียงจอสำเร็จ ${ok}/${list.length} เครื่อง`, ok === list.length ? 'success' : 'info');
@@ -4133,7 +4157,7 @@ async function quickAllAgents(sub, opts, verb) {
 }
 
 function quickArrangeAll() {
-  return quickAllAgents('arrange', { cols: mumuCols(), gap: mumuGap(), size: mumuSize() }, 'เรียงจอ');
+  return quickAllAgents('arrange', mumuArrOpts(), 'เรียงจอ');
 }
 
 function quickMinimizeAll() {
@@ -4217,6 +4241,12 @@ function openMumuDashboard() {
       <h2 style="flex:1; font-size:18px">🎮 MuMu Player 12 — เปิด/ปิด รายเครื่อง</h2>
       <button class="btn" onclick="mumuLoadAll()">🔄 โหลดจอทุกเครื่อง</button>
       <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--text-dim)">
+        เรียงแบบ
+        <select id="mmArrMode" onchange="mumuArrModeChanged()" title="Arrange ของ MuMu = ปุ่ม Arrange ในหน้าต่าง MuMuPlayer (MuMuManager sort) · ตารางเอง = ใช้ ขนาดจอ/คอลัมน์/ห่าง ด้านขวา"
+                style="padding:6px 8px; font-size:12px">
+          <option value="mumu" selected>Arrange ของ MuMu</option>
+          <option value="grid">ตารางเอง (ขนาด/คอลัมน์/ห่าง)</option>
+        </select>
         ขนาดจอ
         <select id="mmSize" onchange="mumuSizeChanged()" title="ความกว้างต่อจอ"
                 style="padding:6px 8px; font-size:12px">
@@ -4250,6 +4280,9 @@ function openMumuDashboard() {
   if (sizeSel && savedSize !== null && [...sizeSel.options].some(o => o.value === savedSize)) {
     sizeSel.value = savedSize;
   }
+  // คืนวิธีเรียงจอที่เคยเลือกไว้ (Arrange ของ MuMu / ตารางเอง) + หรี่ช่องที่ไม่ได้ใช้
+  const arrSel = document.getElementById('mmArrMode');
+  if (arrSel) { arrSel.value = mumuArrMode(); mumuArrModeChanged(); }
 }
 
 async function mumuLoad(i) {
