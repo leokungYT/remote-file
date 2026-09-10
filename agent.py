@@ -2741,9 +2741,50 @@ def _proc_exe_name(pid):
         k.CloseHandle(h)
 
 
+def _win_close_warp_windows():
+    """ปิด "หน้าต่าง" ของแอป Cloudflare WARP ที่ค้างอยู่บนจอ (ส่ง WM_CLOSE → แอปเก็บตัวลง tray เอง
+       ไม่ได้ตัดการเชื่อมต่อ WARP และไม่ได้ปิดโปรเซส) — หน้าต่างนี้ไม่ยอมพับตาม Win+D
+       คืน (จำนวนหน้าต่างที่สั่งปิด, error หรือ None)"""
+    import ctypes
+    from ctypes import wintypes
+    try:
+        u = _win_user32()
+        WM_CLOSE = 0x0010
+        hits = []
+        ENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def _cb(hwnd, _lparam):
+            try:
+                if not u.IsWindowVisible(hwnd):
+                    return True
+                pid = wintypes.DWORD()
+                u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                exe = (_proc_exe_name(pid.value) or "").lower()
+                n = u.GetWindowTextLengthW(hwnd)
+                buf = ctypes.create_unicode_buffer(n + 1)
+                if n > 0:
+                    u.GetWindowTextW(hwnd, buf, n + 1)
+                title = (buf.value or "").strip().lower()
+                if exe == "cloudflare warp.exe" or title.startswith("cloudflare warp"):
+                    hits.append(hwnd)
+            except Exception:
+                pass
+            return True
+
+        u.EnumWindows(ENUMPROC(_cb), 0)
+        for hwnd in hits:
+            u.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        if hits:
+            logger.info(f"  ปิดหน้าต่าง Cloudflare WARP {len(hits)} หน้าต่าง (ลง tray)")
+        return len(hits), None
+    except Exception as e:
+        return 0, str(e)
+
+
 def _win_minimize_all(undo=False):
     """พับทุกหน้าต่างลง taskbar (เหมือนกด Win+D) หรือคืนกลับถ้า undo=True
-       ส่ง WM_COMMAND ไปที่หน้าต่าง taskbar ซึ่งเป็นวิธีเดียวกับที่ Windows ใช้เอง"""
+       ส่ง WM_COMMAND ไปที่หน้าต่าง taskbar ซึ่งเป็นวิธีเดียวกับที่ Windows ใช้เอง
+       ตอนพับ (ไม่ใช่ undo) จะปิดหน้าต่างแอป Cloudflare WARP ลง tray ให้ด้วย (มันไม่พับตาม Win+D)"""
     try:
         u = _win_user32()
         hwnd = u.FindWindowW("Shell_TrayWnd", None)
@@ -2751,7 +2792,13 @@ def _win_minimize_all(undo=False):
             return {"error": "หา taskbar ไม่เจอ (Shell_TrayWnd) — เดสก์ท็อปอาจยังไม่พร้อม"}
         MIN_ALL, MIN_ALL_UNDO = 419, 416
         u.SendMessageW(hwnd, 0x0111, MIN_ALL_UNDO if undo else MIN_ALL, 0)
-        return {"success": True, "undo": bool(undo)}
+        res = {"success": True, "undo": bool(undo)}
+        if not undo:
+            n, err = _win_close_warp_windows()
+            res["warp_closed"] = n
+            if err:
+                res["warp_error"] = err
+        return res
     except Exception as e:
         return {"error": f"พับหน้าต่างไม่สำเร็จ: {e}"}
 

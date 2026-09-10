@@ -2053,7 +2053,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openBroadcastBottiket()">🎫 ส่งเข้า bot-tiket (ทุกเครื่อง)</button>
     <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
     <button class="btn" onclick="quickArrangeAll()" title="เรียงหน้าต่าง MuMu ทุกเครื่อง — ค่าเริ่มต้นใช้ปุ่ม Arrange ของ MuMu เอง (เปลี่ยนเป็นตารางเองได้ในหน้า MuMu)">🔲 เรียงจอ</button>
-    <button class="btn" onclick="quickMinimizeAll()" title="ย่อทุกหน้าต่างลง taskbar ทุกเครื่อง">🗕 พับทุกแอป</button>
+    <button class="btn" onclick="quickMinimizeAll()" title="ย่อทุกหน้าต่างลง taskbar ทุกเครื่อง + ปิดหน้าต่าง Cloudflare WARP ลง tray (ไม่ตัด VPN)">🗕 พับทุกแอป</button>
     <button class="btn" onclick="openMumuCloneDashboard()">🧬 Clone MuMu</button>
     <button class="btn" onclick="openRunFileDashboard()">▶️ รันไฟล์ .bat</button>
     <button class="btn" onclick="openOneClickDashboard()" title="หยุดบอท → ปิด MuMu → เปิด MuMu ทุกจอ → รอบูต → รัน .bat — ทุกเครื่องที่ติ๊ก พร้อมกัน">🚀 One-click</button>
@@ -4061,9 +4061,10 @@ async function mumuMinimize(i) {
   const status = document.getElementById('mm_status_' + i);
   status.innerHTML = '<span style="color:var(--accent)">⏳ กำลังพับหน้าต่าง...</span>';
   const res = await mumuReq(a.agent_id, 'minimize_all', []);
+  const warp = res.warp_closed ? ` · ปิดหน้าต่าง Cloudflare ${res.warp_closed}` : '';
   status.innerHTML = res.error
     ? `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`
-    : '<span style="color:#22c55e">✅ พับทุกแอปแล้ว</span>';
+    : `<span style="color:#22c55e">✅ พับทุกแอปแล้ว${warp}</span>`;
 }
 
 // ── วิธีเรียงจอ: 'mumu' = ปุ่ม Arrange ของ MuMu เอง (MuMuManager sort) — ค่าเริ่มต้น
