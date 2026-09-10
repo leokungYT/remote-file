@@ -2056,6 +2056,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="quickMinimizeAll()" title="ย่อทุกหน้าต่างลง taskbar ทุกเครื่อง">🗕 พับทุกแอป</button>
     <button class="btn" onclick="openMumuCloneDashboard()">🧬 Clone MuMu</button>
     <button class="btn" onclick="openRunFileDashboard()">▶️ รันไฟล์ .bat</button>
+    <button class="btn" onclick="openOneClickDashboard()" title="หยุดบอท → ปิด MuMu → เปิด MuMu ทุกจอ → รอบูต → รัน .bat — ทุกเครื่องที่ติ๊ก พร้อมกัน">🚀 One-click</button>
     <button class="btn" onclick="openBotUpdateDashboard()">⬆️ อัปเดตบอท (ติ๊กเลือกเครื่อง)</button>
     <button class="btn" onclick="openBotUpdateDashboard('lgr')" title="ดึงโค้ด Line Ranger ตัวล่าสุดจาก GitHub (leokungYT/main) มาทับโฟลเดอร์ main ของเครื่องที่ติ๊ก">🏹 อัปเดต LGR (ติ๊กเลือกเครื่อง)</button>
     <button class="btn" onclick="openLiveView()">🖥️ Live View</button>
@@ -4425,6 +4426,198 @@ async function mumuOpenAllMachines() {
   toast(`สั่งเปิด MuMu ทุกจอ: ${ok}/${agents.length} เครื่อง (รวม ${total} จอ)`,
         ok === agents.length ? 'success' : 'info');
   setTimeout(mmProgressHide, 9000);   // ซ่อนแถบหลังจบสักครู่
+}
+
+// ═══════════════════════════════════════════════════════════
+//  ONE-CLICK COMBO — หยุดบอท → ปิด MuMu → เปิด MuMu ทุกจอ → รอจอบูต → รันไฟล์ .bat
+//  ทุกเครื่องที่ติ๊กทำ "พร้อมกัน" (แต่ละเครื่องมีลำดับของตัวเอง) — ใช้แทนการกดทีละปุ่ม
+// ═══════════════════════════════════════════════════════════
+let _ocAgents = [];
+let _ocRunning = false;
+const OC_KEY = 'ocCfg';
+const OC_S = (c, t) => '<span style="color:var(--' + c + '); font-size:12px">' + t + '</span>';
+
+function ocCfg() {
+  let c = { base: 'pes', name: 'login.bat', hidden: false, stop: true, close: true, open: true, wait: 90 };
+  try { c = Object.assign(c, JSON.parse(localStorage.getItem(OC_KEY) || '{}')); } catch (e) {}
+  const g = (id) => document.getElementById(id);
+  if (g('ocProject')) c.base = g('ocProject').value;
+  if (g('ocFile')) c.name = (g('ocFile').value || '').trim();
+  if (g('ocHidden')) c.hidden = g('ocHidden').checked;
+  if (g('ocStop')) c.stop = g('ocStop').checked;
+  if (g('ocClose')) c.close = g('ocClose').checked;
+  if (g('ocOpen')) c.open = g('ocOpen').checked;
+  if (g('ocWait')) { const w = parseInt(g('ocWait').value, 10); c.wait = isNaN(w) ? 90 : Math.max(0, Math.min(900, w)); }
+  return c;
+}
+function ocSaveCfg() { try { localStorage.setItem(OC_KEY, JSON.stringify(ocCfg())); } catch (e) {} }
+function ocIncluded() {
+  return _ocAgents.map((a, i) => i).filter(i => { const e = document.getElementById('oc_inc_' + i); return e && e.checked; });
+}
+function ocTickAll(v) { _ocAgents.forEach((a, i) => { const e = document.getElementById('oc_inc_' + i); if (e) e.checked = v; }); }
+function ocOnProjectChange() { ocSaveCfg(); ocLoadFiles(); }
+
+function openOneClickDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  _ocAgents = (agentsData || []).slice();
+  if (!_ocAgents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+  const cfg = ocCfg();   // ยังไม่มี element บนหน้า → ได้ค่าที่จำไว้ล่าสุด
+  const inputStyle = 'background:var(--bg-card); border:1px solid var(--border); color:var(--text-primary); border-radius:8px; padding:8px 10px';
+  const projOpts = RUN_PROJECTS.map(p =>
+    `<option value="${escAttr(p.key)}" ${cfg.base === p.key ? 'selected' : ''}>${escHtml(p.label)}</option>`).join('');
+  const cards = _ocAgents.map((a, i) => {
+    const label = escHtml(a.name || a.hostname || a.agent_id);
+    return `<div class="mumu-card" id="oc_card_${i}">
+      <div class="mumu-head">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:700; font-size:14px">
+          <input type="checkbox" class="oc_inc" id="oc_inc_${i}" checked style="width:auto; margin:0">
+          <span>🖥️ ${label}</span>
+        </label>
+        <div class="mumu-actions">
+          <button class="btn" onclick="ocRunOne(${i})" title="ทำ one-click เฉพาะเครื่องนี้">🚀 เครื่องนี้</button>
+        </div>
+      </div>
+      <div class="mumu-body" id="oc_status_${i}"><span style="color:var(--text-dim); font-size:12px">⚪ พร้อม</span></div>
+    </div>`;
+  }).join('');
+  const chk = (id, on, text, title) =>
+    `<label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; white-space:nowrap" title="${escAttr(title || '')}">
+       <input type="checkbox" id="${id}" ${on ? 'checked' : ''} style="width:auto; margin:0" onchange="ocSaveCfg()"> ${text}</label>`;
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🚀 One-click combo — ปิด/เปิด MuMu ใหม่ทั้งหมด แล้วรันบอทเอง</h2>
+      <button class="btn btn-primary" onclick="openOneClickDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="pick-panel" style="margin-bottom:14px">
+      <div class="pick-head">
+        <span class="pick-title">⚙️ ขั้นตอนที่จะทำ (ติ๊ก = ทำ) — ทุกเครื่องที่เลือกทำพร้อมกัน แต่ละเครื่องไล่ตามลำดับ</span>
+      </div>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:10px">
+        ${chk('ocStop', cfg.stop, '1️⃣ หยุดบอทเดิมในโฟลเดอร์โปรเจกต์', 'ฆ่า process .bat/.py ที่รันอยู่ในโฟลเดอร์โปรเจกต์ก่อน')}
+        ${chk('ocClose', cfg.close, '2️⃣ ปิด MuMu ทั้งหมด', 'taskkill ทุก process MuMu ของเครื่องนั้น')}
+        ${chk('ocOpen', cfg.open, '3️⃣ เปิด MuMu ทุกจอ', 'MuMuManager control -v all launch')}
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap" title="หลังสั่งเปิดจอ รอให้จอบูตเสร็จก่อนค่อยรัน .bat">
+          ⏳ รอจอบูต <input type="number" id="ocWait" min="0" max="900" value="${cfg.wait}" style="width:70px; padding:6px 8px" onchange="ocSaveCfg()"> วิ</label>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">
+        <span style="font-size:13px; white-space:nowrap">4️⃣ รันไฟล์</span>
+        <select id="ocProject" class="btn project-select" style="${inputStyle}" onchange="ocOnProjectChange()">${projOpts}</select>
+        <input type="text" id="ocFile" list="ocFileList" class="dash-search" style="flex:1; min-width:200px"
+               placeholder="login.bat" value="${escAttr(cfg.name)}" oninput="ocSaveCfg()">
+        <datalist id="ocFileList"></datalist>
+        ${chk('ocHidden', cfg.hidden, 'ซ่อนหน้าต่าง', 'รัน .bat แบบไม่โชว์หน้าต่าง cmd ที่เครื่องลูก')}
+      </div>
+      <div id="ocFileHint" style="font-size:11px; color:var(--text-dim); margin-top:8px">⏳ กำลังดึงรายชื่อไฟล์...</div>
+      <div class="pick-head" style="margin:12px 0 0">
+        <button class="btn btn-primary" id="ocGoBtn" onclick="ocRunAll()">🚀 เริ่ม One-click (เครื่องที่ติ๊ก)</button>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="ocTickAll(true)">ติ๊กทุกเครื่อง</button>
+        <button class="btn" onclick="ocTickAll(false)">เอาออกทั้งหมด</button>
+      </div>
+    </div>
+    <div id="mmProg" class="mm-prog" style="display:none">
+      <div class="mm-prog-top"><span id="mmProgMsg"></span><span id="mmProgPct" style="color:var(--text-dim)"></span></div>
+      <div class="mm-prog-track"><div id="mmProgBar" class="mm-prog-bar"></div></div>
+    </div>
+    <div class="mumu-grid">${cards}</div>`;
+  ocLoadFiles();
+}
+
+async function ocLoadFiles() {
+  // รายชื่อไฟล์ .bat ในโฟลเดอร์โปรเจกต์ จากเครื่องแรกที่ตอบ (เหมือนหน้ารันไฟล์)
+  const cfg = ocCfg();
+  const hint = document.getElementById('ocFileHint');
+  for (const a of _ocAgents) {
+    const res = await mcReq(a.agent_id, 'request_run_file', { sub: 'list', base_match: cfg.base }, 20000);
+    if (res.error || !res.files) continue;
+    const dl = document.getElementById('ocFileList');
+    if (dl) dl.innerHTML = res.files.map(f => `<option value="${escAttr(f)}">`).join('');
+    if (hint) hint.innerHTML = `ไฟล์ที่รันได้ในโฟลเดอร์ <code>${escHtml(res.base || cfg.base)}</code>: ${res.files.length} ไฟล์ (จากเครื่อง ${escHtml(a.name || a.hostname || a.agent_id)}) — กดที่ช่องกรอกเพื่อเลือก`;
+    return;
+  }
+  if (hint) hint.innerHTML = '<span style="color:var(--warning)">ดึงรายชื่อไฟล์ไม่ได้ — พิมพ์ชื่อไฟล์เอง เช่น login.bat</span>';
+}
+
+// ทำ one-click ให้เครื่องเดียว คืน true = ครบทุกขั้น
+async function ocRunOne(i, cfg, quiet) {
+  const a = _ocAgents[i];
+  if (!a) return false;
+  cfg = cfg || ocCfg();
+  if (!cfg.name) { toast('ยังไม่ได้ใส่ชื่อไฟล์ .bat ที่จะรัน', 'error'); return false; }
+  const el = document.getElementById('oc_status_' + i);
+  const set = (h) => { if (el) el.innerHTML = h; };
+  const nm = a.name || a.hostname || a.agent_id;
+  const steps = [];
+  const trail = () => steps.length ? ' <span style="color:var(--text-dim); font-size:11px">(' + escHtml(steps.join(' → ')) + ')</span>' : '';
+  const fail = (t) => { set(OC_S('danger', '❌ ' + escHtml(t)) + trail()); if (!quiet) toast(nm + ': ' + t, 'error'); return false; };
+
+  if (cfg.stop) {
+    set(OC_S('accent', '⏹️ หยุดบอทใน ' + escHtml(cfg.base) + '...'));
+    const st = await mcReq(a.agent_id, 'request_run_file', { sub: 'stop', base_match: cfg.base }, 120000);
+    if (st.error) return fail('หยุดบอทไม่ได้: ' + st.error);
+    steps.push('หยุดบอท ' + (st.count || 0));
+  }
+  if (cfg.close) {
+    set(OC_S('accent', '⛔ ปิด MuMu ทั้งหมด...') + trail());
+    const cl = await mcReq(a.agent_id, 'request_mumu', { sub: 'close', indices: [] }, 120000);
+    if (cl.error) return fail('ปิด MuMu ไม่ได้: ' + cl.error);
+    steps.push('ปิด MuMu ' + (cl.count || 0) + ' process');
+    await _sleep(5000);           // ให้ process MuMu ตายสนิทก่อนสั่งเปิดใหม่
+  }
+  if (cfg.open) {
+    set(OC_S('accent', '▶️ เปิด MuMu ทุกจอ...') + trail());
+    const op = await mcReq(a.agent_id, 'request_mumu', { sub: 'open_all', indices: [] }, 240000);
+    if (op.error) return fail('เปิด MuMu ไม่ได้: ' + op.error);
+    steps.push('เปิด ' + (op.count || 0) + ' จอ');
+    for (let s = cfg.wait; s > 0; s -= 5) {
+      set(OC_S('accent', '⏳ รอจอบูต ' + s + ' วิ...') + trail());
+      await _sleep(Math.min(5, s) * 1000);
+    }
+  }
+  set(OC_S('accent', '▶️ รัน ' + escHtml(cfg.name) + '...') + trail());
+  const run = await mcReq(a.agent_id, 'request_run_file',
+    { sub: 'start', base_match: cfg.base, name: cfg.name, hidden: cfg.hidden, force: true }, 60000);
+  if (run.error) return fail('รัน .bat ไม่ได้: ' + run.error);
+  steps.push('รัน ' + (run.name || cfg.name) + ' (PID ' + (run.pid || '?') + ')');
+  set(OC_S('success', '✅ เสร็จ: ' + escHtml(steps.join(' → '))));
+  if (!quiet) toast(nm + ': one-click เสร็จ', 'success');
+  return true;
+}
+
+async function ocRunAll() {
+  if (_ocRunning) { toast('กำลังทำอยู่ รอให้รอบนี้จบก่อน', 'info'); return; }
+  const cfg = ocCfg();
+  if (!cfg.name) { toast('ยังไม่ได้ใส่ชื่อไฟล์ .bat ที่จะรัน', 'error'); return; }
+  const idxs = ocIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  const plan = [cfg.stop ? 'หยุดบอท' : null, cfg.close ? 'ปิด MuMu' : null,
+                cfg.open ? ('เปิด MuMu ทุกจอ + รอ ' + cfg.wait + ' วิ') : null,
+                'รัน ' + cfg.base + '\\' + cfg.name].filter(Boolean).join(' → ');
+  if (!confirm(`🚀 One-click ${idxs.length} เครื่อง ?\n${plan}\n\nทุกเครื่องทำพร้อมกัน — จอทั้งหมดของเครื่องพวกนั้นจะถูกปิดแล้วเปิดใหม่`)) return;
+  ocSaveCfg();
+  _ocRunning = true;
+  const btn = document.getElementById('ocGoBtn');
+  if (btn) btn.disabled = true;
+  let doneN = 0, ok = 0;
+  mmProgress(`🚀 กำลังทำ... 0/<b>${idxs.length}</b> เครื่อง`, 0);
+  await Promise.all(idxs.map(async (i) => {
+    const r = await ocRunOne(i, cfg, true);
+    doneN++; if (r) ok++;
+    const last = doneN === idxs.length;
+    mmProgress(`🚀 เสร็จ <b>${doneN}</b>/<b>${idxs.length}</b> เครื่อง`
+                 + (doneN - ok ? ` · <span style="color:var(--danger)">พลาด ${doneN - ok}</span>` : ''),
+               Math.round(doneN * 100 / idxs.length),
+               last ? (ok === idxs.length ? 'var(--success)' : 'var(--warning)') : 'var(--accent)');
+  }));
+  _ocRunning = false;
+  if (btn) btn.disabled = false;
+  toast(`One-click เสร็จ ${ok}/${idxs.length} เครื่อง`, ok === idxs.length ? 'success' : 'info');
 }
 
 // ═══════════════════════════════════════════════════════════
