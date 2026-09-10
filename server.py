@@ -4438,7 +4438,7 @@ const OC_KEY = 'ocCfg';
 const OC_S = (c, t) => '<span style="color:var(--' + c + '); font-size:12px">' + t + '</span>';
 
 function ocCfg() {
-  let c = { base: 'pes', name: 'login.bat', hidden: false, stop: true, close: true, open: true, wait: 90 };
+  let c = { base: 'pes', name: 'login.bat', hidden: false, stop: true, close: true, open: true, arrange: true, wait: 90 };
   try { c = Object.assign(c, JSON.parse(localStorage.getItem(OC_KEY) || '{}')); } catch (e) {}
   const g = (id) => document.getElementById(id);
   if (g('ocProject')) c.base = g('ocProject').value;
@@ -4447,6 +4447,7 @@ function ocCfg() {
   if (g('ocStop')) c.stop = g('ocStop').checked;
   if (g('ocClose')) c.close = g('ocClose').checked;
   if (g('ocOpen')) c.open = g('ocOpen').checked;
+  if (g('ocArrange')) c.arrange = g('ocArrange').checked;
   if (g('ocWait')) { const w = parseInt(g('ocWait').value, 10); c.wait = isNaN(w) ? 90 : Math.max(0, Math.min(900, w)); }
   return c;
 }
@@ -4502,11 +4503,12 @@ function openOneClickDashboard() {
         ${chk('ocStop', cfg.stop, '1️⃣ หยุดบอทเดิมในโฟลเดอร์โปรเจกต์', 'ฆ่า process .bat/.py ที่รันอยู่ในโฟลเดอร์โปรเจกต์ก่อน')}
         ${chk('ocClose', cfg.close, '2️⃣ ปิด MuMu ทั้งหมด', 'taskkill ทุก process MuMu ของเครื่องนั้น')}
         ${chk('ocOpen', cfg.open, '3️⃣ เปิด MuMu ทุกจอ', 'MuMuManager control -v all launch')}
-        <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap" title="หลังสั่งเปิดจอ รอให้จอบูตเสร็จก่อนค่อยรัน .bat">
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap" title="หลังสั่งเปิดจอ รอให้จอบูตเสร็จก่อนค่อยเรียงจอ/รัน .bat">
           ⏳ รอจอบูต <input type="number" id="ocWait" min="0" max="900" value="${cfg.wait}" style="width:70px; padding:6px 8px" onchange="ocSaveCfg()"> วิ</label>
+        ${chk('ocArrange', cfg.arrange, '4️⃣ เรียงจอ', 'เรียงหน้าต่าง MuMu ด้วยปุ่ม Arrange ของ MuMu (หรือแบบตารางตามที่ตั้งไว้ในหน้า MuMu) หลังจอบูตเสร็จ')}
       </div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">
-        <span style="font-size:13px; white-space:nowrap">4️⃣ รันไฟล์</span>
+        <span style="font-size:13px; white-space:nowrap">5️⃣ รันไฟล์</span>
         <select id="ocProject" class="btn project-select" style="${inputStyle}" onchange="ocOnProjectChange()">${projOpts}</select>
         <input type="text" id="ocFile" list="ocFileList" class="dash-search" style="flex:1; min-width:200px"
                placeholder="login.bat" value="${escAttr(cfg.name)}" oninput="ocSaveCfg()">
@@ -4580,6 +4582,13 @@ async function ocRunOne(i, cfg, quiet) {
       await _sleep(Math.min(5, s) * 1000);
     }
   }
+  if (cfg.arrange) {
+    // เรียงจอหลังจอขึ้นแล้ว — ใช้วิธีเดียวกับปุ่มเรียงจอ (ค่าเริ่มต้น = Arrange ของ MuMu) พลาดก็ไปรัน .bat ต่อ
+    set(OC_S('accent', '🔲 เรียงจอ...') + trail());
+    const ar = await mcReq(a.agent_id, 'request_mumu', Object.assign({ sub: 'arrange', indices: [] }, mumuArrOpts()), 120000);
+    if (ar.error) steps.push('เรียงจอไม่ได้ (' + ar.error + ')');
+    else steps.push(ar.mode === 'mumu' ? 'เรียงจอ (Arrange MuMu ' + (ar.count || 0) + ' จอ)' : 'เรียงจอ ' + (ar.count || 0) + ' จอ');
+  }
   set(OC_S('accent', '▶️ รัน ' + escHtml(cfg.name) + '...') + trail());
   const run = await mcReq(a.agent_id, 'request_run_file',
     { sub: 'start', base_match: cfg.base, name: cfg.name, hidden: cfg.hidden, force: true }, 60000);
@@ -4598,6 +4607,7 @@ async function ocRunAll() {
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
   const plan = [cfg.stop ? 'หยุดบอท' : null, cfg.close ? 'ปิด MuMu' : null,
                 cfg.open ? ('เปิด MuMu ทุกจอ + รอ ' + cfg.wait + ' วิ') : null,
+                cfg.arrange ? 'เรียงจอ' : null,
                 'รัน ' + cfg.base + '\\' + cfg.name].filter(Boolean).join(' → ');
   if (!confirm(`🚀 One-click ${idxs.length} เครื่อง ?\n${plan}\n\nทุกเครื่องทำพร้อมกัน — จอทั้งหมดของเครื่องพวกนั้นจะถูกปิดแล้วเปิดใหม่`)) return;
   ocSaveCfg();
