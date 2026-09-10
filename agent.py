@@ -2517,10 +2517,14 @@ def _mumu_get_setting(mgr, idx, key):
         return None
 
 
+MUMU_KEEPALIVE_KEY = "app_keptlive"   # "App running" (ตั้งค่า > Others): ให้แอปหลายตัวรันค้างเบื้องหลังตอนจอว่าง
+                                       # ชื่อ key ตามที่ MuMuManager 5.27 (nx_main) ตอบใน `setting -v 0 -aw` — ไม่ใช่ app_keptalive
+
+
 def _mumu_set_display(indices=None, width=None, height=None, dpi=None,
                       fps=None, cpu=None, ram=None, root=None, renderer=None,
-                      restart=True):
-    """ตั้งค่าจอของ MuMu หลายจอในทีเดียว — ความละเอียด / FPS / CPU / RAM / root / renderer
+                      keepalive=None, restart=True):
+    """ตั้งค่าจอของ MuMu หลายจอในทีเดียว — ความละเอียด / FPS / CPU / RAM / root / renderer / App running
        แล้วรีสตาร์ทเฉพาะจอที่เปิดอยู่ให้ค่าใหม่มีผลทันที
 
        ค่าไหนเป็น None = ไม่แตะของเดิม
@@ -2528,6 +2532,7 @@ def _mumu_set_display(indices=None, width=None, height=None, dpi=None,
          resolution_mode / resolution_{width,height,dpi}.custom
          max_frame_rate, performance_mode, performance_{cpu,mem}.custom, root_permission
          renderer_mode (vk = Vulkan, dx = DirectX)
+         app_keptlive (App running: true = ให้แอปหลายตัวรันค้างเบื้องหลัง)
 
        รวมทุก key เป็นคำสั่ง setting เดียวต่อจอ จะได้ไม่ต้องเปิดโปรเซสหลายรอบ
        (เครื่องลูกมีหลายสิบจอ ถ้าแยกคำสั่งจะช้ามาก)
@@ -2565,9 +2570,11 @@ def _mumu_set_display(indices=None, width=None, height=None, dpi=None,
             kv += ["-k", "performance_mem.custom", "-val", str(int(ram))]
     if root is not None:
         kv += ["-k", "root_permission", "-val", ("true" if root else "false")]
+    if keepalive is not None:
+        kv += ["-k", MUMU_KEEPALIVE_KEY, "-val", ("true" if keepalive else "false")]
 
     if not kv and renderer not in ("vk", "dx"):
-        return {"error": "ยังไม่ได้เลือกค่าที่จะตั้ง (ความละเอียด / FPS / CPU / RAM / root / renderer)"}
+        return {"error": "ยังไม่ได้เลือกค่าที่จะตั้ง (ความละเอียด / FPS / CPU / RAM / root / renderer / App running)"}
 
     errors, done = [], []
 
@@ -2577,6 +2584,13 @@ def _mumu_set_display(indices=None, width=None, height=None, dpi=None,
     if kv:
         done, errs, _ok = _mumu_apply_kv(mgr, want, targets, kv)
         errors += errs
+        # App running: อ่านค่ากลับมายืนยัน (MuMuManager อาจ rc=0 ทั้งที่ key ไม่ตรงเวอร์ชัน)
+        if keepalive is not None and done:
+            cur = _mumu_get_setting(mgr, targets[0]["index"], MUMU_KEEPALIVE_KEY)
+            want_v = "true" if keepalive else "false"
+            if cur and len(cur) <= 12 and cur.strip().lower() != want_v:
+                errors.append(f"App running: สั่ง '{want_v}' แต่จออ่านค่าได้เป็น '{cur}' "
+                              f"— key '{MUMU_KEEPALIVE_KEY}' อาจไม่ตรงกับ MuMu เวอร์ชันนี้")
 
     # ── renderer (Vulkan/DirectX) — ยิงเป็นคำสั่งแยก ─────────────────────────
     renderer_done = False
@@ -2632,6 +2646,8 @@ def _mumu_set_display(indices=None, width=None, height=None, dpi=None,
         parts.append(f"RAM {int(ram)} GB")
     if root is not None:
         parts.append("เปิด root" if root else "ปิด root")
+    if keepalive is not None:
+        parts.append("เปิด App running" if keepalive else "ปิด App running")
     if renderer and renderer_done:
         parts.append("Vulkan" if renderer == "vk" else "DirectX")
     logger.info(f"  MuMu display: ตั้ง {len(done)}/{len(targets)} จอ ({', '.join(parts)}) "
@@ -2958,6 +2974,7 @@ def handle_mumu_control(req_id, data):
                     dpi=data.get("dpi"), fps=data.get("fps"),
                     cpu=data.get("cpu"), ram=data.get("ram"),
                     root=data.get("root"), renderer=data.get("renderer"),
+                    keepalive=data.get("keepalive"),
                     restart=bool(data.get("restart", True)))
             elif sub == "arrange":
                 res = _mumu_arrange(data.get("cols"), data.get("gap"), data.get("size"))

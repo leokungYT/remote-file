@@ -366,6 +366,7 @@ def handle_mumu_req(data):
         "dpi": data.get("dpi"), "fps": data.get("fps"),
         "cpu": data.get("cpu"), "ram": data.get("ram"),
         "root": data.get("root"), "renderer": data.get("renderer"),
+        "keepalive": data.get("keepalive"),   # App running (ให้แอปรันค้างเบื้องหลัง) true/false/None
         "restart": data.get("restart", True),
     }, request.sid)
     if req_id:
@@ -2043,6 +2044,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <button class="btn" onclick="openRangerDashboard()">🏹 Dashboard Line Ranger</button>
     <button class="btn" onclick="openRangerFindDashboard()">🔎 Line Ranger-Find</button>
+    <button class="btn" onclick="openLoginSuccessDashboard()" title="ไฟล์ใน main/login-success รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">✅ login-success</button>
     <button class="btn" onclick="openFastRandomDashboard()">🎲 fast-random</button>
     <button class="btn" onclick="openBottiketDashboard()">🎫 Dashboard bot-tiket</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
@@ -2493,8 +2495,11 @@ const FOLDER_DASH = {
   bottiket: { subpath: 'bot-tiket', filesub: 'bot-tiket\\backup', base: 'bot-tiket', title: '🎫 Dashboard bot-tiket — ไฟล์ backup รายเครื่อง (.xml)', label: 'bot-tiket backup', reopen: 'openBottiketDashboard', runbat: 'start.bat' },
   // ปุ่ม "โหลดทั้งหมด" ของหน้า Dashboard Line Ranger (backup-id ทั้งโฟลเดอร์ รวมทุกชุดย่อย เก็บโครงโฟลเดอร์ไว้ใน zip)
   rangerid: { subpath: 'backup-id', base: 'main', title: '🏹 Dashboard Line Ranger', label: 'backup-id', reopen: 'openRangerDashboard' },
+  // login-success ของ Line Ranger: ไฟล์ id ที่ล็อกอินสำเร็จ (ชื่อไฟล์ไม่มีชื่อฮีโร่ → ใช้แดชบอร์ดนับรายเครื่อง + โหลด/ย้ายทั้งหมด)
+  loginsuccess: { subpath: 'login-success', base: 'main', title: '✅ Dashboard login-success — ไฟล์ที่ล็อกอินสำเร็จ รายเครื่อง (Line Ranger)', label: 'login-success', reopen: 'openLoginSuccessDashboard' },
 };
-let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL', rangerid: 'ALL' };
+let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL', rangerid: 'ALL', loginsuccess: 'ALL' };
+function openLoginSuccessDashboard() { return openFolderDash('loginsuccess'); }
 
 function openInputIdDashboard() { return openFolderDash('inputid'); }
 function openBackupDashboard() { return openBackupRich(); }   // Backup โชว์ breakdown ข้างในแบบ PES (นับ .xml)
@@ -2608,6 +2613,8 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
         </label>
         <button class="btn btn-primary" id="fdBtn" onclick="fdExport('${kind}')" ${total ? '' : 'disabled'}>
           📦 โหลดทั้งหมด (${total.toLocaleString()} ไฟล์)</button>
+        <button class="btn" id="fdMoveBtn" style="border-color:var(--danger); color:var(--danger)" onclick="fdExport('${kind}', true)" ${total ? '' : 'disabled'}
+          title="zip ทั้งหมดแล้วลบต้นทางทุกเครื่องหลังส่งขึ้น server สำเร็จ (ถามยืนยันก่อน)">📤 ย้ายออกมาทั้งหมด</button>
       </div>
       <div id="fdProg" style="display:none; margin-top:10px">
         <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
@@ -2809,9 +2816,10 @@ async function runBalance(kind) {
 }
 
 // โหลดโฟลเดอร์แบนๆ (fast-random / input-id / backup) ของทุกเครื่องรวมเป็น zip เดียว
-function fdExport(kind) {
+// forceMove=true มาจากปุ่ม "📤 ย้ายออกมาทั้งหมด" (ไม่สนช่องติ๊ก) — ปุ่ม "โหลดทั้งหมด" ดูจากช่องติ๊ก fdMove
+function fdExport(kind, forceMove) {
   const cfg = FOLDER_DASH[kind];
-  const move = !!(document.getElementById('fdMove') || {}).checked;
+  const move = forceMove === true ? true : !!(document.getElementById('fdMove') || {}).checked;
   return rfRunExport({
     mode: 'flat', key: '', move: move,
     subpath: cfg.filesub || cfg.subpath, base: cfg.base,
@@ -2819,7 +2827,7 @@ function fdExport(kind) {
     label: (move ? 'move_' : '') + cfg.label,
     fileName: (move ? 'move_' : '') + cfg.label + '.zip',
     confirmText: `⚠️ ย้ายไฟล์ทั้งหมดใน ${cfg.label} ออกจากเครื่องที่เลือก ?`,
-    ui: { btn: 'fdBtn', prog: 'fdProg', msg: 'fdMsg', bar: 'fdBar', pct: 'fdPct' },
+    ui: { btn: forceMove === true ? 'fdMoveBtn' : 'fdBtn', prog: 'fdProg', msg: 'fdMsg', bar: 'fdBar', pct: 'fdPct' },
   });
 }
 
@@ -2992,6 +3000,8 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
         </label>
         <button class="btn btn-primary" id="fdBtn" onclick="fdExport('rangerid')" ${grandTotal ? '' : 'disabled'}>
           📦 โหลดทั้งหมด (${grandTotal.toLocaleString()} ไฟล์)</button>
+        <button class="btn" id="fdMoveBtn" style="border-color:var(--danger); color:var(--danger)" onclick="fdExport('rangerid', true)" ${grandTotal ? '' : 'disabled'}
+          title="zip ทั้งหมดแล้วลบต้นทางทุกเครื่องหลังส่งขึ้น server สำเร็จ (ถามยืนยันก่อน)">📤 ย้ายออกมาทั้งหมด</button>
       </div>
       <div id="fdProg" style="display:none; margin-top:10px">
         <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
@@ -3931,6 +3941,7 @@ function mmDispCfg() {
            fps: c.fps || '', cpu: c.cpu || '', ram: c.ram || '',
            root: c.root === '1' || c.root === '0' ? c.root : '',   // '' = ไม่แตะ, '1' = เปิด, '0' = ปิด
            renderer: c.renderer === 'vk' || c.renderer === 'dx' ? c.renderer : '',  // '' = ไม่แตะ
+           keepalive: c.keepalive === '1' || c.keepalive === '0' ? c.keepalive : '',  // App running: '' = ไม่แตะ
            restart: c.restart !== false };
 }
 function mmDispSave() {
@@ -3940,7 +3951,7 @@ function mmDispSave() {
     localStorage.setItem(MD_KEY, JSON.stringify({
       width: g('mdW'), height: g('mdH'), dpi: g('mdDpi'),
       fps: g('mdFps'), cpu: g('mdCpu'), ram: g('mdRam'),
-      root: g('mdRoot'), renderer: g('mdRenderer'),
+      root: g('mdRoot'), renderer: g('mdRenderer'), keepalive: g('mdKeep'),
       restart: r ? r.checked : true,
     }));
   } catch (e) {}
@@ -3959,16 +3970,19 @@ function mmDispPayload() {
   const rendV = (document.getElementById('mdRenderer') || {}).value || '';
   // renderer: 'vk' = Vulkan, 'dx' = DirectX, '' = ไม่แตะ(null)
   const renderer = (rendV === 'vk' || rendV === 'dx') ? rendV : null;
+  const keepV = (document.getElementById('mdKeep') || {}).value || '';
+  // App running: '1' = เปิด(true), '0' = ปิด(false), '' = ไม่แตะ(null)
+  const keepalive = keepV === '1' ? true : (keepV === '0' ? false : null);
   return { width: num('mdW'), height: num('mdH'), dpi: num('mdDpi'),
            fps: num('mdFps'), cpu: num('mdCpu'), ram: num('mdRam'),
-           root: root, renderer: renderer,
+           root: root, renderer: renderer, keepalive: keepalive,
            restart: r ? r.checked : true };
 }
 
 // ความละเอียดต้องครบ 3 ช่องถึงจะนับ ไม่งั้นตั้งครึ่งๆ กลางๆ แล้วจอเพี้ยน
 function mmDispEmpty(p) {
   const hasRes = p.width && p.height && p.dpi;
-  return !hasRes && !p.fps && !p.cpu && !p.ram && p.root === null && !p.renderer;
+  return !hasRes && !p.fps && !p.cpu && !p.ram && p.root === null && !p.renderer && p.keepalive === null;
 }
 
 async function mmDisplay(i) {
@@ -4000,6 +4014,7 @@ async function mmDisplayAll() {
   if (p.ram) bits.push(`RAM ${p.ram} GB`);
   if (p.root !== null) bits.push(p.root ? 'เปิด root' : 'ปิด root');
   if (p.renderer) bits.push(p.renderer === 'vk' ? 'Vulkan' : 'DirectX');
+  if (p.keepalive !== null) bits.push(p.keepalive ? 'เปิด App running' : 'ปิด App running');
   if (!confirm(`⚙️ ตั้งค่าจอทุกจอ บน ${list.length} เครื่อง ?\n${bits.join(' · ')}`
       + (p.restart ? '\nจอที่เปิดอยู่จะถูกรีสตาร์ทให้อัตโนมัติ' : ''))) return;
   const n = list.length;
@@ -4157,7 +4172,7 @@ function openMumuDashboard() {
   content.innerHTML = `
     <div class="pick-panel" style="margin-bottom:14px">
       <div class="pick-head">
-        <span class="pick-title">⚙️ ตั้งค่าจอ MuMu — ความละเอียด / FPS / CPU / RAM (ปล่อยว่าง = ไม่แตะค่าเดิม)</span>
+        <span class="pick-title">⚙️ ตั้งค่าจอ MuMu — ความละเอียด / FPS / CPU / RAM / root / renderer / App running (ปล่อยว่าง = ไม่แตะค่าเดิม)</span>
       </div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:13px">
         <label style="display:flex; align-items:center; gap:5px">กว้าง
@@ -4183,6 +4198,12 @@ function openMumuDashboard() {
             <option value=""${dcfg.renderer === '' ? ' selected' : ''}>— ไม่แตะ —</option>
             <option value="vk"${dcfg.renderer === 'vk' ? ' selected' : ''}>Vulkan</option>
             <option value="dx"${dcfg.renderer === 'dx' ? ' selected' : ''}>DirectX</option>
+          </select></label>
+        <label style="display:flex; align-items:center; gap:5px" title="App running (ตั้งค่า > Others): ให้แอปหลายตัวรันค้างเบื้องหลังตอนจอว่าง — ปล่อย 'ไม่แตะ' = คงค่าเดิม">App running
+          <select id="mdKeep" style="padding:6px 8px; font-size:13px" onchange="mmDispSave()">
+            <option value=""${dcfg.keepalive === '' ? ' selected' : ''}>— ไม่แตะ —</option>
+            <option value="1"${dcfg.keepalive === '1' ? ' selected' : ''}>เปิด</option>
+            <option value="0"${dcfg.keepalive === '0' ? ' selected' : ''}>ปิด</option>
           </select></label>
         <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
           <input type="checkbox" id="mdRestart" ${dcfg.restart ? 'checked' : ''} style="width:auto; margin:0" onchange="mmDispSave()"> รีจอที่เปิดอยู่ให้เอง</label>
