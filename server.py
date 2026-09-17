@@ -2045,6 +2045,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <button class="btn" onclick="openRangerDashboard()">🏹 Dashboard Line Ranger</button>
     <button class="btn" onclick="openRangerFindDashboard()">🔎 Line Ranger-Find</button>
+    <button class="btn" onclick="openSevenDayDashboard()" title="นับไฟล์ในโฟลเดอร์ 7day-check ตามแบบ [7=7], [7=4] ... รายเครื่อง">📅 เช็ค 7 วัน</button>
     <button class="btn" onclick="openLoginSuccessDashboard()" title="ไฟล์ใน main/login-success รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">✅ login-success</button>
     <button class="btn" onclick="openFastRandomDashboard()">🎲 fast-random</button>
     <button class="btn" onclick="openBottiketDashboard()">🎫 Dashboard bot-tiket</button>
@@ -2519,6 +2520,111 @@ function countFolderOnAgent(agentId, subpath, base) {
     socket.emit('request_list_ids', { agent_id: agentId, subpath: subpath, base_match: base });
     setTimeout(() => { if (!settled) resolve({ error: 'timeout' }); }, 20000);
   });
+}
+
+// ═══ Dashboard เช็ค 7 วัน (โฟลเดอร์ 7day-check) — นับตามแบบ [7=7],[7=4]... ═══
+let _sevenScope = 'ALL';
+let _sevenBase = 'main';          // โฟลเดอร์เกม (main = Line Ranger, เปลี่ยนได้ใน dropdown)
+let _sevenPicked = 'ALL';         // แบบที่เลือกกรอง
+let _sevenData = null;
+
+function _sevenCmp(a, b) {         // เรียง 7/7, 7/6, 7/4 ... (Y มากไปน้อย), 'อื่นๆ' ท้ายสุด
+  const pa = a.split('/').map(Number), pb = b.split('/').map(Number);
+  if (isNaN(pb[1])) return -1;
+  if (isNaN(pa[1])) return 1;
+  return (pb[1] - pa[1]) || (pb[0] - pa[0]);
+}
+function _sevenBaseSel() {
+  const opt = (v, t) => `<option value="${v}"${_sevenBase===v?' selected':''}>${t}</option>`;
+  return `<select class="btn project-select" title="โฟลเดอร์เกม" onchange="_sevenBase=this.value; openSevenDayDashboard()">`
+    + opt('main','🏹 main') + opt('pes','⚽ pes') + opt('cookie-run','🍪 cookie-run') + opt('ro','🗡️ ro') + opt('bot-tiket','🎫 bot-tiket') + '</select>';
+}
+
+function openSevenDayDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const allAgents = agentsData || [];
+  if (_sevenScope !== 'ALL' && !allAgents.some(a => a.agent_id === _sevenScope)) _sevenScope = 'ALL';
+  const agents = _sevenScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _sevenScope);
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">📅 Dashboard เช็ค 7 วัน — 7day-check</h2>
+      ${_sevenBaseSel()}
+      ${pcSelectHtml(_sevenScope, '_sevenScope=this.value; openSevenDayDashboard()')}
+      <button class="btn btn-primary" onclick="openSevenDayDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง (โฟลเดอร์ ${_sevenBase}/7day-check)...</div>`;
+  if (!allAgents.length) { content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>'; return; }
+  _sevenLoad(agents);
+}
+
+async function _sevenLoad(agents) {
+  const perAgent = [];
+  const catTotal = {};
+  let grandTotal = 0, onlineCount = 0;
+  for (const a of agents) {
+    const name = a.name || a.hostname || a.agent_id;
+    const r = await countFolderOnAgent(a.agent_id, '7day-check', _sevenBase);
+    if (r && r.error) { perAgent.push({ name, error: r.error }); continue; }
+    onlineCount++;
+    if (r && r.exists === false) { perAgent.push({ name, exists: false, cats: {}, total: 0 }); continue; }
+    const cats = {};
+    (r.ids || []).forEach(id => {
+      const m = String(id).match(/\[(\d+)\s*=\s*(\d+)\]/);   // [7=7] -> 7/7
+      const cat = m ? (m[1] + '/' + m[2]) : 'อื่นๆ';
+      cats[cat] = (cats[cat] || 0) + 1;
+      catTotal[cat] = (catTotal[cat] || 0) + 1;
+      grandTotal++;
+    });
+    perAgent.push({ name, cats, total: (r.ids || []).length });
+  }
+  _sevenData = { perAgent, catTotal, totalMachines: agents.length, onlineCount, grandTotal };
+  _render7Day();
+}
+
+function _render7Day() {
+  if (!_sevenData) return;
+  const { perAgent, catTotal, totalMachines, onlineCount, grandTotal } = _sevenData;
+  const content = document.getElementById('contentArea');
+  const cats = Object.keys(catTotal).sort(_sevenCmp);
+  const picked = _sevenPicked;
+
+  const chip = (c, n, on) => `<div class="stat-tile" style="cursor:pointer;${on?' border-color:var(--accent); box-shadow:0 0 0 1px var(--accent)':''}" onclick="_sevenPicked='${escAttr(c)}'; _render7Day()">
+      <div class="stat-label">${escHtml(c==='ALL'?'ทุกแบบ':c)}</div><div class="stat-val" style="color:var(--accent)">${n.toLocaleString()}</div></div>`;
+  const chips = chip('ALL', grandTotal, picked==='ALL') + cats.map(c => chip(c, catTotal[c], picked===c)).join('');
+
+  const cards = perAgent.map(p => {
+    if (p.error) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--danger); font-size:13px">${escHtml(p.error)}</div></div>`;
+    if (p.exists === false) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--warning)">—</div><div class="mid-label">ไม่พบ 7day-check</div></div>`;
+    if (picked === 'ALL') {
+      const lines = Object.keys(p.cats).sort(_sevenCmp).map(c =>
+        `<div style="display:flex; justify-content:space-between; font-size:12px; padding:1px 0"><span>${escHtml(c)}</span><b style="color:var(--accent)">${p.cats[c]}</b></div>`).join('')
+        || '<div style="font-size:12px; color:var(--text-dim)">ว่าง</div>';
+      return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)} <span style="color:var(--text-dim); font-weight:400">(${p.total})</span></div><div style="margin-top:6px">${lines}</div></div>`;
+    }
+    const c = p.cats[picked] || 0;
+    return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:${c===0?'var(--text-dim)':'var(--accent)'}">${c}</div><div class="mid-label">${escHtml(picked)}</div></div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">📅 เช็ค 7 วัน — 7day-check${picked!=='ALL'?' · <b>'+escHtml(picked)+'</b>':''}</h2>
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาเครื่อง..." oninput="filterMidCards(this.value)">
+      ${_sevenBaseSel()}
+      ${pcSelectHtml(_sevenScope, '_sevenScope=this.value; openSevenDayDashboard()')}
+      <button class="btn btn-primary" onclick="openSevenDayDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
+      <div class="stat-tile"><div class="stat-label">ออนไลน์</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ทั้งหมด</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
+    </div>
+    <h3 style="margin:14px 0 8px; font-size:13px; color:var(--text-secondary)">เลือกแบบ (คลิกกรอง) — 7/7, 7/4 ...</h3>
+    <div class="stat-row" style="flex-wrap:wrap; gap:8px">${chips}</div>
+    <h3 style="margin:18px 0 8px; font-size:13px; color:var(--text-secondary)">รายเครื่อง</h3>
+    <div class="machine-grid">${cards}</div>
+    <div id="midNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบเครื่อง</div>`;
 }
 
 async function openFolderDash(kind) {
