@@ -8,10 +8,13 @@ cd /d "%~dp0"
 ::  USAGE:   setup-agent.bat 5      (5 = PC number, becomes name "pc_5")
 ::           or just double-click and type the number when asked
 ::
-::  EDIT ONCE: paste your Tailscale REUSABLE auth key below
-::  (get it from https://login.tailscale.com/admin/settings/keys - use the Copy button)
+::  ACCOUNT: which Tailscale account this PC must join.
+::  EDIT ONCE: paste a REUSABLE auth key created while logged in as TSACCOUNT
+::  (https://login.tailscale.com/admin/settings/keys - use the Copy button).
+::  Leave AUTHKEY empty -> a browser opens and you sign in with TSACCOUNT by hand.
 :: =====================================================================
-set "AUTHKEY=tskey-auth-kp7xKNvxMp11CNTRL-ehkrQGtb9rWoKRjAzNu4rWkwzYUZkQPTQ"
+set "TSACCOUNT=tablehub1@gmail.com"
+set "AUTHKEY="
 :: =====================================================================
 
 set "TS=C:\Program Files\Tailscale\tailscale.exe"
@@ -53,14 +56,31 @@ for /L %%i in (1,1,30) do (
 if not exist "%TS%" ( echo [ERROR] Tailscale not installed. Install manually then rerun. & pause & exit /b 1 )
 
 :: --- [3/6] join Tailscale ---
-echo [3/6] Joining Tailscale ...
-"%TS%" status >nul 2>&1
-if %errorlevel%==0 (
-    echo     Already connected to Tailscale - skip.
-) else (
-    "%TS%" up --authkey %AUTHKEY% --unattended --timeout 45s
-    if errorlevel 1 echo     [WARN] authkey join failed - fix the key, OR run:  "%TS%" up   and log in manually
+echo [3/6] Joining Tailscale as %TSACCOUNT% ...
+
+:: who is this PC logged in as right now (empty if not logged in)
+set "CURACCT="
+for /f "usebackq delims=" %%a in (`powershell -NoProfile -Command "try { (& '%TS%' status --json | ConvertFrom-Json).User.PSObject.Properties.Value.LoginName | Select-Object -First 1 } catch { '' }" 2^>nul`) do set "CURACCT=%%a"
+
+if /i "%CURACCT%"=="%TSACCOUNT%" (
+    echo     Already connected as %TSACCOUNT% - skip.
+    goto tsdone
 )
+if not "%CURACCT%"=="" (
+    echo     [!] This PC is logged in as %CURACCT% - logging out to switch to %TSACCOUNT% ...
+    "%TS%" logout >nul 2>&1
+)
+
+if not "%AUTHKEY%"=="" (
+    "%TS%" up --authkey %AUTHKEY% --unattended --force-reauth --timeout 45s
+    if not errorlevel 1 goto tsdone
+    echo     [WARN] authkey join failed - falling back to manual login.
+)
+
+echo     A browser will open - sign in with %TSACCOUNT%
+"%TS%" up --force-reauth --timeout 180s
+if errorlevel 1 echo     [WARN] Tailscale login not finished. Run:  "%TS%" up --force-reauth   and sign in with %TSACCOUNT%
+:tsdone
 
 :: --- [4/6] set unique name (pc_<num>) in config.json ---
 echo [4/6] Setting name = pc_%PCNUM% ...
