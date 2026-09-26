@@ -6,6 +6,7 @@
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -93,6 +94,7 @@ def handle_agent_register(data):
         "connected_at": datetime.now().isoformat(),
         "sid": request.sid,
         "allowed_paths": data.get("allowed_paths", []),
+        "caps": data.get("caps") or [],       # agent เก่าไม่ส่งมา = ไม่มีความสามารถใหม่
     }
     # จำว่าเครื่องนี้มีไฟล์ backup อะไรพร้อมแบ่งให้เพื่อน + ติดต่อได้ทาง IP ไหนบ้าง
     _peer_note(agent_id, data.get("ips") or [data.get("ip")],
@@ -128,6 +130,12 @@ def handle_agent_response(data):
             info["errors"].append(str(data.get("error"))[:120])
         else:
             info["files"] += int(data.get("files") or 0)
+            # ขอกรองชื่อไฟล์ไว้ แต่ agent ตัวนี้เก่า (ไม่รู้จัก pats) → มันส่งมาทั้งโฟลเดอร์
+            # server จะกรองให้ตอนรวม zip แต่ต้องบอกคนใช้ด้วยว่าเครื่องไหนยังเก่า
+            if info.get("pats") and not data.get("pats_ok"):
+                aid = (req or {}).get("agent_id") or "?"
+                if aid not in info["unfiltered"]:
+                    info["unfiltered"].append(aid)
     if req:
         web_sid = req.get("web_sid")
         if web_sid:
@@ -446,6 +454,7 @@ def get_agents_list():
             "ip": info["ip"],
             "connected_at": info["connected_at"],
             "allowed_paths": info.get("allowed_paths", []),
+            "caps": info.get("caps") or [],
         }
         for info in latest.values()
     ]
@@ -598,6 +607,21 @@ def serve_hero_img_list():
 #  เครื่องลูก zip โฟลเดอร์ที่ตรงแล้ว POST มาที่ /export-upload
 #  พอครบ (หรือหมดเวลา) ค่อยรวมเป็น zip เดียวที่ /export-download/<job>
 # ═══════════════════════════════════════════════════════════
+def _pat_norm(x):
+    """ตัดช่องว่างออกหมด + เป็นตัวเล็ก → "[7 = 7]" กับ "[7=7]" ถือว่าเหมือนกัน"""
+    return re.sub(r"\s+", "", str(x)).lower()
+
+
+def _pats_keep(name, pats, pats_not):
+    """ชื่อไฟล์นี้ผ่านตัวกรองไหม (pats ว่าง = เอาทุกไฟล์)
+       กรองที่ชื่อไฟล์ล้วน ไม่เอาชื่อโฟลเดอร์มาปน เดี๋ยวโฟลเดอร์ชื่อมี [7=7] จะพาไฟล์อื่นติดมา"""
+    if not pats:
+        return True
+    base = _pat_norm(str(name).replace("\\", "/").rsplit("/", 1)[-1])
+    hit = any(p in base for p in pats)
+    return (not hit) if pats_not else hit
+
+
 EXPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_exports")
 export_jobs = {}          # job_id -> {"agents": {name: {...}}, "expect": n, "replied": n, ...}
 export_reqs = {}          # request_id -> job_id (ไว้รู้ว่าเครื่องไหนตอบงาน export ไหนแล้ว)
@@ -637,9 +661,12 @@ def export_download(job):
     if not info or not os.path.isdir(d):
         return ("ไม่พบงาน export นี้ (อาจหมดอายุแล้ว)", 404)
 
+    pats = info.get("pats") or []
+    pats_not = bool(info.get("pats_not"))
     merged = os.path.join(d, "_merged.zip")
     if not os.path.isfile(merged):
         seen = {}
+        kept = 0
         with zipfile.ZipFile(merged, "w", zipfile.ZIP_DEFLATED) as out:
             for agent, meta in sorted(info["agents"].items()):
                 try:
@@ -647,6 +674,11 @@ def export_download(job):
                         for item in src.infolist():
                             if item.is_dir():
                                 continue
+                            # กรองซ้ำที่ server — เครื่องที่ยังใช้ agent เก่าส่งมาทั้งโฟลเดอร์
+                            # ไฟล์ที่ไม่ตรงแบบที่เลือกจะไม่หลุดเข้า zip ที่โหลด
+                            if not _pats_keep(item.filename, pats, pats_not):
+                                continue
+                            kept += 1
                             name = item.filename
                             # ชื่อชนกันข้ามเครื่อง → เติมชื่อเครื่องต่อท้าย ไม่ให้ไฟล์หาย
                             if name in seen:
@@ -660,6 +692,10 @@ def export_download(job):
                             out.writestr(name, src.read(item.filename))
                 except Exception as e:
                     logger.warning(f"  export merge: ข้าม {meta['file']}: {e}")
+        info["kept"] = kept
+        if pats:
+            logger.info(f"📦 export {job}: กรองแล้วเหลือ {kept} ไฟล์ "
+                        f"(pats={pats}{' NOT' if pats_not else ''})")
     label = info.get("label") or "export"
     return send_file(merged, as_attachment=True, download_name=f"{label}.zip",
                      mimetype="application/zip")
@@ -678,6 +714,8 @@ def export_status(job):
         "bytes": sum(a["bytes"] for a in info["agents"].values()),
         "finished": info["replied"] >= info["expect"],
         "errors": info["errors"][:5],
+        "kept": info.get("kept"),                    # จำนวนไฟล์จริงหลังกรอง (รู้ตอนรวม zip)
+        "unfiltered": info.get("unfiltered") or [],  # เครื่องที่ยังใช้ agent เก่า (ไม่กรองให้)
     })
 
 
@@ -700,8 +738,11 @@ def handle_request_export(data):
     label = str(data.get("label") or "export").replace("+", "_")
     label = "".join(ch for ch in label if ch.isalnum() or ch in "-_")[:60] or "export"
 
+    pats = [_pat_norm(x) for x in (data.get("pats") or []) if str(x).strip()]
     export_jobs[job] = {"agents": {}, "expect": len(agent_ids), "replied": 0, "files": 0,
-                        "errors": [], "created": time.time(), "label": label}
+                        "errors": [], "created": time.time(), "label": label,
+                        "pats": pats, "pats_not": bool(data.get("pats_not")),
+                        "unfiltered": [], "kept": None}
     os.makedirs(_export_job_dir(job), exist_ok=True)
     _export_cleanup()
 
@@ -3593,6 +3634,20 @@ async function rfRunExport(o) {
   const scope = o.scope || _rfScope;          // หน้าอื่นส่ง scope ของตัวเองมาได้
   const agents = scope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === scope);
   if (!agents.length) { toast('ไม่มีเครื่องออนไลน์', 'error'); return; }
+  // ตัวกรองชื่อไฟล์ทำงานที่ agent — เครื่องที่ยังใช้ agent เก่าจะส่งมาทั้งโฟลเดอร์
+  // โหลด (คัดลอก) ยังปลอดภัย เพราะ server กรองให้อีกชั้นตอนรวม zip
+  // แต่ "ย้ายออกมา" อันตราย: agent เก่าจะลบทั้งโฟลเดอร์ ไม่ใช่แค่แบบที่เลือก → บล็อกไว้
+  const oldAgents = (o.pats && o.pats.length)
+    ? agents.filter(a => !((a.caps || []).includes('export_pats'))).map(a => a.name || a.hostname || a.agent_id)
+    : [];
+  if (move && oldAgents.length) {
+    alert('⛔ ย้ายออกมาแบบเลือกเฉพาะบางแบบยังไม่ได้ — เครื่องพวกนี้ยังใช้ agent เวอร์ชันเก่า\n\n'
+      + oldAgents.slice(0, 10).join(', ')
+      + (oldAgents.length > 10 ? ` (และอีก ${oldAgents.length - 10} เครื่อง)` : '')
+      + '\n\nagent เก่าจะลบ "ทั้งโฟลเดอร์" ไม่ใช่แค่แบบที่เลือก → รัน start_agent.bat ที่เครื่องพวกนั้นก่อน\n'
+      + '(ปุ่มโหลด/คัดลอก ใช้ได้ปกติ — server กรองให้แล้ว)');
+    return;
+  }
   if (move && !confirm(`${o.confirmText}\n\n(${agents.length} เครื่อง) ไฟล์ต้นทางจะถูกลบหลังส่งขึ้น server สำเร็จ — กู้คืนไม่ได้`)) return;
 
   if (btn) btn.disabled = true;
@@ -3656,8 +3711,18 @@ async function rfRunExport(o) {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
-    setMsg(`เสร็จแล้ว · ${st.files.toLocaleString()} ไฟล์ · ${(blob.size / 1048576).toFixed(1)} MB`, 100);
-    toast(move ? `ย้ายออกมาแล้ว ${st.files} ไฟล์` : `โหลดแล้ว ${st.files} ไฟล์`, 'success');
+    // จำนวนไฟล์จริงรู้ตอน server รวม zip เสร็จ (กรองแล้ว) → ถามสถานะอีกครั้งให้เลขตรง
+    let got = st.files, oldList = st.unfiltered || [];
+    try {
+      const st2 = await (await fetch('/export-status/' + job.job)).json();
+      if (st2 && typeof st2.kept === 'number') got = st2.kept;
+      if (st2 && st2.unfiltered) oldList = st2.unfiltered;
+    } catch (e) {}
+    setMsg(`เสร็จแล้ว · ${got.toLocaleString()} ไฟล์ · ${(blob.size / 1048576).toFixed(1)} MB`, 100);
+    toast(move ? `ย้ายออกมาแล้ว ${got} ไฟล์` : `โหลดแล้ว ${got} ไฟล์`, 'success');
+    if ((o.pats && o.pats.length) && oldList.length) {
+      toast(`⚠️ ${oldList.length} เครื่องยังใช้ agent เก่า — server กรองให้แล้ว แต่ควรรัน start_agent.bat`, 'info');
+    }
   } catch (e) {
     setMsg('ดาวน์โหลดล้มเหลว: ' + (e.message || e), 100);
     toast('ดาวน์โหลดล้มเหลว', 'error');

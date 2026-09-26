@@ -583,6 +583,8 @@ def _make_client(url):
             "ips": get_all_ips(),        # ทุกวง (LAN + Tailscale) ให้เพื่อนเลือกทางเร็วสุด
             "peer_port": PEER_PORT,
             "backups": _peer_cached_files(),
+            # ความสามารถที่ agent รุ่นนี้มี — เว็บเช็คก่อนสั่งงานที่ agent เก่าทำไม่ได้
+            "caps": ["export_pats"],
         })
 
     @client.event
@@ -1290,7 +1292,8 @@ def handle_export_folder(req_id, data):
     base = _resolve_game_base(match)
     root = os.path.join(base, subpath) if base else None
     if not root or not os.path.isdir(root):
-        send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": False})
+        send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": False,
+                               "pats_ok": True})
         return
 
     # หาโฟลเดอร์เป้าหมายทั้งหมด
@@ -1342,7 +1345,8 @@ def handle_export_folder(req_id, data):
             return
 
     if not targets and not file_targets:
-        send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": True})
+        send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": True,
+                               "pats_ok": True})
         return
 
     tmp = tempfile.NamedTemporaryFile(prefix="export_", suffix=".zip", delete=False)
@@ -1373,7 +1377,8 @@ def handle_export_folder(req_id, data):
 
         if n_files == 0:
             os.remove(tmp.name)
-            send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": True})
+            send_response(req_id, {"success": True, "files": 0, "bytes": 0, "exists": True,
+                                   "pats_ok": True})
             return
 
         # อัปขึ้น server (ลองทุก URL จนกว่าจะสำเร็จ)
@@ -1415,7 +1420,8 @@ def handle_export_folder(req_id, data):
         logger.info(f"  export_folder: {n_files} ไฟล์ ({size} bytes) จาก {len(targets)} โฟลเดอร์"
                     + (f" · ลบต้นทาง {deleted}" if move else ""))
         send_response(req_id, {"success": True, "files": n_files, "bytes": size,
-                               "folders": len(targets), "deleted": deleted, "exists": True})
+                               "folders": len(targets), "deleted": deleted, "exists": True,
+                               "pats_ok": True})
     except Exception as e:
         send_response(req_id, {"error": str(e)})
     finally:
