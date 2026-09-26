@@ -717,6 +717,8 @@ def handle_request_export(data):
             "names": data.get("names") or [],
             "match": data.get("match", "only"),
             "submode": data.get("submode", "combo"),
+            "pats": data.get("pats") or [],
+            "pats_not": bool(data.get("pats_not")),
             "move": bool(data.get("move")),
             "job": job,
         }, request.sid)
@@ -2589,6 +2591,7 @@ function _render7Day() {
   const content = document.getElementById('contentArea');
   const cats = Object.keys(catTotal).sort(_sevenCmp);
   const picked = _sevenPicked;
+  const pickedTotal = picked === 'ALL' ? grandTotal : (catTotal[picked] || 0);
 
   const chip = (c, n, on) => `<div class="stat-tile" style="cursor:pointer;${on?' border-color:var(--accent); box-shadow:0 0 0 1px var(--accent)':''}" onclick="_sevenPicked='${escAttr(c)}'; _render7Day()">
       <div class="stat-label">${escHtml(c==='ALL'?'ทุกแบบ':c)}</div><div class="stat-val" style="color:var(--accent)">${n.toLocaleString()}</div></div>`;
@@ -2624,7 +2627,66 @@ function _render7Day() {
     <div class="stat-row" style="flex-wrap:wrap; gap:8px">${chips}</div>
     <h3 style="margin:18px 0 8px; font-size:13px; color:var(--text-secondary)">รายเครื่อง</h3>
     <div class="machine-grid">${cards}</div>
-    <div id="midNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบเครื่อง</div>`;
+    <div id="midNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบเครื่อง</div>
+
+    <div class="pick-panel" style="margin-top:18px">
+      <div class="pick-head">
+        <span class="pick-title">📦 โหลด${picked==='ALL'?'ทุกแบบ':' <b>'+escHtml(picked)+'</b>'} เป็น .zip ไฟล์เดียว
+          <span style="color:var(--text-dim); font-weight:400">— รวมจาก ${onlineCount} เครื่อง · ${pickedTotal.toLocaleString()} ไฟล์</span></span>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer">
+          <input type="checkbox" id="sdMove" style="width:auto">
+          <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
+        </label>
+        <button class="btn btn-primary" id="sdBtn" onclick="_sevenExport()" ${pickedTotal ? '' : 'disabled'}>
+          📦 โหลด${picked==='ALL'?'ทั้งหมด':' '+escHtml(picked)} (${pickedTotal.toLocaleString()} ไฟล์)</button>
+        <button class="btn" id="sdMoveBtn" style="border-color:var(--danger); color:var(--danger)" onclick="_sevenExport(true)" ${pickedTotal ? '' : 'disabled'}
+          title="zip แล้วลบต้นทางทุกเครื่องหลังส่งขึ้น server สำเร็จ (ถามยืนยันก่อน)">📤 ย้ายออกมา</button>
+      </div>
+      <div id="sdProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="sdMsg" style="color:var(--text-secondary)"></span>
+          <span id="sdPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="sdBar" style="width:0%"></div></div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        คลิกแบบด้านบน (7/7, 7/4 ...) เพื่อเลือกว่าจะโหลดแบบไหน · ไฟล์ชื่อซ้ำข้ามเครื่องจะเติมชื่อเครื่องต่อท้ายให้
+      </div>
+    </div>`;
+}
+
+// 📦 โหลดไฟล์ใน 7day-check เป็น zip — เอาทั้งหมด หรือเฉพาะแบบที่เลือก (7/7, 7/4 ... หรือ 'อื่นๆ')
+function _sevenExport(forceMove) {
+  if (!_sevenData) return;
+  const picked = _sevenPicked;
+  const allCats = Object.keys(_sevenData.catTotal || {});
+  const patOf = (c) => '[' + c.split('/').join('=') + ']';       // 7/7 -> [7=7]
+
+  let pats = null, patsNot = false, tag = 'all';
+  if (picked === 'อื่นๆ') {
+    // 'อื่นๆ' = ไฟล์ที่ไม่มี [X=Y] แบบใดเลย → ส่งทุกแบบที่เจอไปแล้วบอกให้เอา "ที่ไม่ตรง"
+    pats = allCats.filter(c => c !== 'อื่นๆ').map(patOf);
+    patsNot = true;
+    tag = 'other';
+  } else if (picked !== 'ALL') {
+    pats = [patOf(picked)];
+    tag = picked.replace('/', '-');
+  }
+
+  const move = forceMove === true ? true : !!(document.getElementById('sdMove') || {}).checked;
+  const label = '7day-check_' + _sevenBase + '_' + tag;
+  return rfRunExport({
+    mode: 'flat', key: '', move: move,
+    subpath: '7day-check', base: _sevenBase,
+    scope: _sevenScope,
+    pats: pats, pats_not: patsNot,
+    label: (move ? 'move_' : '') + label,
+    fileName: (move ? 'move_' : '') + label + '.zip',
+    confirmText: `⚠️ ย้ายไฟล์ ${picked === 'ALL' ? 'ทั้งหมด' : picked} ใน ${_sevenBase}/7day-check ออกจากเครื่องที่เลือก ?`,
+    ui: { btn: forceMove === true ? 'sdMoveBtn' : 'sdBtn', prog: 'sdProg', msg: 'sdMsg', bar: 'sdBar', pct: 'sdPct' },
+  });
 }
 
 async function openFolderDash(kind) {
@@ -3554,6 +3616,7 @@ async function rfRunExport(o) {
       group: o.group || 'ALL', mode: o.mode, key: o.key || '',
       groups: o.groups || null, names: o.names || [], match: o.match || 'only',
       submode: o.submode || 'combo',
+      pats: o.pats || null, pats_not: !!o.pats_not,
       move: move, label: o.label,
     });
     setTimeout(() => { if (!done) resolve(null); }, 20000);

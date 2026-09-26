@@ -1243,6 +1243,22 @@ def _export_match(folder_name, mode, key, names=None, match="only"):
     return "+".join(parts) == key
 
 
+def _pat_norm(s):
+    """ตัดช่องว่างออกหมด + เป็นตัวเล็ก  →  "[7 = 7]" กับ "[7=7]" ถือว่าเหมือนกัน"""
+    return re.sub(r"\s+", "", str(s)).lower()
+
+
+def _fname_ok(fn, pats, pats_not):
+    """ชื่อไฟล์นี้ผ่านตัวกรองไหม (pats ว่าง = เอาทุกไฟล์)
+       pats      : list ของคำที่ต้องมีอยู่ในชื่อไฟล์ เช่น ["[7=7]"]
+       pats_not  : True = เอาไฟล์ที่ "ไม่ตรง" คำไหนเลย (ใช้กับหมวด 'อื่นๆ')"""
+    if not pats:
+        return True
+    nfn = _pat_norm(fn)
+    hit = any(p in nfn for p in pats)
+    return (not hit) if pats_not else hit
+
+
 def handle_export_folder(req_id, data):
     """zip โฟลเดอร์ที่ตรงกับที่ขอ (backup-id/<ชุด>/<ชื่อตัว>/) แล้วอัปขึ้น server
        ตั้งชื่อไฟล์ใน zip เป็น <ชุด>/<ชื่อตัว>/<ไฟล์> ตามโครงเดิม
@@ -1263,6 +1279,9 @@ def handle_export_folder(req_id, data):
     names = [str(n).strip() for n in (data.get("names") or []) if str(n).strip()]
     # ห้ามตั้งชื่อ match — ชนกับ match ที่ใช้หาโฟลเดอร์เกมด้านบน (base_match)
     name_match = (data.get("match") or "only").strip().lower()
+    # กรองตาม "ชื่อไฟล์" (เช่น เอาเฉพาะไฟล์ที่มี [7=7] — dashboard เช็ค 7 วัน)
+    pats = [_pat_norm(x) for x in (data.get("pats") or []) if str(x).strip()]
+    pats_not = bool(data.get("pats_not"))
 
     if not job or (mode not in ("multi", "flat") and not key):
         send_response(req_id, {"error": "ข้อมูลไม่ครบ (key/job)"})
@@ -1289,7 +1308,7 @@ def handle_export_folder(req_id, data):
                     if not combo:
                         continue
                     hit = (key in combo.split("+")) if submode == "name" else (combo == key)
-                    if hit:
+                    if hit and _fname_ok(fn, pats, pats_not):
                         arc = fn if rel == "." else rel.replace("\\", "/") + "/" + fn
                         file_targets.append((arc, os.path.join(cur, fn)))
         except Exception as e:
@@ -1340,6 +1359,8 @@ def handle_export_folder(req_id, data):
                 for cur, _dirs, files in os.walk(d):
                     rel_in = os.path.relpath(cur, d)
                     for fn in files:
+                        if not _fname_ok(fn, pats, pats_not):
+                            continue
                         full = os.path.join(cur, fn)
                         arc_parts = [p for p in (set_name, fld) if p]   # flat = ไม่มีชั้นชุด/ชื่อตัว
                         if rel_in != ".":
