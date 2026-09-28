@@ -33,6 +33,11 @@ findstr /c:"balance-upload" server.py.new >nul
 if errorlevel 1 ( echo [ERROR] ไฟล์ที่โหลดมาไม่ถูกต้อง & del server.py.new >nul 2>&1 & pause & exit /b 1 )
 move /y server.py.new server.py >nul
 echo    OK - server.py ใหม่พร้อม (มีปุ่ม balance)
+REM agent.py ด้วย — เครื่องลูกอัปเดตตัวเองจาก /agent.py ของแม่ ถ้าไม่ดึงมาด้วย ลูกจะได้ตัวเก่าตลอด
+copy /y agent.py agent.py.bak >nul 2>&1
+curl -s -f "%MASTER%/agent.py" -o agent.py.new
+findstr /c:"RemoteFileManagerAgent_SingleInstance" agent.py.new >nul 2>&1
+if errorlevel 1 ( echo    [WARN] โหลด agent.py ไม่สำเร็จ - ใช้ตัวเดิม & del agent.py.new >nul 2>&1 ) else ( move /y agent.py.new agent.py >nul & echo    OK - agent.py ใหม่พร้อม ^(เครื่องลูกกด self-update ได้เลย^) )
 echo.
 
 echo [2/4] ปิด server เก่า (ถ้ามี) ...
