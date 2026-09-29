@@ -2824,7 +2824,7 @@ function _renderCoin() {
       const lines = Object.keys(p.nums).sort(_coinCmp).map(k =>
         `<div style="display:flex; justify-content:space-between; font-size:12px; padding:1px 0"><span>${k==='อื่นๆ'?k:'['+escHtml(k)+']'}</span><b style="color:var(--accent)">${p.nums[k]}</b></div>`).join('')
         || '<div style="font-size:12px; color:var(--text-dim)">ว่าง</div>';
-      return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)} <span style="color:var(--text-dim); font-weight:400">(${p.total} ไฟล์ · 🪙 ${p.coin.toLocaleString()})</span></div><div style="margin-top:6px; max-height:180px; overflow:auto">${lines}</div></div>`;
+      return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)} <span style="color:var(--text-dim); font-weight:400">(${p.total} ไฟล์)</span></div><div style="margin-top:6px; max-height:180px; overflow:auto">${lines}</div></div>`;
     }
     const c = picked.reduce((s, k) => s + (p.nums[k] || 0), 0);
     return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:${c===0?'var(--text-dim)':'var(--accent)'}">${c}</div><div class="mid-label">${escHtml(pickedLabel)}</div></div>`;
@@ -2841,7 +2841,6 @@ function _renderCoin() {
       <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
       <div class="stat-tile"><div class="stat-label">ออนไลน์</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
       <div class="stat-tile"><div class="stat-label">ไฟล์ .dat ทั้งหมด</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
-      <div class="stat-tile"><div class="stat-label">เหรียญรวม</div><div class="stat-val" style="color:var(--warning)">${grandCoin.toLocaleString()}</div></div>
     </div>
     <h3 style="margin:14px 0 8px; font-size:13px; color:var(--text-secondary); display:flex; align-items:center; gap:8px; flex-wrap:wrap">
       <span>เลือกเลข (คลิกเลือกได้หลายเลข) — [900], [500] ...</span>
