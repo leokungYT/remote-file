@@ -2795,10 +2795,14 @@ function _coinToggle(k) {
   else if (_coinPicked.has(k)) _coinPicked.delete(k); else _coinPicked.add(k);
   _renderCoin();
 }
-function _coinPickMin() {           // เลือกทุกเลขที่ >= ค่าที่กรอก
-  const v = Number((document.getElementById('coinMin') || {}).value);
-  if (!(v >= 0) || !_coinData) return;
-  _coinPicked = new Set(Object.keys(_coinData.numTotal).filter(k => k !== 'อื่นๆ' && Number(k) >= v));
+function _coinPickMin() {           // 500+ = ตั้งแต่ 500 ขึ้นไป · 500 = แค่ 500 · 500- = น้อยกว่า 500
+  const raw = String((document.getElementById('coinMin') || {}).value || '').replace(/\s+/g, '');
+  const m = raw.match(/^(\d+)([+-]?)$/);
+  if (!m || !_coinData) { if (raw) toast('ใส่แบบ 500+ / 500 / 500-', 'error'); return; }
+  const v = Number(m[1]), op = m[2];
+  const ok = op === '+' ? (n => n >= v) : op === '-' ? (n => n < v) : (n => n === v);
+  _coinPicked = new Set(Object.keys(_coinData.numTotal).filter(k => k !== 'อื่นๆ' && ok(Number(k))));
+  if (!_coinPicked.size) toast(`ไม่มีเลข ${raw}`, 'info');
   _renderCoin();
 }
 
@@ -2845,8 +2849,9 @@ function _renderCoin() {
     <h3 style="margin:14px 0 8px; font-size:13px; color:var(--text-secondary); display:flex; align-items:center; gap:8px; flex-wrap:wrap">
       <span>เลือกเลข (คลิกเลือกได้หลายเลข) — [900], [500] ...</span>
       <span style="margin-left:auto; display:flex; gap:6px; align-items:center">
-        <input type="number" id="coinMin" min="0" step="10" placeholder="เช่น 500" value="${escAttr(minVal)}" style="width:100px" onkeydown="if(event.key==='Enter')_coinPickMin()">
-        <button class="btn" onclick="_coinPickMin()">เลือกทุกเลข ≥ ค่านี้</button>
+        <input type="text" id="coinMin" placeholder="500+ / 500 / 500-" value="${escAttr(minVal)}" style="width:130px" onkeydown="if(event.key==='Enter')_coinPickMin()"
+          title="500+ = ตั้งแต่ 500 ขึ้นไป · 500 = แค่ 500 · 500- = น้อยกว่า 500">
+        <button class="btn" onclick="_coinPickMin()">เลือก</button>
       </span>
     </h3>
     <div class="stat-row" style="flex-wrap:wrap; gap:8px">${chips}</div>
