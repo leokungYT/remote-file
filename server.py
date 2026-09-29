@@ -2089,6 +2089,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openRangerDashboard()">🏹 Dashboard Line Ranger</button>
     <button class="btn" onclick="openRangerFindDashboard()">🔎 Line Ranger-Find</button>
     <button class="btn" onclick="openSevenDayDashboard()" title="นับไฟล์ในโฟลเดอร์ 7day-check ตามแบบ [7=7], [7=4] ... รายเครื่อง">📅 เช็ค 7 วัน</button>
+    <button class="btn" onclick="openCoinDashboard()" title="ไฟล์ .dat ใน pes/check-coin แยกตามเลข [900] ... รายเครื่อง + โหลด .zip">🪙 check-coin</button>
     <button class="btn" onclick="openLoginSuccessDashboard()" title="ไฟล์ใน main/login-success รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">✅ login-success</button>
     <button class="btn" onclick="openFastRandomDashboard()">🎲 fast-random</button>
     <button class="btn" onclick="openBottiketDashboard()">🎫 Dashboard bot-tiket</button>
@@ -2727,6 +2728,190 @@ function _sevenExport(forceMove) {
     fileName: (move ? 'move_' : '') + label + '.zip',
     confirmText: `⚠️ ย้ายไฟล์ ${picked === 'ALL' ? 'ทั้งหมด' : picked} ใน ${_sevenBase}/7day-check ออกจากเครื่องที่เลือก ?`,
     ui: { btn: forceMove === true ? 'sdMoveBtn' : 'sdBtn', prog: 'sdProg', msg: 'sdMsg', bar: 'sdBar', pct: 'sdPct' },
+  });
+}
+
+// ═══ Dashboard check-coin (pes/check-coin) — ไฟล์ .dat ชื่อแบบ [900]+ASxxxx.dat แยกตามเลขใน [ ] ═══
+let _coinScope = 'ALL';
+let _coinPicked = new Set();      // เลขที่เลือก (ว่าง = ทุกเลข) เลือกได้หลายเลข
+let _coinData = null;
+
+function openCoinDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const allAgents = agentsData || [];
+  if (_coinScope !== 'ALL' && !allAgents.some(a => a.agent_id === _coinScope)) _coinScope = 'ALL';
+  const agents = _coinScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _coinScope);
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🪙 Dashboard check-coin — pes/check-coin</h2>
+      ${pcSelectHtml(_coinScope, '_coinScope=this.value; openCoinDashboard()')}
+      <button class="btn btn-primary" onclick="openCoinDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง (โฟลเดอร์ pes/check-coin)...</div>`;
+  if (!allAgents.length) { content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>'; return; }
+  _coinLoad(agents);
+}
+
+async function _coinLoad(agents) {
+  const perAgent = [];
+  const numTotal = {};
+  let grandTotal = 0, grandCoin = 0, onlineCount = 0;
+  for (const a of agents) {
+    const name = a.name || a.hostname || a.agent_id;
+    const r = await countFolderOnAgent(a.agent_id, 'check-coin', 'pes');
+    if (r && r.error) { perAgent.push({ name, error: r.error }); continue; }
+    onlineCount++;
+    if (r && r.exists === false) { perAgent.push({ name, exists: false, nums: {}, total: 0, coin: 0 }); continue; }
+    const nums = {};
+    let total = 0, coin = 0;
+    (r.entries || []).forEach(p => {
+      const fn = String(p).split(/[\\/]/).pop();
+      if (!/\.dat$/i.test(fn)) return;                      // เอาเฉพาะ .dat
+      const m = fn.match(/\[\s*(\d+)\s*\]/);                // [900]+ASxxx.dat -> 900
+      const k = m ? String(Number(m[1])) : 'อื่นๆ';
+      nums[k] = (nums[k] || 0) + 1;
+      numTotal[k] = (numTotal[k] || 0) + 1;
+      total++;
+      if (m) coin += Number(m[1]);
+    });
+    grandTotal += total; grandCoin += coin;
+    perAgent.push({ name, nums, total, coin });
+  }
+  // เลขที่เคยเลือกไว้แต่รอบนี้ไม่มีแล้ว → ตัดออก
+  _coinPicked = new Set([..._coinPicked].filter(k => numTotal[k]));
+  _coinData = { perAgent, numTotal, totalMachines: agents.length, onlineCount, grandTotal, grandCoin };
+  _renderCoin();
+}
+
+function _coinCmp(a, b) {          // เลขมากไปน้อย, 'อื่นๆ' ท้ายสุด
+  if (a === 'อื่นๆ') return 1;
+  if (b === 'อื่นๆ') return -1;
+  return Number(b) - Number(a);
+}
+function _coinToggle(k) {
+  if (k === 'ALL') _coinPicked.clear();
+  else if (_coinPicked.has(k)) _coinPicked.delete(k); else _coinPicked.add(k);
+  _renderCoin();
+}
+function _coinPickMin() {           // เลือกทุกเลขที่ >= ค่าที่กรอก
+  const v = Number((document.getElementById('coinMin') || {}).value);
+  if (!(v >= 0) || !_coinData) return;
+  _coinPicked = new Set(Object.keys(_coinData.numTotal).filter(k => k !== 'อื่นๆ' && Number(k) >= v));
+  _renderCoin();
+}
+
+function _renderCoin() {
+  if (!_coinData) return;
+  const { perAgent, numTotal, totalMachines, onlineCount, grandTotal, grandCoin } = _coinData;
+  const content = document.getElementById('contentArea');
+  const keys = Object.keys(numTotal).sort(_coinCmp);
+  const picked = [..._coinPicked].sort(_coinCmp);
+  const all = !picked.length;
+  const pickedTotal = all ? grandTotal : picked.reduce((s, k) => s + (numTotal[k] || 0), 0);
+  const pickedLabel = all ? 'ทุกเลข' : (picked.length <= 4 ? picked.map(k => k === 'อื่นๆ' ? k : '[' + k + ']').join(', ') : picked.length + ' เลข');
+  const minVal = (document.getElementById('coinMin') || {}).value || '';
+
+  const chip = (k, n, on) => `<div class="stat-tile" style="cursor:pointer; min-width:84px;${on?' border-color:var(--accent); box-shadow:0 0 0 1px var(--accent)':''}" onclick="_coinToggle('${escAttr(k)}')">
+      <div class="stat-label">${k==='ALL'?'ทุกเลข':(k==='อื่นๆ'?k:'['+escHtml(k)+']')}</div><div class="stat-val" style="color:var(--accent)">${n.toLocaleString()}</div></div>`;
+  const chips = chip('ALL', grandTotal, all) + keys.map(k => chip(k, numTotal[k], _coinPicked.has(k))).join('');
+
+  const cards = perAgent.map(p => {
+    if (p.error) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--danger); font-size:13px">${escHtml(p.error)}</div></div>`;
+    if (p.exists === false) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--warning)">—</div><div class="mid-label">ไม่พบ check-coin</div></div>`;
+    if (all) {
+      const lines = Object.keys(p.nums).sort(_coinCmp).map(k =>
+        `<div style="display:flex; justify-content:space-between; font-size:12px; padding:1px 0"><span>${k==='อื่นๆ'?k:'['+escHtml(k)+']'}</span><b style="color:var(--accent)">${p.nums[k]}</b></div>`).join('')
+        || '<div style="font-size:12px; color:var(--text-dim)">ว่าง</div>';
+      return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)} <span style="color:var(--text-dim); font-weight:400">(${p.total} ไฟล์ · 🪙 ${p.coin.toLocaleString()})</span></div><div style="margin-top:6px; max-height:180px; overflow:auto">${lines}</div></div>`;
+    }
+    const c = picked.reduce((s, k) => s + (p.nums[k] || 0), 0);
+    return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:${c===0?'var(--text-dim)':'var(--accent)'}">${c}</div><div class="mid-label">${escHtml(pickedLabel)}</div></div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🪙 check-coin — pes/check-coin${all?'':' · <b>'+escHtml(pickedLabel)+'</b>'}</h2>
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาเครื่อง..." oninput="filterMidCards(this.value)">
+      ${pcSelectHtml(_coinScope, '_coinScope=this.value; openCoinDashboard()')}
+      <button class="btn btn-primary" onclick="openCoinDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
+      <div class="stat-tile"><div class="stat-label">ออนไลน์</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ .dat ทั้งหมด</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">เหรียญรวม</div><div class="stat-val" style="color:var(--warning)">${grandCoin.toLocaleString()}</div></div>
+    </div>
+    <h3 style="margin:14px 0 8px; font-size:13px; color:var(--text-secondary); display:flex; align-items:center; gap:8px; flex-wrap:wrap">
+      <span>เลือกเลข (คลิกเลือกได้หลายเลข) — [900], [500] ...</span>
+      <span style="margin-left:auto; display:flex; gap:6px; align-items:center">
+        <input type="number" id="coinMin" min="0" step="10" placeholder="เช่น 500" value="${escAttr(minVal)}" style="width:100px" onkeydown="if(event.key==='Enter')_coinPickMin()">
+        <button class="btn" onclick="_coinPickMin()">เลือกทุกเลข ≥ ค่านี้</button>
+      </span>
+    </h3>
+    <div class="stat-row" style="flex-wrap:wrap; gap:8px">${chips}</div>
+    <h3 style="margin:18px 0 8px; font-size:13px; color:var(--text-secondary)">รายเครื่อง</h3>
+    <div class="machine-grid">${cards}</div>
+    <div id="midNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบเครื่อง</div>
+
+    <div class="pick-panel" style="margin-top:18px">
+      <div class="pick-head">
+        <span class="pick-title">📦 โหลด <b>${escHtml(pickedLabel)}</b> เป็น .zip ไฟล์เดียว
+          <span style="color:var(--text-dim); font-weight:400">— รวมจาก ${onlineCount} เครื่อง · ${pickedTotal.toLocaleString()} ไฟล์</span></span>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer">
+          <input type="checkbox" id="coinMove" style="width:auto">
+          <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
+        </label>
+        <button class="btn btn-primary" id="coinBtn" onclick="_coinExport()" ${pickedTotal ? '' : 'disabled'}>
+          📦 โหลด${all?'ทั้งหมด':' '+escHtml(pickedLabel)} (${pickedTotal.toLocaleString()} ไฟล์)</button>
+        <button class="btn" id="coinMoveBtn" style="border-color:var(--danger); color:var(--danger)" onclick="_coinExport(true)" ${pickedTotal ? '' : 'disabled'}
+          title="zip แล้วลบต้นทางทุกเครื่องหลังส่งขึ้น server สำเร็จ (ถามยืนยันก่อน)">📤 ย้ายออกมา</button>
+      </div>
+      <div id="coinProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="coinMsg" style="color:var(--text-secondary)"></span>
+          <span id="coinPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="coinBar" style="width:0%"></div></div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        คลิกเลขด้านบนเพื่อเลือกว่าจะโหลดเลขไหน (เลือกหลายเลขได้) · ไฟล์ชื่อซ้ำข้ามเครื่องจะเติมชื่อเครื่องต่อท้ายให้
+      </div>
+    </div>`;
+}
+
+// 📦 โหลดไฟล์ .dat ใน check-coin เป็น zip — ทั้งหมด หรือเฉพาะเลขที่เลือก
+function _coinExport(forceMove) {
+  if (!_coinData) return;
+  const picked = [..._coinPicked].sort(_coinCmp);
+  const nums = picked.filter(k => k !== 'อื่นๆ');
+  let pats, patsNot = false, tag;
+  if (!picked.length) {
+    pats = ['.dat']; tag = 'all';                                   // ทั้งหมด = ทุกไฟล์ .dat
+  } else if (picked.includes('อื่นๆ')) {
+    // 'อื่นๆ' = .dat ที่ไม่มี [เลข] → เอาไฟล์ที่ "ไม่ตรง" เลขไหนเลย (เลขที่ไม่ได้เลือก)
+    const skip = Object.keys(_coinData.numTotal).filter(k => k !== 'อื่นๆ' && !_coinPicked.has(k));
+    pats = skip.map(k => '[' + k + ']'); patsNot = true;
+    tag = nums.length ? nums.join('_') + '_other' : 'other';
+    if (!pats.length) { pats = ['.dat']; patsNot = false; }
+  } else {
+    pats = nums.map(k => '[' + k + ']');                           // [900] ไม่ชน [9000] เพราะมีวงเล็บปิด
+    tag = nums.length <= 5 ? nums.join('_') : nums.length + 'nums_' + nums[nums.length - 1] + 'up';
+  }
+  const move = forceMove === true ? true : !!(document.getElementById('coinMove') || {}).checked;
+  const label = 'check-coin_' + tag;
+  return rfRunExport({
+    mode: 'flat', key: '', move: move,
+    subpath: 'check-coin', base: 'pes',
+    scope: _coinScope,
+    pats: pats, pats_not: patsNot,
+    label: (move ? 'move_' : '') + label,
+    fileName: (move ? 'move_' : '') + label + '.zip',
+    confirmText: `⚠️ ย้ายไฟล์ ${picked.length ? picked.join(', ') : 'ทั้งหมด'} ใน pes/check-coin ออกจากเครื่องที่เลือก ?`,
+    ui: { btn: forceMove === true ? 'coinMoveBtn' : 'coinBtn', prog: 'coinProg', msg: 'coinMsg', bar: 'coinBar', pct: 'coinPct' },
   });
 }
 
