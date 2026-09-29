@@ -2734,6 +2734,7 @@ function _sevenExport(forceMove) {
 // ═══ Dashboard check-coin (pes/check-coin) — ไฟล์ .dat ชื่อแบบ [900]+ASxxxx.dat แยกตามเลขใน [ ] ═══
 let _coinScope = 'ALL';
 let _coinPicked = new Set();      // เลขที่เลือก (ว่าง = ทุกเลข) เลือกได้หลายเลข
+let _coinFilter = null;           // ตัวกรองจากช่องพิมพ์ { raw: '500+', ok: n => ... } — ซ่อนเลขที่ไม่ตรง
 let _coinData = null;
 
 function openCoinDashboard() {
@@ -2781,6 +2782,7 @@ async function _coinLoad(agents) {
   }
   // เลขที่เคยเลือกไว้แต่รอบนี้ไม่มีแล้ว → ตัดออก
   _coinPicked = new Set([..._coinPicked].filter(k => numTotal[k]));
+  if (_coinFilter) _coinPicked = new Set(_coinKeysIn(numTotal));   // รีเฟรชแล้วเลขใหม่ที่เข้าเงื่อนไขก็ติดมาด้วย
   _coinData = { perAgent, numTotal, totalMachines: agents.length, onlineCount, grandTotal, grandCoin };
   _renderCoin();
 }
@@ -2790,18 +2792,28 @@ function _coinCmp(a, b) {          // เลขมากไปน้อย, 'อ
   if (b === 'อื่นๆ') return -1;
   return Number(b) - Number(a);
 }
+function _coinKeysIn(numTotal) {  // เลขที่ผ่านตัวกรอง (ไม่มีตัวกรอง = ทุกเลข)
+  return Object.keys(numTotal).filter(k => !_coinFilter || (k !== 'อื่นๆ' && _coinFilter.ok(Number(k))));
+}
+function _coinClearFilter() {
+  _coinFilter = null; _coinPicked.clear();
+  const el = document.getElementById('coinMin'); if (el) el.value = '';
+  _renderCoin();
+}
 function _coinToggle(k) {
-  if (k === 'ALL') _coinPicked.clear();
+  if (k === 'ALL') _coinPicked = _coinFilter ? new Set(_coinKeysIn(_coinData.numTotal)) : new Set();
   else if (_coinPicked.has(k)) _coinPicked.delete(k); else _coinPicked.add(k);
   _renderCoin();
 }
 function _coinPickMin() {           // 500+ = ตั้งแต่ 500 ขึ้นไป · 500 = แค่ 500 · 500- = น้อยกว่า 500
   const raw = String((document.getElementById('coinMin') || {}).value || '').replace(/\s+/g, '');
   const m = raw.match(/^(\d+)([+-]?)$/);
-  if (!m || !_coinData) { if (raw) toast('ใส่แบบ 500+ / 500 / 500-', 'error'); return; }
+  if (!raw) return _coinClearFilter();
+  if (!m || !_coinData) { toast('ใส่แบบ 500+ / 500 / 500-', 'error'); return; }
   const v = Number(m[1]), op = m[2];
   const ok = op === '+' ? (n => n >= v) : op === '-' ? (n => n < v) : (n => n === v);
-  _coinPicked = new Set(Object.keys(_coinData.numTotal).filter(k => k !== 'อื่นๆ' && ok(Number(k))));
+  _coinFilter = { raw: raw, ok: ok };
+  _coinPicked = new Set(_coinKeysIn(_coinData.numTotal));
   if (!_coinPicked.size) toast(`ไม่มีเลข ${raw}`, 'info');
   _renderCoin();
 }
@@ -2810,16 +2822,20 @@ function _renderCoin() {
   if (!_coinData) return;
   const { perAgent, numTotal, totalMachines, onlineCount, grandTotal, grandCoin } = _coinData;
   const content = document.getElementById('contentArea');
-  const keys = Object.keys(numTotal).sort(_coinCmp);
+  const keys = _coinKeysIn(numTotal).sort(_coinCmp);
+  const shownTotal = keys.reduce((s, k) => s + numTotal[k], 0);
   const picked = [..._coinPicked].sort(_coinCmp);
-  const all = !picked.length;
+  const all = !picked.length && !_coinFilter;     // มีตัวกรองแต่ไม่ติ๊กเลขไหน = ไม่เลือกอะไร (ห้ามกลายเป็นโหลดทั้งหมด)
   const pickedTotal = all ? grandTotal : picked.reduce((s, k) => s + (numTotal[k] || 0), 0);
-  const pickedLabel = all ? 'ทุกเลข' : (picked.length <= 4 ? picked.map(k => k === 'อื่นๆ' ? k : '[' + k + ']').join(', ') : picked.length + ' เลข');
-  const minVal = (document.getElementById('coinMin') || {}).value || '';
+  const pickedLabel = all ? 'ทุกเลข' : !picked.length ? 'ยังไม่ได้เลือก' : (picked.length <= 4 ? picked.map(k => k === 'อื่นๆ' ? k : '[' + k + ']').join(', ') : picked.length + ' เลข');
+  const minVal = _coinFilter ? _coinFilter.raw : '';
 
   const chip = (k, n, on) => `<div class="stat-tile" style="cursor:pointer; min-width:84px;${on?' border-color:var(--accent); box-shadow:0 0 0 1px var(--accent)':''}" onclick="_coinToggle('${escAttr(k)}')">
       <div class="stat-label">${k==='ALL'?'ทุกเลข':(k==='อื่นๆ'?k:'['+escHtml(k)+']')}</div><div class="stat-val" style="color:var(--accent)">${n.toLocaleString()}</div></div>`;
-  const chips = chip('ALL', grandTotal, all) + keys.map(k => chip(k, numTotal[k], _coinPicked.has(k))).join('');
+  const allOn = _coinFilter ? (picked.length === keys.length && keys.length > 0) : all;
+  const chips = (_coinFilter
+      ? chip('ALL', shownTotal, allOn).replace('>ทุกเลข<', '>รวม ' + escHtml(_coinFilter.raw) + '<')
+      : chip('ALL', grandTotal, allOn)) + keys.map(k => chip(k, numTotal[k], _coinPicked.has(k))).join('');
 
   const cards = perAgent.map(p => {
     if (p.error) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--danger); font-size:13px">${escHtml(p.error)}</div></div>`;
@@ -2852,6 +2868,7 @@ function _renderCoin() {
         <input type="text" id="coinMin" placeholder="500+ / 500 / 500-" value="${escAttr(minVal)}" style="width:130px" onkeydown="if(event.key==='Enter')_coinPickMin()"
           title="500+ = ตั้งแต่ 500 ขึ้นไป · 500 = แค่ 500 · 500- = น้อยกว่า 500">
         <button class="btn" onclick="_coinPickMin()">เลือก</button>
+        ${_coinFilter ? '<button class="btn" onclick="_coinClearFilter()" title="แสดงทุกเลข">✕ ล้าง</button>' : ''}
       </span>
     </h3>
     <div class="stat-row" style="flex-wrap:wrap; gap:8px">${chips}</div>
@@ -2891,6 +2908,7 @@ function _renderCoin() {
 function _coinExport(forceMove) {
   if (!_coinData) return;
   const picked = [..._coinPicked].sort(_coinCmp);
+  if (!picked.length && _coinFilter) { toast('ยังไม่ได้เลือกเลข', 'error'); return; }
   const nums = picked.filter(k => k !== 'อื่นๆ');
   let pats, patsNot = false, tag;
   if (!picked.length) {
