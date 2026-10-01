@@ -6436,7 +6436,7 @@ const BU_FORCE_BAT = [
   "powershell -NoProfile -Command \"Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*login.py*' -or $_.CommandLine -like '*auto_update.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\" >nul 2>&1",
   'timeout /t 2 /nobreak >nul',
   'echo [2/3] Running silent update ...',
-  'py auto_update.py --silent --force',
+  'py auto_update.py --silent --force --no-relaunch',
   'echo [3/3] Making sure the bot is running ...',
   'timeout /t 15 /nobreak >nul',
   "powershell -NoProfile -Command \"if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*login.py*' }) { exit 0 } else { exit 1 }\"",
