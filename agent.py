@@ -1032,6 +1032,9 @@ def handle_move(req_id, data):
 
 
 _ID_SEG = re.compile(r"\d{4,}")          # โค้ดท้ายไฟล์อย่าง ASCV188565062-[10] มีตัวเลขยาว ชื่อคนไม่มี
+# เลขนำหน้าชื่อฮีโร่อย่าง "[70]-Mbappe-w" — เป็นแค่ป้ายกำกับ ไม่ใช่ส่วนหนึ่งของชื่อ
+# ตัดทิ้งเพื่อให้ไปรวมกับการ์ด "Mbappe-w" ตัวเดียวกัน ไม่แตกเป็นการ์ดละตัว
+_HERO_TAG = re.compile(r"^\[\s*\d+\s*\]\s*[-_]?\s*")
 
 
 def _read_hero_list(base):
@@ -1069,7 +1072,7 @@ def _hero_combo(filename, names_map):
     stem = os.path.splitext(filename)[0]
     out = []
     for p in stem.split("+"):
-        p = p.strip()
+        p = _HERO_TAG.sub("", p.strip()).strip()      # "[70]-Mbappe-w" -> "Mbappe-w"
         if not p or _ID_SEG.search(p):
             continue
         out.append(names_map.get(p.lower(), p))

@@ -2282,6 +2282,23 @@ let _dashScope = { hero: 'ALL' };
 
 function openDashboard() { return openHeroDash('hero'); }
 
+// เลขนำหน้าชื่อฮีโร่อย่าง "[70]-Mbappe-w" เป็นแค่ป้ายกำกับ ไม่ใช่ชื่อคนละตัว
+// ตัดทิ้งแล้วยุบเข้าการ์ด "Mbappe-w" อันเดียว (agent รุ่นใหม่ตัดให้ตั้งแต่ต้นทางแล้ว
+// แต่เครื่องที่ยัง agent เก่าส่งชื่อเต็มมา เลยต้องตัดซ้ำที่นี่ด้วย)
+const HERO_TAG_RE = /^\[\s*\d+\s*\]\s*[-_]?\s*/;
+function stripHeroTag(name) {
+  return String(name).split('+').map(x => x.trim().replace(HERO_TAG_RE, '').trim())
+    .filter(Boolean).join('+') || String(name);
+}
+// รวม {combo: จำนวน} เข้า dst โดยตัดเลขนำหน้าก่อน (ชื่อที่ซ้ำกันหลังตัดจะบวกกัน)
+function mergeCombos(dst, src) {
+  for (const k in (src || {})) {
+    const nk = stripHeroTag(k);
+    dst[nk] = (dst[nk] || 0) + src[k];
+  }
+  return dst;
+}
+
 async function openHeroDash(kind) {
   const cfg = DASH_KINDS[kind];
   currentAgent = null;
@@ -2323,17 +2340,17 @@ async function openHeroDash(kind) {
         inputId: (ir && typeof ir.total === 'number') ? ir.total : null,
         inputExists: ir ? ir.exists : undefined,
       });
-      const combos = res.combos || {};
-      for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
+      mergeCombos(comboTotals, res.combos);
       // แยกตามโฟลเดอร์ย่อย (hero1 / hero2 / ...) เอาไว้โชว์ว่าไฟล์อยู่โฟลเดอร์ไหน
       const gt = res.group_totals || {};
       for (const g in gt) folderTotals[g] = (folderTotals[g] || 0) + gt[g];
       matchedTotal += res.matched_files || 0;
       // เก็บไว้ให้หน้ารายละเอียด (กดการ์ด) ใช้ — โครงเดียวกับหน้า Line Ranger
-      const gc = res.groups || {};
-      for (const g in gc) {
-        const dst = pesGroupCombos[g] || (pesGroupCombos[g] = {});
-        for (const k in gc[g]) dst[k] = (dst[k] || 0) + gc[g][k];
+      const gcRaw = res.groups || {};
+      const gc = {};
+      for (const g in gcRaw) {
+        gc[g] = mergeCombos({}, gcRaw[g]);                       // ตัดเลขนำหน้าในชั้นโฟลเดอร์ด้วย
+        mergeCombos(pesGroupCombos[g] || (pesGroupCombos[g] = {}), gcRaw[g]);
       }
       pesPerAgent.push({ name: a.name || a.hostname || a.agent_id, byGroup: gc });
     } catch (e) {
