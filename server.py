@@ -1994,6 +1994,36 @@ WEB_UI_HTML = r"""
     grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
     gap: 12px;
   }
+  /* VPN: เครื่อง 30 กว่าเครื่องในตารางแถวละเครื่อง ยาวจนต้องเลื่อนทั้งหน้า
+     เปลี่ยนเป็นการ์ดไหลไปทางขวา เต็มแถวแล้วขึ้นบรรทัดใหม่ */
+  .wg-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 10px;
+  }
+  .wg-card {
+    background: linear-gradient(150deg, var(--bg-card), var(--bg-secondary));
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 12px;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .wg-card:hover { border-color: var(--accent); box-shadow: 0 6px 16px rgba(0,0,0,0.25); }
+  .wg-card.off { opacity: 0.5; }
+  .wg-top { display: flex; align-items: center; gap: 7px; }
+  .wg-top input[type="checkbox"] { width: auto; margin: 0; flex: none; }
+  .wg-nm {
+    flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .wg-no {
+    font-size: 11px; font-weight: 700; color: var(--accent);
+    background: rgba(96,165,250,0.12); border-radius: 999px; padding: 1px 8px; flex: none;
+  }
+  .wg-st {
+    margin-top: 6px; font-size: 11px; line-height: 1.45; color: var(--text-dim);
+    word-break: break-word;
+  }
   .mid-card {
     background: linear-gradient(150deg, var(--bg-card), var(--bg-secondary));
     border: 1px solid var(--border);
@@ -2183,6 +2213,7 @@ WEB_UI_HTML = r"""
     .hero-grid { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 7px; }
     .hero-count { font-size: 18px; }
     .machine-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+    .wg-grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
     .mid-count { font-size: 28px; }
     .id-grid { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); }
     .mumu-grid { grid-template-columns: 1fr; }
@@ -3145,7 +3176,8 @@ async function openFolderDash(kind) {
 function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
   const cfg = FOLDER_DASH[kind];
   const content = document.getElementById('contentArea');
-  _lastFolderDash = { kind, perAgent, onlineCount, total };
+  _lastFolderDash = { kind, perAgent, totalMachines, onlineCount, total };
+  const balSkip = balSkipSet(kind);
   const cards = perAgent.map(p => {
     if (p.error) {
       return `<div class="mid-card" data-name="${escHtml(p.name)}">
@@ -3162,13 +3194,24 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
     const color = c === 0 ? 'var(--danger)' : (c < 100 ? 'var(--warning)' : 'var(--accent)');
     const badge = c === 0 ? '<div class="mid-badge zero">ว่าง</div>'
                 : (c < 100 ? '<div class="mid-badge low">น้อย</div>' : '');
-    return `<div class="mid-card" data-name="${escHtml(p.name)}">
-      <div class="mid-name">🖥️ ${escHtml(p.name)}</div>
+    // ติ๊ก = ร่วมแบ่งไฟล์ · ไม่ติ๊ก = ข้ามเครื่องนี้ไปเลย (เช่นเครื่องที่ไม่ได้รัน pes)
+    const joins = !balSkip.has(p.agentId);
+    return `<div class="mid-card" data-name="${escHtml(p.name)}" style="${joins ? '' : 'opacity:.45'}">
+      <div class="mid-name">
+        <input type="checkbox" ${joins ? 'checked' : ''} title="ติ๊ก = ให้เครื่องนี้ร่วมแบ่งไฟล์"
+               onclick="balTogglePick('${kind}', '${escAttr(p.agentId)}')"
+               style="width:auto; margin:0 6px 0 0; vertical-align:middle">🖥️ ${escHtml(p.name)}</div>
       <div class="mid-count" style="color:${color}">${c.toLocaleString()}</div>
       <div class="mid-label">ไฟล์ใน ${cfg.label}</div>
       ${badge}
     </div>`;
   }).join('');
+
+  // สรุปเฉพาะเครื่องที่ติ๊กไว้ — ใช้ตั้งเป้าหมายและเปิด/ปิดปุ่มแบ่ง
+  const balAll = balPickable(perAgent);
+  const balJoin = balAll.filter(p => !balSkip.has(p.agentId));
+  const balTotal = balJoin.reduce((sum, p) => sum + p.count, 0);
+  const balTarget = balJoin.length ? Math.floor(balTotal / balJoin.length) : 0;
 
   content.innerHTML = `
     <div class="toolbar">
@@ -3215,15 +3258,19 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
     <div class="pick-panel" style="margin-top:14px; border:1px solid var(--accent)">
       <div class="pick-head">
         <span class="pick-title">⚖️ แบ่งไฟล์ ${escHtml(cfg.label)} ให้พอดี
-          <span style="color:var(--text-dim); font-weight:400">— เกลี่ยไฟล์ให้ทุกเครื่องมีเท่าๆ กัน (ย้ายข้ามเครื่องตรงๆ)</span></span>
+          <span style="color:var(--text-dim); font-weight:400">— เกลี่ยให้เท่าๆ กัน <b>เฉพาะเครื่องที่ติ๊กไว้</b> (ย้ายข้ามเครื่องตรงๆ)</span></span>
+        <button class="btn" onclick="balPickAll('${kind}', true)">ติ๊กทุกเครื่อง</button>
+        <button class="btn" onclick="balPickAll('${kind}', false)">เอาออกทั้งหมด</button>
       </div>
       <div class="pick-head" style="margin-bottom:0">
         <span id="balHint" style="font-size:12px; color:var(--text-secondary)">
-          ${onlineCount >= 2 ? ('เป้าหมาย ~' + Math.floor(total / Math.max(1, onlineCount)).toLocaleString() + ' ไฟล์/เครื่อง จาก ' + onlineCount + ' เครื่องที่พร้อม')
-                             : 'ต้องมีเครื่องพร้อมอย่างน้อย 2 เครื่อง'}
+          ${balJoin.length >= 2
+            ? ('เลือกไว้ <b>' + balJoin.length + '/' + balAll.length + '</b> เครื่อง · รวม ' + balTotal.toLocaleString()
+               + ' ไฟล์ · เป้าหมาย ~<b>' + balTarget.toLocaleString() + '</b> ไฟล์/เครื่อง')
+            : ('เลือกไว้ ' + balJoin.length + '/' + balAll.length + ' เครื่อง — ต้องติ๊กอย่างน้อย 2 เครื่อง')}
         </span>
-        <button class="btn btn-primary" id="balBtn" onclick="runBalance('${kind}')" ${onlineCount >= 2 && total > 0 ? '' : 'disabled'}>
-          ⚖️ แบ่งไฟล์ให้พอดี</button>
+        <button class="btn btn-primary" id="balBtn" onclick="runBalance('${kind}')" ${balJoin.length >= 2 && balTotal > 0 ? '' : 'disabled'}>
+          ⚖️ แบ่งไฟล์ให้พอดี (${balJoin.length} เครื่อง)</button>
       </div>
       <div id="balProg" style="display:none; margin-top:10px">
         <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
@@ -3233,7 +3280,8 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
         <div class="progress-bar"><div class="progress-fill" id="balBar" style="width:0%"></div></div>
       </div>
       <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
-        ย้ายจริง (ไม่ใช่ก๊อป) — เครื่องที่มีเยอะจะโอนไฟล์ให้เครื่องที่มีน้อย จนทุกเครื่องเท่ากัน
+        ย้ายจริง (ไม่ใช่ก๊อป) — เครื่องที่มีเยอะจะโอนไฟล์ให้เครื่องที่มีน้อย จนทุกเครื่องที่ติ๊กไว้เท่ากัน ·
+        ติ๊กเครื่องออกได้ที่การ์ดด้านบน (เช่นเครื่องที่ไม่ได้รัน ${escHtml(cfg.base)}) เครื่องที่ไม่ติ๊กจะไม่ถูกแตะทั้งให้และรับ · จำไว้ให้ในเครื่องนี้
       </div>
     </div>
 
@@ -3309,8 +3357,45 @@ async function runBatAll(kind, stop) {
 
 // ⚖️ คำนวณแผนแบ่งไฟล์: ทุกเครื่องควรมีเท่าๆ กัน → moves [{from,to,count}]
 let _lastFolderDash = null;
-function computeBalancePlan(perAgent) {
-  const live = (perAgent || []).filter(p => p && !p.error && p.exists !== false && typeof p.count === 'number' && p.agentId);
+
+// ── เครื่องที่ "ไม่ร่วมแบ่งไฟล์" ของแต่ละ dashboard ───────────────────────
+// เก็บเป็นรายการยกเว้น (ไม่ใช่รายการที่เลือก) เครื่องใหม่ที่เพิ่งต่อเข้ามาจะร่วมแบ่ง
+// ให้เองโดยปริยาย ส่วนเครื่องที่ติ๊กออกไว้ (เช่นเครื่องที่ไม่ได้รัน pes) จะถูกจำไว้
+let _balSkip = {};
+try { _balSkip = JSON.parse(localStorage.getItem('balSkip') || '{}') || {}; } catch (e) { _balSkip = {}; }
+function balSkipSet(kind) { return new Set(_balSkip[kind] || []); }
+function balSaveSkip(kind, set) {
+  _balSkip[kind] = [...set];
+  try { localStorage.setItem('balSkip', JSON.stringify(_balSkip)); } catch (e) {}
+}
+function balTogglePick(kind, agentId) {
+  const set = balSkipSet(kind);
+  if (set.has(agentId)) set.delete(agentId); else set.add(agentId);
+  balSaveSkip(kind, set);
+  balRerender(kind);
+}
+function balPickAll(kind, on) {
+  const d = _lastFolderDash;
+  if (!d || d.kind !== kind) return;
+  const set = on ? new Set() : new Set(balPickable(d.perAgent).map(p => p.agentId));
+  balSaveSkip(kind, set);
+  balRerender(kind);
+}
+// เครื่องที่ "แบ่งได้จริง" (ตอบกลับ มีโฟลเดอร์ นับไฟล์ได้)
+function balPickable(perAgent) {
+  return (perAgent || []).filter(p => p && !p.error && p.exists !== false
+                                   && typeof p.count === 'number' && p.agentId);
+}
+function balRerender(kind) {
+  const d = _lastFolderDash;
+  if (!d || d.kind !== kind) return;
+  renderFolderDash(kind, d.perAgent, d.totalMachines, d.onlineCount, d.total);
+}
+
+function computeBalancePlan(perAgent, skip) {
+  const skipSet = skip || new Set();
+  // เอาเฉพาะเครื่องที่ติ๊กไว้ — เครื่องที่ติ๊กออกจะไม่ถูกแตะ ทั้งในฐานะผู้ให้และผู้รับ
+  const live = balPickable(perAgent).filter(p => !skipSet.has(p.agentId));
   const n = live.length;
   if (n < 2) return { moves: [], live, target: 0, total: 0 };
   const total = live.reduce((s, p) => s + p.count, 0);
@@ -3343,11 +3428,13 @@ async function runBalance(kind) {
   const cfg = FOLDER_DASH[kind];
   const dash = _lastFolderDash;
   if (!dash || dash.kind !== kind) { alert('ข้อมูลหมดอายุ กด 🔄 รีเฟรชก่อน'); return; }
-  const plan = computeBalancePlan(dash.perAgent);
+  const skip = balSkipSet(kind);
+  const plan = computeBalancePlan(dash.perAgent, skip);
+  if (plan.live.length < 2) { alert('ต้องติ๊กเครื่องอย่างน้อย 2 เครื่องถึงจะแบ่งไฟล์ได้'); return; }
   if (!plan.moves.length) { alert('ไฟล์เฉลี่ยดีอยู่แล้ว ไม่ต้องแบ่ง 👍'); return; }
   const totalMove = plan.moves.reduce((s, m) => s + m.count, 0);
   if (!confirm(`จะเกลี่ยไฟล์ ${cfg.label} ให้เท่าๆ กัน\n` +
-      `• เครื่องพร้อม: ${plan.live.length}\n` +
+      `• เครื่องที่ติ๊กไว้: ${plan.live.length} เครื่อง (${plan.live.map(p => p.name).join(', ')})\n` +
       `• เป้าหมาย ~${plan.target.toLocaleString()} ไฟล์/เครื่อง\n` +
       `• ย้ายทั้งหมด ${totalMove.toLocaleString()} ไฟล์ (${plan.moves.length} รอบ)\n\n` +
       `⚠️ เป็นการ "ย้าย" จริง (ต้นทางจะลดลง) — เริ่มเลยไหม?`)) return;
@@ -4526,12 +4613,14 @@ function openWgDashboard() {
     content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
     return;
   }
-  const rows = agents.map((a, i) => `<tr>
-      <td><input type="checkbox" class="wg-chk" data-i="${i}" checked></td>
-      <td>🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}</td>
-      <td id="wg_m_${i}" style="text-align:center">-</td>
-      <td id="wg_st_${i}" style="font-size:12px; color:var(--text-dim)">กด "โหลดสถานะ"</td>
-    </tr>`).join('');
+  const rows = agents.map((a, i) => `<div class="wg-card" id="wg_c_${i}">
+      <div class="wg-top">
+        <input type="checkbox" class="wg-chk" data-i="${i}" checked onchange="wgSyncCard(${i})">
+        <span class="wg-nm" title="${escAttr(a.name || a.hostname || a.agent_id)}">🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}</span>
+        <span class="wg-no" id="wg_m_${i}">-</span>
+      </div>
+      <div class="wg-st" id="wg_st_${i}">กด "โหลดสถานะ"</div>
+    </div>`).join('');
   content.innerHTML = `
     <div class="pick-panel" style="margin-bottom:14px">
       <div class="pick-head"><span class="pick-title">🔐 VPN แยกจอ (WireGuard) — บอท LGR (โฟลเดอร์ main/wg)</span></div>
@@ -4549,10 +4638,13 @@ function openWgDashboard() {
         <button class="btn btn-primary" onclick="wgRun('regen')">✨ สร้างใหม่ + ส่ง (ที่ติ๊ก)</button>
       </div>
     </div>
-    <table class="file-table" style="width:100%">
-      <thead><tr><th style="width:36px"></th><th>เครื่อง</th><th style="width:90px">เลขเครื่อง</th><th>สถานะ VPN</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
+    <div style="display:flex; align-items:center; gap:10px; margin:0 2px 8px">
+      <h3 style="flex:1; font-size:13px; color:var(--text-secondary); margin:0">
+        เครื่องทั้งหมด ${agents.length} เครื่อง <span style="color:var(--text-dim); font-weight:400">— ติ๊กเครื่องที่จะสั่งงาน</span></h3>
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาเครื่อง..." oninput="wgFilter(this.value)">
+    </div>
+    <div class="wg-grid">${rows}</div>
+    <div id="wgNoResult" style="display:none; text-align:center; padding:30px; color:var(--text-dim)">🔍 ไม่พบเครื่อง</div>`;
   socket.once('wg_info_result', (r) => {
     const el = document.getElementById('wgInfo');
     if (!el) return;
@@ -4568,7 +4660,26 @@ function openWgDashboard() {
   socket.emit('wg_info');
 }
 
-function wgTick(on) { document.querySelectorAll('.wg-chk').forEach(c => { c.checked = on; }); }
+function wgSyncCard(i) {
+  const chk = document.querySelector('.wg-chk[data-i="' + i + '"]');
+  const card = document.getElementById('wg_c_' + i);
+  if (chk && card) card.classList.toggle('off', !chk.checked);
+}
+function wgTick(on) {
+  document.querySelectorAll('.wg-chk').forEach(c => { c.checked = on; wgSyncCard(c.dataset.i); });
+}
+function wgFilter(q) {
+  q = (q || '').trim().toLowerCase();
+  let shown = 0;
+  document.querySelectorAll('.wg-card').forEach(card => {
+    const nm = (card.querySelector('.wg-nm') || {}).textContent || '';
+    const hit = !q || nm.toLowerCase().includes(q);
+    card.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  });
+  const nr = document.getElementById('wgNoResult');
+  if (nr) nr.style.display = shown === 0 ? '' : 'none';
+}
 
 async function wgRun(sub) {
   const agents = window._wgAgents || [];
