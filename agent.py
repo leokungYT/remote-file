@@ -4304,9 +4304,14 @@ def _download_new_agent():
     here = os.path.dirname(os.path.abspath(__file__))
     dest = os.path.join(here, "agent.py")
     last_err = None
-    for url in _active_urls():
+    # GitHub ก่อน (ตัวล่าสุดเสมอ) แล้วค่อย server - กันกรณีมีหลาย server แล้วบางตัวยังถือ agent.py เก่า
+    #  (เคยเจอ: agent ต่อ 2 server ตัวที่ตอบก่อนเป็นของเก่า -> อัปเดตเท่าไหร่ก็ได้ของเดิม)
+    sources = ["https://raw.githubusercontent.com/leokungYT/remote-file/main/agent.py"]
+    sources += [u.rstrip("/") + "/agent.py" for u in _active_urls()]
+    for src in sources:
+        url = src
         try:
-            r = requests.get(url.rstrip("/") + "/agent.py", timeout=30)
+            r = requests.get(src, timeout=30)
             r.raise_for_status()
             code = r.content
             text = code.decode("utf-8", "ignore")
