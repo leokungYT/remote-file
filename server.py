@@ -4586,8 +4586,8 @@ async function wgRun(sub) {
     if (!cell) continue;
     if (r.error) { cell.innerHTML = `<span style="color:#f87171">❌ ${escHtml(r.error)}</span>`; continue; }
     if (sub === 'update') cell.innerHTML = r.updated ? '⬆️ อัปเดตแล้ว กำลังรีสตาร์ท (รอ ~10 วิ แล้วกดโหลดสถานะ)' : '✅ agent เป็นตัวล่าสุดแล้ว';
-    else if (sub === 'status') cell.innerHTML = `✅ มี ${r.count} ไฟล์` + (r.managed ? ' (จาก server)' : ' (สร้างเอง/วางเอง)');
-    else if (sub === 'delete') cell.innerHTML = `🗑️ ลบแล้ว ${r.removed} ไฟล์`;
+    else if (sub === 'status') cell.innerHTML = `<span style="color:var(--text-dim)">${escHtml(r.folder || '')}</span> → ` + `✅ มี ${r.count} ไฟล์` + (r.managed ? ' (จาก server)' : ' (สร้างเอง/วางเอง)');
+    else if (sub === 'delete') cell.innerHTML = `🗑️ ลบแล้ว ${r.removed} ไฟล์ <span style="color:var(--text-dim)">(${escHtml(r.folder || '')})</span>`;
     else {
       cell.innerHTML = `✨ ส่งแล้ว ${r.written} ไฟล์ (เครื่อง #${r.machine})`;
       const m = document.getElementById('wg_m_' + i); if (m) m.textContent = '#' + r.machine;
