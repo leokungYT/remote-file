@@ -4509,7 +4509,8 @@ function wgReq(agentId, sub, extra, waitMs) {
     };
     socket.once('request_sent', onSent);
     setTimeout(() => { socket.off('request_sent', onSent); done({ error: 'หมดเวลา (เครื่องไม่ตอบ)' }); }, waitMs || 45000);
-    socket.emit('request_wg', Object.assign({ agent_id: agentId, sub: sub }, extra || {}));
+    if (sub === 'update') socket.emit('request_self_update', { agent_id: agentId });
+    else socket.emit('request_wg', Object.assign({ agent_id: agentId, sub: sub }, extra || {}));
   });
 }
 
@@ -4541,6 +4542,7 @@ function openWgDashboard() {
           <input type="number" id="wgTotal" min="1" max="200" value="${Math.max(30, agents.length)}" style="width:64px; padding:6px 8px"></label>
         <button class="btn" onclick="wgTick(true)">☑️ ติ๊กทั้งหมด</button>
         <button class="btn" onclick="wgTick(false)">⬜ ไม่ติ๊ก</button>
+        <button class="btn" onclick="wgRun('update')" title="agent เก่าจะขึ้น Unknown action: wg_manage - กดอันนี้ก่อน (ดึง agent.py ใหม่ + รีสตาร์ท)">⬆️ อัปเดต agent</button>
         <button class="btn" onclick="wgRun('status')">🔄 โหลดสถานะ</button>
         <button class="btn btn-danger" onclick="wgRun('delete')">🗑️ ลบ VPN ทั้งหมด (ที่ติ๊ก)</button>
         <button class="btn btn-primary" onclick="wgRun('regen')">✨ สร้างใหม่ + ส่ง (ที่ติ๊ก)</button>
@@ -4583,7 +4585,8 @@ async function wgRun(sub) {
     const r = await wgReq(a.agent_id, sub, { per: per, total: total });
     if (!cell) continue;
     if (r.error) { cell.innerHTML = `<span style="color:#f87171">❌ ${escHtml(r.error)}</span>`; continue; }
-    if (sub === 'status') cell.innerHTML = `✅ มี ${r.count} ไฟล์` + (r.managed ? ' (จาก server)' : ' (สร้างเอง/วางเอง)');
+    if (sub === 'update') cell.innerHTML = r.updated ? '⬆️ อัปเดตแล้ว กำลังรีสตาร์ท (รอ ~10 วิ แล้วกดโหลดสถานะ)' : '✅ agent เป็นตัวล่าสุดแล้ว';
+    else if (sub === 'status') cell.innerHTML = `✅ มี ${r.count} ไฟล์` + (r.managed ? ' (จาก server)' : ' (สร้างเอง/วางเอง)');
     else if (sub === 'delete') cell.innerHTML = `🗑️ ลบแล้ว ${r.removed} ไฟล์`;
     else {
       cell.innerHTML = `✨ ส่งแล้ว ${r.written} ไฟล์ (เครื่อง #${r.machine})`;
