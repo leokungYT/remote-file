@@ -362,7 +362,8 @@ def _wg_build(agent_id, per, total_machines):
         raise RuntimeError("ยังไม่มี Key Pair ที่ server - วางไฟล์ .conf จาก Windscribe ไว้ในโฟลเดอร์ wg_keys/")
     groups = _wg_groups()
     machine = _wg_machine_for(agent_id)
-    per = max(1, int(per))
+    # +สำรอง 2 ไฟล์ต่อเครื่อง ให้บอทสลับเซิร์ฟเวอร์เองตอนเน็ตหลุดซ้ำ (auto failover) - ช่วงของเครื่องกว้างขึ้นตาม ไม่ทับกัน
+    per = max(1, int(per)) + int(os.environ.get("WG_SPARE", "2"))
     total_machines = max(int(total_machines or 0), machine)
     group_size = -(-total_machines // len(keys))            # ปัดขึ้น: กี่เครื่องต่อ 1 กุญแจ
     key_no = min((machine - 1) // group_size, len(keys) - 1)
