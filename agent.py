@@ -536,6 +536,8 @@ def _dispatch_command(data):
             handle_mumu_clone(req_id, payload)
         elif action == "run_file":
             handle_run_file(req_id, payload)
+        elif action == "wg_manage":
+            handle_wg_manage(req_id, payload)
         else:
             send_response(req_id, {"error": f"Unknown action: {action}"})
     except Exception as e:
@@ -1481,6 +1483,67 @@ def _resolve_game_base(match):
 
 # ชื่อเดิม (คงไว้ให้ handle_list_ids ใช้)
 _resolve_cookie_base = _resolve_game_base
+
+
+# ═══════════════════════════════════════════════════════════
+#  WireGuard (VPN แยกจอ) ของบอท LGR - ไฟล์อยู่ที่ <Desktop/main>/wg/
+#  sub: status = นับไฟล์ / delete = ลบไฟล์ VPN ทั้งหมด / write = เขียนไฟล์ที่ server สร้างมาให้
+# ═══════════════════════════════════════════════════════════
+def handle_wg_manage(req_id, payload):
+    sub = (payload.get("sub") or "status").lower()
+    wg_dir = _resolve_input_folder((payload.get("base_match") or "main").lower(), "wg")
+    if not wg_dir:
+        return send_response(req_id, {"error": "ไม่เจอโฟลเดอร์บอท (main) ใน allowed_paths"})
+    if not is_path_allowed(wg_dir):
+        return send_response(req_id, {"error": f"ไม่อนุญาตพาธ {wg_dir}"})
+    os.makedirs(wg_dir, exist_ok=True)
+
+    def _list():
+        return sorted(f for f in os.listdir(wg_dir) if f.lower().endswith(".conf"))
+
+    def _wipe():
+        n = 0
+        for f in os.listdir(wg_dir):
+            fl = f.lower()
+            if fl.endswith(".conf") or fl in ("keypair.txt", "wg.txt", ".managed"):
+                try:
+                    os.remove(os.path.join(wg_dir, f)); n += 1
+                except OSError:
+                    pass
+        for sub_dir in (".claims", ".split"):          # การจองไฟล์ของบอท - ล้างให้จอจองใหม่
+            d = os.path.join(wg_dir, sub_dir)
+            if os.path.isdir(d):
+                for f in os.listdir(d):
+                    try:
+                        os.remove(os.path.join(d, f))
+                    except OSError:
+                        pass
+        return n
+
+    if sub == "status":
+        files = _list()
+        return send_response(req_id, {"ok": True, "folder": wg_dir, "count": len(files), "files": files,
+                                      "managed": os.path.exists(os.path.join(wg_dir, ".managed"))})
+    if sub == "delete":
+        n = _wipe()
+        return send_response(req_id, {"ok": True, "removed": n, "count": 0, "folder": wg_dir})
+    if sub == "write":
+        if payload.get("clear", True):
+            _wipe()
+        written = 0
+        for name, b64 in (payload.get("files") or {}).items():
+            name = os.path.basename(str(name))
+            if not name.lower().endswith(".conf"):
+                continue
+            with open(os.path.join(wg_dir, name), "wb") as f:
+                f.write(base64.b64decode(b64))
+            written += 1
+        # ไฟล์มาจาก server = บอทห้ามสร้างเพิ่มเอง (wg_gen) กันชนกับเครื่องอื่น
+        with open(os.path.join(wg_dir, ".managed"), "w", encoding="utf-8") as f:
+            f.write(str(payload.get("machine") or ""))
+        return send_response(req_id, {"ok": True, "written": written, "count": len(_list()), "folder": wg_dir,
+                                      "machine": payload.get("machine")})
+    send_response(req_id, {"error": f"wg_manage: ไม่รู้จัก sub={sub}"})
 
 
 def _resolve_input_folder(match, subpath="input-id"):

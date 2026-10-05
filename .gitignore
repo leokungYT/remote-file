@@ -26,3 +26,7 @@ cloudflared.log
 cloudflared.out.log
 *.bak
 warp-allow-tailscale.log
+
+# Windscribe WireGuard key pairs + machine numbers (secret) - never commit
+wg_keys/
+wg_assign.json

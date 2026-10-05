@@ -272,6 +272,153 @@ def handle_delete_many(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+# ═══════════════════════════════════════════════════════════
+#  WireGuard (VPN แยกจอ) ของบอท LGR - สร้างไฟล์ที่ server แล้วส่งให้แต่ละเครื่อง
+#  wg_keys/    : วางไฟล์ .conf จาก Windscribe (1 ไฟล์ต่อ Key Pair, สูงสุด 5) - ห้ามขึ้น git
+#  wg_assign.json : เลขเครื่องที่แจกไปแล้ว {agent_id: n} - เครื่องเดิมได้เลขเดิมเสมอ
+#  เครื่องที่ใช้กุญแจเดียวกันได้ช่วงเซิร์ฟเวอร์ไม่ทับกัน (start=(n-1)*จำนวนจอ) -> ไม่ชนกัน
+# ═══════════════════════════════════════════════════════════
+WG_KEYS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wg_keys")
+WG_ASSIGN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wg_assign.json")
+WG_SERVERLIST_URL = "https://assets.windscribe.com/serverlist/mob-v2/1/0"
+WG_COUNTRIES = ["TH", "SG", "HK", "MY", "VN", "JP", "KR", "TW", "ID", "PH", "KH",
+                "IN", "AU", "NZ", "AE", "TR", "US", "CA", "GB", "DE", "FR", "NL"]
+_wg_cache = {"t": 0, "groups": None}
+_wg_lock = threading.Lock()
+
+
+def _wg_read_conf(path):
+    kv = {}
+    with open(path, encoding="utf-8-sig") as f:
+        for line in f:
+            if "=" in line:
+                k, v = line.split("=", 1)
+                kv[k.strip()] = v.strip()
+    return kv
+
+
+def _wg_keys():
+    if not os.path.isdir(WG_KEYS_DIR):
+        os.makedirs(WG_KEYS_DIR, exist_ok=True)
+    keys, seen = [], set()
+    for f in sorted(os.listdir(WG_KEYS_DIR)):
+        if not f.lower().endswith((".conf", ".txt")):
+            continue
+        kv = _wg_read_conf(os.path.join(WG_KEYS_DIR, f))
+        if all(kv.get(k) for k in ("PrivateKey", "Address", "DNS", "PresharedKey")) and kv["PrivateKey"] not in seen:
+            seen.add(kv["PrivateKey"])
+            keys.append(kv)
+    return keys
+
+
+def _wg_groups():
+    """รายชื่อเซิร์ฟเวอร์ WireGuard ของ Windscribe เรียงตายตัว (ประเทศใกล้ไทยก่อน) - cache 1 ชม."""
+    import urllib.request
+    if _wg_cache["groups"] and time.time() - _wg_cache["t"] < 3600:
+        return _wg_cache["groups"]
+    req = urllib.request.Request(WG_SERVERLIST_URL, headers={"User-Agent": "Mozilla/5.0"})
+    data = json.load(urllib.request.urlopen(req, timeout=30))["data"]
+    order = {c: i for i, c in enumerate(WG_COUNTRIES)}
+    groups = []
+    for loc in data:
+        if not loc.get("status", 1):
+            continue
+        cc = loc.get("country_code", "")
+        for g in loc.get("groups") or []:
+            if g.get("wg_pubkey") and g.get("wg_endpoint") and g.get("nodes"):
+                groups.append((order.get(cc, len(order)), cc, g))
+    groups.sort(key=lambda x: (x[0], x[1], int(x[2].get("id") or 0)))
+    _wg_cache.update(t=time.time(), groups=groups)
+    return groups
+
+
+def _wg_assign_load():
+    try:
+        with open(WG_ASSIGN_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _wg_machine_for(agent_id):
+    """เลขเครื่องของ agent (แจกครั้งแรกแล้วจำไว้ถาวร)"""
+    with _wg_lock:
+        a = _wg_assign_load()
+        if agent_id not in a:
+            used = set(a.values())
+            n = 1
+            while n in used:
+                n += 1
+            a[agent_id] = n
+            with open(WG_ASSIGN_FILE, "w", encoding="utf-8") as f:
+                json.dump(a, f, ensure_ascii=False, indent=1)
+        return int(a[agent_id])
+
+
+def _wg_build(agent_id, per, total_machines):
+    """สร้างไฟล์ .conf ของเครื่องนี้ -> (machine, key_no, {ชื่อไฟล์: base64}) หรือ raise"""
+    keys = _wg_keys()
+    if not keys:
+        raise RuntimeError("ยังไม่มี Key Pair ที่ server - วางไฟล์ .conf จาก Windscribe ไว้ในโฟลเดอร์ wg_keys/")
+    groups = _wg_groups()
+    machine = _wg_machine_for(agent_id)
+    per = max(1, int(per))
+    total_machines = max(int(total_machines or 0), machine)
+    group_size = -(-total_machines // len(keys))            # ปัดขึ้น: กี่เครื่องต่อ 1 กุญแจ
+    key_no = min((machine - 1) // group_size, len(keys) - 1)
+    if group_size * per > len(groups):
+        raise RuntimeError(f"เซิร์ฟเวอร์ไม่พอ: {group_size} เครื่องต่อกุญแจ x {per} จอ > {len(groups)} เซิร์ฟเวอร์ "
+                           f"(เพิ่ม Key Pair ใน wg_keys/ หรือลดจำนวนจอ)")
+    kp = keys[key_no]
+    start = ((machine - 1) * per) % len(groups)
+    pick = (groups[start:] + groups[:start])[:per]
+    files = {}
+    for _, cc, g in pick:
+        city = (g.get("city") or cc).replace(" ", "-")
+        nick = (g.get("nick") or str(g.get("id"))).replace(" ", "-")
+        lines = ["[Interface]", f"PrivateKey = {kp['PrivateKey']}", f"Address = {kp['Address']}",
+                 f"DNS = {kp['DNS']}", "", "[Peer]", f"PublicKey = {g['wg_pubkey']}",
+                 f"AllowedIPs = {kp.get('AllowedIPs', '0.0.0.0/0, ::/0')}",
+                 f"Endpoint = {g['wg_endpoint']}:443", f"PresharedKey = {kp['PresharedKey']}", ""]
+        text = chr(10).join(lines)
+        files[f"Windscribe-{city}-{nick}-WG.conf"] = base64.b64encode(text.encode()).decode()
+    return machine, key_no + 1, files
+
+
+@socketio.on("wg_info")
+def handle_wg_info(data=None):
+    """ข้อมูลฝั่ง server: จำนวน Key Pair / เลขเครื่องที่แจกไปแล้ว / จำนวนเซิร์ฟเวอร์"""
+    try:
+        n_srv = len(_wg_groups())
+    except Exception as e:
+        n_srv = f"โหลดไม่ได้: {e}"
+    emit("wg_info_result", {"keys": len(_wg_keys()), "assign": _wg_assign_load(), "servers": n_srv,
+                            "keys_dir": WG_KEYS_DIR})
+
+
+@socketio.on("request_wg")
+def handle_request_wg(data):
+    """sub=status|delete -> ส่งต่อให้เครื่องลูก ; sub=regen -> server สร้างไฟล์แล้วส่งให้เขียน"""
+    aid = data["agent_id"]
+    sub = data.get("sub", "status")
+    payload = {"sub": sub, "base_match": data.get("base_match") or "main"}
+    if sub == "regen":
+        try:
+            machine, key_no, files = _wg_build(aid, data.get("per", 15), data.get("total", 30))
+        except Exception as e:
+            emit("error", {"message": f"[VPN] {aid}: {e}"})
+            emit("request_sent", {"request_id": None, "error": str(e)})
+            return
+        payload = {"sub": "write", "clear": True, "files": files, "machine": machine, "key": key_no,
+                   "base_match": payload["base_match"]}
+    req_id = send_to_agent(aid, "wg_manage", payload, request.sid)
+    if req_id:
+        emit("request_sent", {"request_id": req_id})
+    else:
+        emit("error", {"message": f"Agent '{aid}' is offline"})
+        emit("request_sent", {"request_id": None, "error": "offline"})
+
+
 @socketio.on("request_count_heroes")
 def handle_count_heroes(data):
     """ขอให้เครื่องลูกนับไฟล์ตามชื่อฮีโร่ในโฟลเดอร์ found-hero"""
@@ -2097,6 +2244,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openBroadcastBackup()">💾 ส่งเข้า backup (ทุกเครื่อง)</button>
     <button class="btn" onclick="openBroadcastBottiket()">🎫 ส่งเข้า bot-tiket (ทุกเครื่อง)</button>
     <button class="btn" onclick="openMumuDashboard()">🎮 MuMu</button>
+    <button class="btn" onclick="openWgDashboard()" title="VPN แยกจอ (WireGuard) ของบอท LGR - ลบ/สร้างไฟล์ใหม่แล้วส่งให้แต่ละเครื่อง">🔐 VPN</button>
     <button class="btn" onclick="quickArrangeAll()" title="เรียงหน้าต่าง MuMu ทุกเครื่อง — ค่าเริ่มต้นใช้ปุ่ม Arrange ของ MuMu เอง (เปลี่ยนเป็นตารางเองได้ในหน้า MuMu)">🔲 เรียงจอ</button>
     <button class="btn" onclick="quickMinimizeAll()" title="ย่อทุกหน้าต่างลง taskbar ทุกเครื่อง + ปิดหน้าต่าง Cloudflare WARP ลง tray (ไม่ตัด VPN)">🗕 พับทุกแอป</button>
     <button class="btn" onclick="openMumuCloneDashboard()">🧬 Clone MuMu</button>
@@ -4346,6 +4494,103 @@ function filterRangerCards(q) {
   });
   const nr = document.getElementById('rangerNoResult');
   if (nr) nr.style.display = shown === 0 ? '' : 'none';
+}
+
+// ═══════════════════════════════════════════════════════════
+//  VPN (WireGuard) ของบอท LGR — ลบ/สร้างไฟล์ที่ server แล้วกระจายให้แต่ละเครื่อง
+// ═══════════════════════════════════════════════════════════
+function wgReq(agentId, sub, extra, waitMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v || {}); } };
+    const onSent = (data) => {
+      if (!data || !data.request_id) { done({ error: (data && data.error) || 'ส่งคำสั่งไม่ได้' }); return; }
+      socket.once('response_' + data.request_id, (resp) => done(resp));
+    };
+    socket.once('request_sent', onSent);
+    setTimeout(() => { socket.off('request_sent', onSent); done({ error: 'หมดเวลา (เครื่องไม่ตอบ)' }); }, waitMs || 45000);
+    socket.emit('request_wg', Object.assign({ agent_id: agentId, sub: sub }, extra || {}));
+  });
+}
+
+function openWgDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const agents = (agentsData || []).slice().sort((a, b) =>
+    String(a.name || a.hostname || a.agent_id).localeCompare(String(b.name || b.hostname || b.agent_id), undefined, { numeric: true }));
+  window._wgAgents = agents;
+  if (!agents.length) {
+    content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
+    return;
+  }
+  const rows = agents.map((a, i) => `<tr>
+      <td><input type="checkbox" class="wg-chk" data-i="${i}" checked></td>
+      <td>🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}</td>
+      <td id="wg_m_${i}" style="text-align:center">-</td>
+      <td id="wg_st_${i}" style="font-size:12px; color:var(--text-dim)">กด "โหลดสถานะ"</td>
+    </tr>`).join('');
+  content.innerHTML = `
+    <div class="pick-panel" style="margin-bottom:14px">
+      <div class="pick-head"><span class="pick-title">🔐 VPN แยกจอ (WireGuard) — บอท LGR (โฟลเดอร์ main/wg)</span></div>
+      <div id="wgInfo" style="font-size:12px; margin-bottom:10px; color:var(--text-dim)">กำลังโหลดข้อมูล server...</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:13px">
+        <label style="display:flex; align-items:center; gap:5px">จอต่อเครื่อง
+          <input type="number" id="wgPer" min="1" max="60" value="15" style="width:64px; padding:6px 8px"></label>
+        <label style="display:flex; align-items:center; gap:5px" title="ใช้คำนวณว่ากี่เครื่องต่อ 1 Key Pair">จำนวนเครื่องทั้งหมด
+          <input type="number" id="wgTotal" min="1" max="200" value="${Math.max(30, agents.length)}" style="width:64px; padding:6px 8px"></label>
+        <button class="btn" onclick="wgTick(true)">☑️ ติ๊กทั้งหมด</button>
+        <button class="btn" onclick="wgTick(false)">⬜ ไม่ติ๊ก</button>
+        <button class="btn" onclick="wgRun('status')">🔄 โหลดสถานะ</button>
+        <button class="btn btn-danger" onclick="wgRun('delete')">🗑️ ลบ VPN ทั้งหมด (ที่ติ๊ก)</button>
+        <button class="btn btn-primary" onclick="wgRun('regen')">✨ สร้างใหม่ + ส่ง (ที่ติ๊ก)</button>
+      </div>
+    </div>
+    <table class="file-table" style="width:100%">
+      <thead><tr><th style="width:36px"></th><th>เครื่อง</th><th style="width:90px">เลขเครื่อง</th><th>สถานะ VPN</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  socket.once('wg_info_result', (r) => {
+    const el = document.getElementById('wgInfo');
+    if (!el) return;
+    window._wgAssign = r.assign || {};
+    el.innerHTML = `Key Pair ที่ server: <b>${r.keys}</b> อัน (วางไฟล์ .conf จาก Windscribe ไว้ที่ <code>${escHtml(r.keys_dir)}</code>) · เซิร์ฟเวอร์ Windscribe: <b>${escHtml(String(r.servers))}</b> · เลขเครื่องแจกไปแล้ว ${Object.keys(r.assign || {}).length} เครื่อง` +
+      (r.keys ? '' : ' <span style="color:#f87171">— ยังไม่มี Key Pair สร้างไฟล์ไม่ได้</span>');
+    (window._wgAgents || []).forEach((a, i) => {
+      const m = (r.assign || {})[a.agent_id];
+      const c = document.getElementById('wg_m_' + i);
+      if (c) c.textContent = m ? ('#' + m) : '-';
+    });
+  });
+  socket.emit('wg_info');
+}
+
+function wgTick(on) { document.querySelectorAll('.wg-chk').forEach(c => { c.checked = on; }); }
+
+async function wgRun(sub) {
+  const agents = window._wgAgents || [];
+  const picked = [...document.querySelectorAll('.wg-chk')].filter(c => c.checked).map(c => +c.dataset.i);
+  if (!picked.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'error'); return; }
+  const per = parseInt(document.getElementById('wgPer').value || '15', 10);
+  const total = parseInt(document.getElementById('wgTotal').value || '30', 10);
+  if (sub === 'delete' && !confirm(`ลบไฟล์ VPN ทั้งหมดใน ${picked.length} เครื่อง?`)) return;
+  if (sub === 'regen' && !confirm(`สร้างไฟล์ VPN ใหม่ ${per} จอ/เครื่อง แล้วส่งให้ ${picked.length} เครื่อง? (ไฟล์เดิมจะถูกแทนที่)`)) return;
+  // ยิงทีละเครื่อง (wgReq ดัก request_sent แบบ once ห้ามขนาน)
+  for (const i of picked) {
+    const a = agents[i];
+    const cell = document.getElementById('wg_st_' + i);
+    if (cell) cell.innerHTML = '⏳ กำลังทำ...';
+    const r = await wgReq(a.agent_id, sub, { per: per, total: total });
+    if (!cell) continue;
+    if (r.error) { cell.innerHTML = `<span style="color:#f87171">❌ ${escHtml(r.error)}</span>`; continue; }
+    if (sub === 'status') cell.innerHTML = `✅ มี ${r.count} ไฟล์` + (r.managed ? ' (จาก server)' : ' (สร้างเอง/วางเอง)');
+    else if (sub === 'delete') cell.innerHTML = `🗑️ ลบแล้ว ${r.removed} ไฟล์`;
+    else {
+      cell.innerHTML = `✨ ส่งแล้ว ${r.written} ไฟล์ (เครื่อง #${r.machine})`;
+      const m = document.getElementById('wg_m_' + i); if (m) m.textContent = '#' + r.machine;
+    }
+  }
+  toast('VPN: ทำครบ ' + picked.length + ' เครื่อง', 'success');
 }
 
 // ═══════════════════════════════════════════════════════════
