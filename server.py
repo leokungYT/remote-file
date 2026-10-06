@@ -2841,10 +2841,13 @@ const FOLDER_DASH = {
   // login-success ของ Line Ranger: ไฟล์ id ที่ล็อกอินสำเร็จ (ชื่อไฟล์ไม่มีชื่อฮีโร่ → ใช้แดชบอร์ดนับรายเครื่อง + โหลด/ย้ายทั้งหมด)
   loginsuccess: { subpath: 'login-success', base: 'main', title: '✅ Dashboard login-success — ไฟล์ที่ล็อกอินสำเร็จ รายเครื่อง (Line Ranger)', label: 'login-success', reopen: 'openLoginSuccessDashboard' },
   // no-hero ของบอท PES: id ที่สุ่มแล้วไม่เจอฮีโร่ที่ต้องการ — นับรายเครื่อง + โหลด/ย้ายออกมาทั้งหมด
+  // input-id ของ Line Ranger — โชว์รวมอยู่ในหน้า Dashboard Backup ไม่มีหน้าของตัวเอง
+  // มีไว้ให้ปุ่มแบ่งไฟล์/โหลด .zip ใช้ config ชุดเดียวกับ dashboard อื่น
+  lgrinput: { subpath: 'input-id', base: 'main', title: '📥 input-id (Line Ranger)', label: 'input-id', reopen: 'openBackupRich' },
   nohero: { subpath: 'no-hero', base: 'pes', title: '🚫 Dashboard no-hero — ไฟล์ที่ไม่เจอฮีโร่ รายเครื่อง (PES)', label: 'no-hero', reopen: 'openNoHeroDashboard',
             moveTo: { subpath: 'check-coin', label: 'check-coin' } },
 };
-let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL', rangerid: 'ALL', loginsuccess: 'ALL', nohero: 'ALL' };
+let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL', rangerid: 'ALL', loginsuccess: 'ALL', nohero: 'ALL', lgrinput: 'ALL' };
 function openNoHeroDashboard() { return openFolderDash('nohero'); }
 function openLoginSuccessDashboard() { return openFolderDash('loginsuccess'); }
 
@@ -3276,6 +3279,47 @@ async function openFolderDash(kind) {
   renderFolderDash(kind, perAgent, agents.length, onlineCount, total);
 }
 
+// แผง "⚖️ แบ่งไฟล์ให้พอดี" — ใช้ร่วมกันระหว่าง dashboard โฟลเดอร์ปกติกับหน้า Backup
+// (Backup แบ่ง main/input-id ไม่ใช่ตัว backup เอง จึงส่ง kind = 'lgrinput' มา)
+function balPanelHtml(kind, perAgent) {
+  const cfg = FOLDER_DASH[kind];
+  const balSkip = balSkipSet(kind);
+  const balAll = balPickable(perAgent);
+  const balJoin = balAll.filter(p => !balSkip.has(p.agentId));
+  const balTotal = balJoin.reduce((sum, p) => sum + p.count, 0);
+  const balTarget = balJoin.length ? Math.floor(balTotal / balJoin.length) : 0;
+  return `
+    <div class="pick-panel" style="margin-top:14px; border:1px solid var(--accent)">
+      <div class="pick-head">
+        <span class="pick-title">⚖️ แบ่งไฟล์ ${escHtml(cfg.label)} ให้พอดี
+          <span style="color:var(--text-dim); font-weight:400">— เกลี่ยให้เท่าๆ กัน <b>เฉพาะเครื่องที่ติ๊กไว้</b> (ย้ายข้ามเครื่องตรงๆ)</span></span>
+        <button class="btn" onclick="balPickAll('${kind}', true)">ติ๊กทุกเครื่อง</button>
+        <button class="btn" onclick="balPickAll('${kind}', false)">เอาออกทั้งหมด</button>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <span id="balHint" style="font-size:12px; color:var(--text-secondary)">
+          ${balJoin.length >= 2
+            ? ('เลือกไว้ <b>' + balJoin.length + '/' + balAll.length + '</b> เครื่อง · รวม ' + balTotal.toLocaleString()
+               + ' ไฟล์ · เป้าหมาย ~<b>' + balTarget.toLocaleString() + '</b> ไฟล์/เครื่อง')
+            : ('เลือกไว้ ' + balJoin.length + '/' + balAll.length + ' เครื่อง — ต้องติ๊กอย่างน้อย 2 เครื่อง')}
+        </span>
+        <button class="btn btn-primary" id="balBtn" onclick="runBalance('${kind}')" ${balJoin.length >= 2 && balTotal > 0 ? '' : 'disabled'}>
+          ⚖️ แบ่งไฟล์ให้พอดี (${balJoin.length} เครื่อง)</button>
+      </div>
+      <div id="balProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="balMsg" style="color:var(--text-secondary)"></span>
+          <span id="balPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="balBar" style="width:0%"></div></div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        ย้ายจริง (ไม่ใช่ก๊อป) — เครื่องที่มีเยอะจะโอนไฟล์ให้เครื่องที่มีน้อย จนทุกเครื่องที่ติ๊กไว้เท่ากัน ·
+        ติ๊กเครื่องออกได้ที่การ์ดด้านบน (เช่นเครื่องที่ไม่ได้รัน ${escHtml(cfg.base)}) เครื่องที่ไม่ติ๊กจะไม่ถูกแตะทั้งให้และรับ · จำไว้ให้ในเครื่องนี้
+      </div>
+    </div>`;
+}
+
 function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
   const cfg = FOLDER_DASH[kind];
   const content = document.getElementById('contentArea');
@@ -3310,11 +3354,6 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
     </div>`;
   }).join('');
 
-  // สรุปเฉพาะเครื่องที่ติ๊กไว้ — ใช้ตั้งเป้าหมายและเปิด/ปิดปุ่มแบ่ง
-  const balAll = balPickable(perAgent);
-  const balJoin = balAll.filter(p => !balSkip.has(p.agentId));
-  const balTotal = balJoin.reduce((sum, p) => sum + p.count, 0);
-  const balTarget = balJoin.length ? Math.floor(balTotal / balJoin.length) : 0;
 
   content.innerHTML = `
     <div class="toolbar">
@@ -3358,37 +3397,9 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
       </div>
     </div>
 
-    <div class="pick-panel" style="margin-top:14px; border:1px solid var(--accent)">
-      <div class="pick-head">
-        <span class="pick-title">⚖️ แบ่งไฟล์ ${escHtml(cfg.label)} ให้พอดี
-          <span style="color:var(--text-dim); font-weight:400">— เกลี่ยให้เท่าๆ กัน <b>เฉพาะเครื่องที่ติ๊กไว้</b> (ย้ายข้ามเครื่องตรงๆ)</span></span>
-        <button class="btn" onclick="balPickAll('${kind}', true)">ติ๊กทุกเครื่อง</button>
-        <button class="btn" onclick="balPickAll('${kind}', false)">เอาออกทั้งหมด</button>
-      </div>
-      <div class="pick-head" style="margin-bottom:0">
-        <span id="balHint" style="font-size:12px; color:var(--text-secondary)">
-          ${balJoin.length >= 2
-            ? ('เลือกไว้ <b>' + balJoin.length + '/' + balAll.length + '</b> เครื่อง · รวม ' + balTotal.toLocaleString()
-               + ' ไฟล์ · เป้าหมาย ~<b>' + balTarget.toLocaleString() + '</b> ไฟล์/เครื่อง')
-            : ('เลือกไว้ ' + balJoin.length + '/' + balAll.length + ' เครื่อง — ต้องติ๊กอย่างน้อย 2 เครื่อง')}
-        </span>
-        <button class="btn btn-primary" id="balBtn" onclick="runBalance('${kind}')" ${balJoin.length >= 2 && balTotal > 0 ? '' : 'disabled'}>
-          ⚖️ แบ่งไฟล์ให้พอดี (${balJoin.length} เครื่อง)</button>
-      </div>
-      <div id="balProg" style="display:none; margin-top:10px">
-        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
-          <span id="balMsg" style="color:var(--text-secondary)"></span>
-          <span id="balPct" style="color:var(--accent); font-weight:700"></span>
-        </div>
-        <div class="progress-bar"><div class="progress-fill" id="balBar" style="width:0%"></div></div>
-      </div>
-      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
-        ย้ายจริง (ไม่ใช่ก๊อป) — เครื่องที่มีเยอะจะโอนไฟล์ให้เครื่องที่มีน้อย จนทุกเครื่องที่ติ๊กไว้เท่ากัน ·
-        ติ๊กเครื่องออกได้ที่การ์ดด้านบน (เช่นเครื่องที่ไม่ได้รัน ${escHtml(cfg.base)}) เครื่องที่ไม่ติ๊กจะไม่ถูกแตะทั้งให้และรับ · จำไว้ให้ในเครื่องนี้
-      </div>
-    </div>
+    ${balPanelHtml(kind, perAgent)}
 
-    ${cfg.moveTo ? `
+${cfg.moveTo ? `
     <div class="pick-panel" style="margin-top:14px; border:1px solid var(--accent)">
       <div class="pick-head">
         <span class="pick-title">➡️ โยกไฟล์ ${escHtml(cfg.label)} ไป <b>${escHtml(cfg.moveTo.label)}</b> ทุกเครื่อง
@@ -3567,6 +3578,8 @@ function balPickable(perAgent) {
 function balRerender(kind) {
   const d = _lastFolderDash;
   if (!d || d.kind !== kind) return;
+  // บางหน้า (เช่น Dashboard Backup) ไม่ได้วาดด้วย renderFolderDash — เรียกตัววาดของหน้านั้นแทน
+  if (d.rerenderFn && typeof window[d.rerenderFn] === 'function') { window[d.rerenderFn](); return; }
   renderFolderDash(kind, d.perAgent, d.totalMachines, d.onlineCount, d.total);
 }
 
@@ -3661,7 +3674,8 @@ async function runBalance(kind) {
   if (pct) pct.textContent = '100%';
   if (errs.length) alert('⚠️ มีบางรอบไม่สำเร็จ:\n' + errs.slice(0, 8).join('\n'));
   else alert(`✅ แบ่งไฟล์เสร็จ! ย้าย ${movedFiles.toLocaleString()} ไฟล์ ทุกเครื่องเท่าๆ กันแล้ว`);
-  setTimeout(() => openFolderDash(kind), 800);   // รีเฟรชนับใหม่
+  // รีเฟรชนับใหม่ — บางชนิดไม่มีหน้าของตัวเอง (lgrinput อยู่ในหน้า Backup) ใช้ reopen ของ config
+  setTimeout(() => { const f = window[cfg.reopen]; if (typeof f === 'function') f(); else openFolderDash(kind); }, 800);
 }
 
 // โหลดโฟลเดอร์แบนๆ (fast-random / input-id / backup) ของทุกเครื่องรวมเป็น zip เดียว
@@ -3830,6 +3844,7 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
       <div class="stat-tile"><div class="stat-label">ไฟล์ ${RANGER_CFG.label} รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">id ที่มีชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${combos.length}</div></div>
+      <div class="stat-tile"><div class="stat-label">input-id เหลือรวม</div><div class="stat-val" style="color:var(--accent)">${inputTotal.toLocaleString()}</div></div>
     </div>
     <h3 style="margin:4px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ทุกเครื่อง (ชื่อเดียวกันคนละ combo บวกรวมกัน)</h3>
     <div class="hero-grid big">${nameCards}</div>
@@ -3918,14 +3933,19 @@ async function openBackupRich() {
   for (const a of agents) {
     const name = a.name || a.hostname || a.agent_id;
     const res = await countBackupOnAgent(a.agent_id);
-    if (!res || res.error) { perAgent.push({ name, error: String((res && res.error) || 'ไม่ตอบกลับ') }); continue; }
+    if (!res || res.error) { perAgent.push({ name, agentId: a.agent_id, error: String((res && res.error) || 'ไม่ตอบกลับ') }); continue; }
     onlineCount++;
     grandTotal += res.total_files || 0;
     matchedTotal += res.matched_files || 0;
     const combos = res.combos || {};
     for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
+    // นับไฟล์ที่เหลือใน main/input-id ของเครื่องนี้ด้วย — โชว์รวมหน้าเดียวกับ backup
+    const ir = await countFolderOnAgent(a.agent_id, 'input-id', 'main');
     perAgent.push({
-      name, total: res.total_files || 0, matched: res.matched_files || 0, exists: res.exists,
+      name, agentId: a.agent_id,
+      total: res.total_files || 0, matched: res.matched_files || 0, exists: res.exists,
+      inputId: (ir && typeof ir.total === 'number') ? ir.total : null,
+      inputExists: ir ? ir.exists : undefined,
       byGroup: { [BACKUP_CFG.label]: combos },   // เก็บ combo รายเครื่องไว้ให้หน้ารายละเอียดแจกแจง
     });
   }
@@ -3935,8 +3955,13 @@ async function openBackupRich() {
     groupFiles: { [BACKUP_CFG.label]: grandTotal },
     perAgent,
   };
-  renderBackupDash(comboTotals, grandTotal, matchedTotal, perAgent, agents.length, onlineCount);
+  _backupRenderArgs = [comboTotals, grandTotal, matchedTotal, perAgent, agents.length, onlineCount];
+  renderBackupDash(...(_backupRenderArgs));
 }
+
+// วาดหน้า Backup ใหม่จากข้อมูลเดิม (ใช้ตอนติ๊กเลือกเครื่องสำหรับแบ่ง input-id)
+let _backupRenderArgs = null;
+function rerenderBackupDash() { if (_backupRenderArgs) renderBackupDash(...(_backupRenderArgs)); }
 
 function renderBackupDash(comboTotals, grandTotal, matchedTotal, perAgent, totalMachines, onlineCount) {
   const content = document.getElementById('contentArea');
@@ -3976,6 +4001,19 @@ function renderBackupDash(comboTotals, grandTotal, matchedTotal, perAgent, total
     </div>`;
   }).join('') : '<div class="empty-state" style="grid-column:1/-1"><div class="icon">📭</div><h3>ไม่พบไฟล์ .xml ที่มีชื่อฮีโร่</h3></div>';
 
+  // ── input-id (main/input-id) ของแต่ละเครื่อง: ใช้ config 'lgrinput' ร่วมกับกลไกแบ่งไฟล์ ──
+  const inputPerAgent = perAgent.map(p => ({
+    name: p.name, agentId: p.agentId,
+    error: p.error,
+    exists: p.inputExists,
+    count: (typeof p.inputId === 'number') ? p.inputId : undefined,
+  }));
+  const inputTotal = inputPerAgent.reduce((s2, p) => s2 + (p.count || 0), 0);
+  _lastFolderDash = { kind: 'lgrinput', perAgent: inputPerAgent, totalMachines, onlineCount,
+                      total: inputTotal, rerenderFn: 'rerenderBackupDash' };
+  _folderScope['lgrinput'] = _backupScope;
+  const inputSkip = balSkipSet('lgrinput');
+
   const agentRows = perAgent.map(p => {
     let right;
     if (p.error) {
@@ -3987,7 +4025,24 @@ function renderBackupDash(comboTotals, grandTotal, matchedTotal, perAgent, total
             + '<span style="color:var(--text-dim); margin:0 10px">·</span>'
             + '<span style="color:var(--text-secondary)" title="ไฟล์ .xml ทั้งหมดในโฟลเดอร์ ' + BACKUP_CFG.label + '">🗂️ <b>' + (p.total || 0).toLocaleString() + '</b> ไฟล์ .xml</span>';
     }
-    return '<div class="agent-stat"><span>🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
+    // input-id ต่อท้ายทุกแถว (รวมแถวที่ backup พัง — input-id อาจยังอ่านได้)
+    const inTxt = p.inputExists === false
+      ? '<span style="color:var(--warning)">ไม่พบ input-id</span>'
+      : (typeof p.inputId === 'number'
+          ? '<b style="color:var(--accent)">' + p.inputId.toLocaleString() + '</b> ไฟล์'
+          : '<span style="color:var(--text-dim)">-</span>');
+    right += '<span style="color:var(--text-dim); margin:0 10px">·</span>'
+           + '<span title="ไฟล์ที่เหลือในโฟลเดอร์ main/input-id">📥 input-id: ' + inTxt + '</span>';
+
+    // ติ๊ก = ให้เครื่องนี้ร่วมแบ่ง input-id (เครื่องที่ไม่ได้รัน Line Ranger ก็ติ๊กออกได้)
+    const joins = !inputSkip.has(p.agentId);
+    const chk = p.agentId
+      ? '<input type="checkbox" ' + (joins ? 'checked' : '') + ' title="ติ๊ก = ให้เครื่องนี้ร่วมแบ่ง input-id"'
+        + ' onclick="balTogglePick(\'lgrinput\', \'' + escAttr(p.agentId) + '\')"'
+        + ' style="width:auto; margin:0 7px 0 0; vertical-align:middle">'
+      : '';
+    return '<div class="agent-stat" style="' + (joins ? '' : 'opacity:.5') + '">'
+         + '<span>' + chk + '🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
   }).join('');
 
   content.innerHTML = `
@@ -4032,7 +4087,9 @@ function renderBackupDash(comboTotals, grandTotal, matchedTotal, perAgent, total
       </div>
     </div>
 
-    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — จำนวนไฟล์ .xml ในโฟลเดอร์ ${BACKUP_CFG.label}</h3>
+    ${balPanelHtml('lgrinput', inputPerAgent)}
+
+    <h3 style="margin:24px 0 12px; font-size:14px; color:var(--text-secondary)">รายเครื่อง — ไฟล์ .xml ใน ${BACKUP_CFG.label} + input-id ที่เหลือ</h3>
     <div class="agent-stats">${agentRows}</div>
   `;
 }
