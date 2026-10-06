@@ -523,6 +523,8 @@ def _dispatch_command(data):
             handle_rename(req_id, payload)
         elif action == "move_file":
             handle_move(req_id, payload)
+        elif action == "move_folder":
+            handle_move_folder(req_id, payload)
         elif action == "shutdown":
             handle_shutdown(req_id, payload)
         elif action == "clear_input":
@@ -1032,6 +1034,71 @@ def handle_move(req_id, data):
         send_response(req_id, {"success": True})
     except Exception as e:
         send_response(req_id, {"error": str(e)})
+
+
+def handle_move_folder(req_id, data):
+    """ย้ายไฟล์ทั้งหมดจากโฟลเดอร์หนึ่งไปอีกโฟลเดอร์ "ในเครื่องเดียวกัน"
+       (เช่น โยก pes/no-hero -> pes/check-coin) ไม่ผ่าน server ไม่กินเน็ต
+
+       ย้ายเฉพาะไฟล์ชั้นบนสุด ไม่ไล่เข้าโฟลเดอร์ย่อย และไม่เขียนทับของเดิม:
+       ถ้าปลายทางมีชื่อซ้ำจะเติม __2, __3 ต่อท้ายให้ ไม่มีไฟล์ไหนหาย"""
+    from_sub = (data.get("from_sub") or "").strip()
+    to_sub = (data.get("to_sub") or "").strip()
+    match = (data.get("base_match") or "").strip().lower()
+    if not from_sub or not to_sub or from_sub == to_sub:
+        send_response(req_id, {"error": "ต้องระบุโฟลเดอร์ต้นทาง/ปลายทาง และต้องไม่ซ้ำกัน"})
+        return
+
+    base = _resolve_game_base(match)
+    if not base:
+        send_response(req_id, {"error": f"หาโฟลเดอร์เกม '{match}' ไม่เจอที่เครื่องนี้"})
+        return
+    src = os.path.join(base, from_sub)
+    dst = os.path.join(base, to_sub)
+
+    if not os.path.isdir(src):
+        send_response(req_id, {"success": True, "moved": 0, "exists": False,
+                               "src": src, "dst": dst})
+        return
+    if not is_path_allowed(src) or not is_path_allowed(dst):
+        send_response(req_id, {"error": f"ไม่มีสิทธิ์ย้ายระหว่าง {src} กับ {dst}"})
+        return
+
+    try:
+        os.makedirs(dst, exist_ok=True)
+    except Exception as e:
+        send_response(req_id, {"error": f"สร้างโฟลเดอร์ปลายทางไม่ได้: {e}"})
+        return
+
+    moved, skipped = 0, []
+    try:
+        names = sorted(os.listdir(src))
+    except Exception as e:
+        send_response(req_id, {"error": str(e)})
+        return
+
+    for name in names:
+        full = os.path.join(src, name)
+        if not os.path.isfile(full):          # โฟลเดอร์ย่อยไม่ยุ่ง
+            continue
+        target = os.path.join(dst, name)
+        if os.path.exists(target):            # ชื่อซ้ำ -> หาชื่อใหม่ ไม่เขียนทับ
+            stem, ext = os.path.splitext(name)
+            k = 2
+            while os.path.exists(os.path.join(dst, f"{stem}__{k}{ext}")):
+                k += 1
+            target = os.path.join(dst, f"{stem}__{k}{ext}")
+        try:
+            shutil.move(full, target)
+            moved += 1
+        except Exception as e:
+            skipped.append(f"{name}: {e}")
+
+    logger.info(f"  move_folder: {from_sub} -> {to_sub} ย้าย {moved} ไฟล์"
+                + (f" (พลาด {len(skipped)})" if skipped else ""))
+    send_response(req_id, {"success": True, "moved": moved, "exists": True,
+                           "failed": len(skipped), "errors": skipped[:5],
+                           "src": src, "dst": dst})
 
 
 _ID_SEG = re.compile(r"\d{4,}")          # โค้ดท้ายไฟล์อย่าง ASCV188565062-[10] มีตัวเลขยาว ชื่อคนไม่มี

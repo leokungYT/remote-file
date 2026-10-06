@@ -953,6 +953,16 @@ def _export_cleanup(keep=2):
     return freed
 
 
+@socketio.on("request_move_folder")
+def handle_request_move_folder(data):
+    """โยกไฟล์จากโฟลเดอร์หนึ่งไปอีกโฟลเดอร์ ภายในเครื่องลูกเอง (เช่น no-hero -> check-coin)"""
+    send_to_agent(data.get("agent_id"), "move_folder", {
+        "from_sub": data.get("from_sub", ""),
+        "to_sub": data.get("to_sub", ""),
+        "base_match": data.get("base_match", ""),
+    }, request.sid)
+
+
 @socketio.on("request_export")
 def handle_request_export(data):
     """เริ่มงาน export: สั่งทุกเครื่องที่เลือก zip โฟลเดอร์ที่ตรงแล้วส่งกลับมา"""
@@ -2818,7 +2828,8 @@ const FOLDER_DASH = {
   // login-success ของ Line Ranger: ไฟล์ id ที่ล็อกอินสำเร็จ (ชื่อไฟล์ไม่มีชื่อฮีโร่ → ใช้แดชบอร์ดนับรายเครื่อง + โหลด/ย้ายทั้งหมด)
   loginsuccess: { subpath: 'login-success', base: 'main', title: '✅ Dashboard login-success — ไฟล์ที่ล็อกอินสำเร็จ รายเครื่อง (Line Ranger)', label: 'login-success', reopen: 'openLoginSuccessDashboard' },
   // no-hero ของบอท PES: id ที่สุ่มแล้วไม่เจอฮีโร่ที่ต้องการ — นับรายเครื่อง + โหลด/ย้ายออกมาทั้งหมด
-  nohero: { subpath: 'no-hero', base: 'pes', title: '🚫 Dashboard no-hero — ไฟล์ที่ไม่เจอฮีโร่ รายเครื่อง (PES)', label: 'no-hero', reopen: 'openNoHeroDashboard' },
+  nohero: { subpath: 'no-hero', base: 'pes', title: '🚫 Dashboard no-hero — ไฟล์ที่ไม่เจอฮีโร่ รายเครื่อง (PES)', label: 'no-hero', reopen: 'openNoHeroDashboard',
+            moveTo: { subpath: 'check-coin', label: 'check-coin' } },
 };
 let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL', rangerid: 'ALL', loginsuccess: 'ALL', nohero: 'ALL' };
 function openNoHeroDashboard() { return openFolderDash('nohero'); }
@@ -3364,6 +3375,30 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
       </div>
     </div>
 
+    ${cfg.moveTo ? `
+    <div class="pick-panel" style="margin-top:14px; border:1px solid var(--accent)">
+      <div class="pick-head">
+        <span class="pick-title">➡️ โยกไฟล์ ${escHtml(cfg.label)} ไป <b>${escHtml(cfg.moveTo.label)}</b> ทุกเครื่อง
+          <span style="color:var(--text-dim); font-weight:400">— ย้ายในเครื่องลูกเอง ไม่ผ่าน server ไม่กินเน็ต</span></span>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <span style="font-size:12px; color:var(--text-secondary)">
+          ย้าย ${total.toLocaleString()} ไฟล์ จาก ${onlineCount} เครื่อง · ${escHtml(cfg.base)}/${escHtml(cfg.subpath)} → ${escHtml(cfg.base)}/${escHtml(cfg.moveTo.subpath)}</span>
+        <button class="btn btn-primary" id="mvBtn" onclick="moveFolderAll('${kind}')" ${total ? '' : 'disabled'}>
+          ➡️ โยกไป ${escHtml(cfg.moveTo.label)} (${total.toLocaleString()} ไฟล์)</button>
+      </div>
+      <div id="mvProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="mvMsg" style="color:var(--text-secondary)"></span>
+          <span id="mvPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="mvBar" style="width:0%"></div></div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        ไฟล์ชื่อซ้ำที่ปลายทางจะเติม __2 __3 ต่อท้ายให้ ไม่เขียนทับของเดิม · ทำตามเครื่องที่เลือกไว้ด้านบน
+      </div>
+    </div>` : ''}
+
     ${cfg.runbat ? `
     <div class="pick-panel" style="margin-top:14px; border:1px solid var(--warning)">
       <div class="pick-head">
@@ -3386,6 +3421,57 @@ function renderFolderDash(kind, perAgent, totalMachines, onlineCount, total) {
       </div>
     </div>` : ''}
   `;
+}
+
+// ➡️ โยกไฟล์ทั้งโฟลเดอร์ไปอีกโฟลเดอร์ ในเครื่องลูกเอง (เช่น no-hero -> check-coin)
+//    ทีละเครื่อง เพราะ mcReq ดัก request_sent แบบ once ยิงขนานแล้วจะชนกัน
+async function moveFolderAll(kind) {
+  const cfg = FOLDER_DASH[kind];
+  if (!cfg || !cfg.moveTo) return;
+  const all = agentsData || [];
+  const scope = _folderScope[kind];
+  const agents = scope === 'ALL' ? all : all.filter(a => a.agent_id === scope);
+  if (!agents.length) { toast('ไม่มีเครื่องออนไลน์', 'error'); return; }
+  if (!confirm(`➡️ โยกไฟล์ทั้งหมดใน ${cfg.base}/${cfg.subpath}\n`
+    + `ไปไว้ที่ ${cfg.base}/${cfg.moveTo.subpath}\n\n`
+    + `(${agents.length} เครื่อง) — เป็นการ "ย้าย" จริง โฟลเดอร์ ${cfg.label} จะว่างลง`)) return;
+
+  const btn = document.getElementById('mvBtn');
+  const prog = document.getElementById('mvProg');
+  const bar = document.getElementById('mvBar');
+  const msg = document.getElementById('mvMsg');
+  const pct = document.getElementById('mvPct');
+  if (btn) btn.disabled = true;
+  if (prog) prog.style.display = 'block';
+  const setP = (i, text) => {
+    const p = Math.round(i / agents.length * 100);
+    if (bar) bar.style.width = p + '%';
+    if (pct) pct.textContent = p + '%';
+    if (msg) msg.textContent = text;
+  };
+
+  let movedTotal = 0, ok = 0;
+  const errs = [];
+  for (let i = 0; i < agents.length; i++) {
+    const a = agents[i];
+    const nm = a.name || a.hostname || a.agent_id;
+    setP(i, `[${i + 1}/${agents.length}] ${nm}`);
+    const r = await mcReq(a.agent_id, 'request_move_folder', {
+      from_sub: cfg.subpath, to_sub: cfg.moveTo.subpath, base_match: cfg.base,
+    }, 300000);
+    if (r && !r.error && r.success) {
+      ok++; movedTotal += (r.moved || 0);
+      if (r.failed) errs.push(`${nm}: ย้ายไม่ได้ ${r.failed} ไฟล์`);
+    } else {
+      errs.push(`${nm}: ${(r && r.error) || 'ไม่ตอบ'}`);
+    }
+  }
+  setP(agents.length, `เสร็จ: ย้าย ${movedTotal.toLocaleString()} ไฟล์ จาก ${ok}/${agents.length} เครื่อง`);
+  if (pct) pct.textContent = '100%';
+  if (btn) btn.disabled = false;
+  if (errs.length) alert('⚠️ มีเครื่องที่ไม่สำเร็จ:\n' + errs.slice(0, 8).join('\n'));
+  else toast(`ย้ายแล้ว ${movedTotal.toLocaleString()} ไฟล์ ไป ${cfg.moveTo.label}`, 'success');
+  setTimeout(() => openFolderDash(kind), 800);   // นับใหม่ให้เห็นผล
 }
 
 // ▶️ รัน/หยุด .bat (เช่น start.bat) ในโฟลเดอร์ dashboard ทุกเครื่อง (ทีละเครื่อง กัน request_sent ชนกัน)
