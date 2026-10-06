@@ -18,6 +18,7 @@ import time
 import base64
 import socket
 import shutil
+import tempfile
 import stat
 import platform
 import logging
@@ -1266,6 +1267,96 @@ def _fname_ok(fn, pats, pats_not):
     return (not hit) if pats_not else hit
 
 
+def n_targets_desc(targets, file_targets):
+    """ข้อความสั้นๆ ว่ากำลังจะ zip อะไรอยู่ ไว้ใส่ใน error ให้รู้เรื่อง"""
+    n = len(file_targets) + len(targets)
+    return f"{n} รายการ" if n else "ไม่มีรายการ"
+
+
+def _free_mb(path):
+    """เนื้อที่ว่างของไดรฟ์ที่ path อยู่ (MB) — อ่านไม่ได้คืน None"""
+    try:
+        return shutil.disk_usage(path).free // (1024 * 1024)
+    except Exception:
+        return None
+
+
+def _sweep_tmp_zips(prefixes=("export_", "bal_", "balr_"), max_age=6 * 3600):
+    """ลบ zip ชั่วคราวที่ค้างจากรอบที่พัง (ปกติลบใน finally แต่ถ้า agent ถูกฆ่ากลางทางจะค้าง)"""
+    freed = 0
+    try:
+        d = tempfile.gettempdir()
+        now = time.time()
+        for fn in os.listdir(d):
+            if not fn.startswith(prefixes) or not fn.endswith(".zip"):
+                continue
+            full = os.path.join(d, fn)
+            try:
+                if os.path.isfile(full) and now - os.path.getmtime(full) > max_age:
+                    freed += os.path.getsize(full)
+                    os.remove(full)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if freed:
+        logger.info(f"  ล้าง zip ชั่วคราวค้าง คืนเนื้อที่ ~{freed // (1024 * 1024)} MB")
+    return freed
+
+
+def _writable_dir(path):
+    """สร้างโฟลเดอร์ได้และเขียนไฟล์ลงไปได้จริงไหม (เช็คจริง ไม่ใช่เดาจากสิทธิ์)"""
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".rfm_write_test")
+        with open(probe, "wb") as f:
+            f.write(b"1")
+        os.remove(probe)
+        return True
+    except Exception:
+        return False
+
+
+def _pick_tmp_dir(need_mb, near=None):
+    """เลือกโฟลเดอร์ชั่วคราวที่มีเนื้อที่พอ
+
+    ที่เจอบ่อย: C: เต็ม (temp ปกติอยู่บน C:) แต่ข้อมูลบอทอยู่อีกไดรฟ์ที่ยังว่าง
+    เลยลองไล่: temp ปกติ -> ข้างๆ โฟลเดอร์ข้อมูล -> ไดรฟ์ที่ว่างมากสุด
+    คืน (path, free_mb) ของตัวที่ว่างมากสุดถ้าไม่มีที่ไหนพอเลย"""
+    cands = []
+    t = tempfile.gettempdir()
+    cands.append(t)
+    if near:
+        try:
+            nd = near if os.path.isdir(near) else os.path.dirname(near)
+            if nd and os.path.isdir(nd):
+                cands.append(nd)
+        except Exception:
+            pass
+    if os.name == "nt":
+        for letter in "DEFGH":
+            root_dir = letter + ":\\"
+            if os.path.isdir(root_dir):
+                cands.append(os.path.join(root_dir, "_rfm_tmp"))
+    best = (t, _free_mb(t) or 0)
+    seen = set()
+    for c in cands:
+        key = os.path.abspath(c).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if not _writable_dir(c):       # ว่างเยอะแต่เขียนไม่ได้ก็ใช้ไม่ได้ (สิทธิ์ / ไดรฟ์อ่านอย่างเดียว)
+            continue
+        free = _free_mb(c)
+        if free is None:
+            continue
+        if free > best[1]:
+            best = (c, free)
+        if free >= need_mb:
+            return c, free
+    return best
+
+
 def handle_export_folder(req_id, data):
     """zip โฟลเดอร์ที่ตรงกับที่ขอ (backup-id/<ชุด>/<ชื่อตัว>/) แล้วอัปขึ้น server
        ตั้งชื่อไฟล์ใน zip เป็น <ชุด>/<ชื่อตัว>/<ไฟล์> ตามโครงเดิม
@@ -1354,7 +1445,30 @@ def handle_export_folder(req_id, data):
                                "pats_ok": True})
         return
 
-    tmp = tempfile.NamedTemporaryFile(prefix="export_", suffix=".zip", delete=False)
+    # ประเมินขนาดที่ต้องใช้จากไฟล์ที่จะ zip (zip เล็กกว่าเสมอ เลยเผื่อไว้เท่าตัวก็พอ)
+    raw = 0
+    try:
+        for _arc, full in file_targets:
+            raw += os.path.getsize(full)
+        for _sn, _fld, d in targets:
+            for cur, _dirs, files in os.walk(d):
+                for fn in files:
+                    try:
+                        raw += os.path.getsize(os.path.join(cur, fn))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    need_mb = raw // (1024 * 1024) + 200          # เผื่อที่ไว้ 200 MB
+
+    _sweep_tmp_zips()                              # คืนเนื้อที่จากรอบที่พังก่อนหน้า
+    # เลือกไดรฟ์ที่ว่างพอ (temp ปกติบน C: มักเต็ม ทั้งที่ไดรฟ์อื่นยังว่าง)
+    # ไม่ปฏิเสธล่วงหน้าแม้ดูเหมือนไม่พอ เพราะ zip เล็กกว่าไฟล์ดิบเสมอ — ลองก่อน พังค่อยบอกเหตุผล
+    tmp_dir, free_mb = _pick_tmp_dir(need_mb, near=root)
+    if free_mb < need_mb:
+        logger.warning(f"  export: เนื้อที่อาจไม่พอ — ต้องใช้ ~{need_mb} MB, {tmp_dir} ว่าง {free_mb} MB (ลองต่อ)")
+
+    tmp = tempfile.NamedTemporaryFile(prefix="export_", suffix=".zip", dir=tmp_dir, delete=False)
     tmp.close()
     packed = []           # path จริงที่ใส่ zip แล้ว (ไว้ลบตอน move)
     n_files = 0
@@ -1427,6 +1541,13 @@ def handle_export_folder(req_id, data):
         send_response(req_id, {"success": True, "files": n_files, "bytes": size,
                                "folders": len(targets), "deleted": deleted, "exists": True,
                                "pats_ok": True})
+    except OSError as e:
+        if getattr(e, "errno", None) == 28 or "No space left" in str(e):
+            send_response(req_id, {"error": (
+                f"เนื้อที่ว่างไม่พอที่เครื่องนี้ ({tmp_dir} ว่าง {_free_mb(tmp_dir)} MB, "
+                f"ต้องใช้ ~{need_mb} MB) — ลบไฟล์ที่เครื่องนี้ หรือโหลดทีละโฟลเดอร์")})
+        else:
+            send_response(req_id, {"error": str(e)})
     except Exception as e:
         send_response(req_id, {"error": str(e)})
     finally:

@@ -793,8 +793,32 @@ def export_upload():
     os.makedirs(d, exist_ok=True)
     safe = "".join(ch for ch in agent if ch.isalnum() or ch in "-_") or "pc"
     path = os.path.join(d, safe + ".zip")
-    with open(path, "wb") as f:
-        f.write(request.get_data())
+
+    body = request.get_data()
+    need_mb = len(body) // (1024 * 1024) + 1
+    free = _free_mb(d)
+    # ต้องเหลือที่พอสำหรับไฟล์นี้ + ตอนรวม zip ปลายทาง (เผื่อ 2 เท่า) + กันเหลือ 0 อีก 300 MB
+    if free is not None and free < need_mb * 2 + 300:
+        _export_cleanup()                      # ลองล้างของเก่าก่อน เผื่อพอ
+        free = _free_mb(d)
+    if free is not None and free < need_mb + 100:
+        msg = (f"เนื้อที่ที่เครื่อง server ไม่พอ: ว่าง {free} MB ต้องใช้อีกอย่างน้อย "
+               f"{need_mb + 100} MB — ลบไฟล์ที่เครื่อง server แล้วลองใหม่")
+        logger.error(f"💾 export {job}: {msg}")
+        return jsonify({"error": msg}), 507
+
+    try:
+        with open(path, "wb") as f:
+            f.write(body)
+    except OSError as e:
+        try:
+            os.remove(path)                    # ไฟล์ครึ่งๆ ไม่มีประโยชน์ ลบทิ้งคืนที่
+        except Exception:
+            pass
+        msg = f"เขียนไฟล์ที่ server ไม่สำเร็จ: {e} (ว่าง {_free_mb(d)} MB)"
+        logger.error(f"💾 export {job}: {msg}")
+        return jsonify({"error": msg}), 507
+
     export_jobs[job]["agents"][agent] = {"file": path, "bytes": os.path.getsize(path)}
     logger.info(f"📦 export {job}: รับ zip จาก {agent} ({os.path.getsize(path)} bytes)")
     return jsonify({"ok": True})
@@ -840,6 +864,13 @@ def export_download(job):
                             out.writestr(name, src.read(item.filename))
                 except Exception as e:
                     logger.warning(f"  export merge: ข้าม {meta['file']}: {e}")
+                else:
+                    # รวมเข้า _merged.zip แล้ว ไม่ต้องเก็บ zip รายเครื่องไว้อีก
+                    # (ของเดิมเก็บทั้งคู่ = กินที่ 2 เท่าของข้อมูลจริงตอนโหลด)
+                    try:
+                        os.remove(meta["file"])
+                    except Exception:
+                        pass
         info["kept"] = kept
         if pats:
             logger.info(f"📦 export {job}: กรองแล้วเหลือ {kept} ไฟล์ "
@@ -867,15 +898,59 @@ def export_status(job):
     })
 
 
-def _export_cleanup(keep=6):
-    """เก็บงานล่าสุดไว้ไม่กี่งาน ที่เหลือลบทิ้ง กันดิสก์บวม"""
+def _free_mb(path):
+    """เนื้อที่ว่างของไดรฟ์ที่ path นั้นอยู่ (MB) — อ่านไม่ได้คืน None"""
     try:
-        olds = sorted(export_jobs.items(), key=lambda kv: kv[1]["created"])[:-keep]
+        return shutil.disk_usage(path).free // (1024 * 1024)
+    except Exception:
+        return None
+
+
+def _dir_mb(path):
+    try:
+        n = 0
+        for cur, _d, files in os.walk(path):
+            for f in files:
+                try:
+                    n += os.path.getsize(os.path.join(cur, f))
+                except Exception:
+                    pass
+        return n // (1024 * 1024)
+    except Exception:
+        return 0
+
+
+def _export_cleanup(keep=2):
+    """เก็บงานล่าสุดไว้ไม่กี่งาน ที่เหลือลบทิ้ง กันดิสก์บวม
+
+    *** สำคัญ: export_jobs อยู่ในแรม พอ server restart (update-server.bat) ของเดิมหายหมด
+        โฟลเดอร์ _exports/<job> บนดิสก์เลยกลายเป็น "กำพร้า" ไม่มีใครลบอีกเลย
+        งาน export ทีละหมื่นไฟล์กินเป็น GB — สะสมไปเรื่อยจนดิสก์เต็ม (Errno 28)
+        ตรงนี้เลยต้องกวาดโฟลเดอร์ที่ไม่มีเจ้าของออกด้วย ไม่ใช่ดูแค่ที่อยู่ในแรม ***
+    """
+    freed = 0
+    try:
+        allj = sorted(export_jobs.items(), key=lambda kv: kv[1]["created"])
+        olds = allj[:-keep] if keep > 0 else allj      # keep=0 = ลบทุกงาน ([:-0] เป็นลิสต์ว่าง ใช้ไม่ได้)
         for job, _info in olds:
-            shutil.rmtree(_export_job_dir(job), ignore_errors=True)
+            d = _export_job_dir(job)
+            freed += _dir_mb(d)
+            shutil.rmtree(d, ignore_errors=True)
             export_jobs.pop(job, None)
     except Exception:
         pass
+    # โฟลเดอร์กำพร้า: มีบนดิสก์แต่ไม่มีใน export_jobs (ค้างจากรอบก่อน restart)
+    try:
+        for name in os.listdir(EXPORT_DIR):
+            d = os.path.join(EXPORT_DIR, name)
+            if os.path.isdir(d) and name not in export_jobs:
+                freed += _dir_mb(d)
+                shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+    if freed:
+        logger.info(f"🧹 ล้าง _exports เก่า คืนเนื้อที่ ~{freed} MB (ว่าง {_free_mb(EXPORT_DIR)} MB)")
+    return freed
 
 
 @socketio.on("request_export")
@@ -8565,6 +8640,26 @@ document.addEventListener('DOMContentLoaded', () => {
 # ═══════════════════════════════════════════════════════════
 #  RUN
 # ═══════════════════════════════════════════════════════════
+def _startup_cleanup():
+    """กวาดไฟล์ชั่วคราวที่ค้างจากรอบก่อน — รันทุกครั้งที่ server เริ่ม
+
+    _exports/_balance ถูกอ้างด้วยตัวแปรในแรม พอ restart แล้วของเดิมไม่มีใครลบ
+    สะสมจนดิสก์เต็ม แล้วการโหลดไฟล์จะพังด้วย [Errno 28] No space left on device
+    """
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    os.makedirs(BALANCE_DIR, exist_ok=True)
+    before = _free_mb(EXPORT_DIR)
+    _export_cleanup(keep=0)
+    _balance_cleanup(max_age=3600)   # ไฟล์แบ่งที่เพิ่งพักไว้ยังมีสิทธิ์ถูกไปรับ อย่าลบทิ้ง
+    after = _free_mb(EXPORT_DIR)
+    logger.info(f"🧹 เริ่มระบบ: ล้างไฟล์ชั่วคราวค้างแล้ว · ว่าง {after} MB"
+                + (f" (เพิ่มจาก {before} MB)" if before is not None and after is not None and after > before else ""))
+    if after is not None and after < 2000:
+        logger.warning(f"⚠️ เนื้อที่ว่างเหลือน้อย ({after} MB) — การโหลดไฟล์ก้อนใหญ่อาจล้มเหลว")
+
+
+_startup_cleanup()
+
 if __name__ == "__main__":
     logger.info("=" * 55)
     logger.info("  Remote File Manager - Server")
