@@ -367,14 +367,25 @@ def _wg_build(agent_id, per, total_machines):
     total_machines = max(int(total_machines or 0), machine)
     group_size = -(-total_machines // len(keys))            # ปัดขึ้น: กี่เครื่องต่อ 1 กุญแจ
     key_no = min((machine - 1) // group_size, len(keys) - 1)
-    if group_size * per > len(groups):
-        raise RuntimeError(f"เซิร์ฟเวอร์ไม่พอ: {group_size} เครื่องต่อกุญแจ x {per} จอ > {len(groups)} เซิร์ฟเวอร์ "
-                           f"(เพิ่ม Key Pair ใน wg_keys/ หรือลดจำนวนจอ)")
     kp = keys[key_no]
-    start = ((machine - 1) * per) % len(groups)
-    pick = (groups[start:] + groups[:start])[:per]
+
+    # ── แจกเซิร์ฟเวอร์: ไม่จำกัดจำนวนจอ ซ้ำได้ แต่ให้ซ้ำน้อยที่สุด ──
+    # เครื่องที่ n กินช่วงต่อจากเครื่องก่อนหน้าแบบวนรอบ ((n-1)*per ไปอีก per ตัว)
+    # วิธีนี้ทำให้ทุกเซิร์ฟเวอร์ถูกใช้จำนวนครั้งเท่ากัน (ต่างกันไม่เกิน 1) = ซ้ำน้อยที่สุด
+    # เท่าที่เป็นไปได้ ถ้าจอรวมมากกว่าเซิร์ฟเวอร์ที่มี ของเดิมโยน error ทิ้งไปเลย
+    # ตอนนี้ปล่อยให้ทำต่อ แล้วบอกใน log ว่าจะซ้ำกี่เท่า
+    n_srv = len(groups)
+    want = total_machines * per
+    if want > n_srv:
+        logger.info(f"🔐 wg: จอรวม {want} > เซิร์ฟเวอร์ {n_srv} — เซิร์ฟเวอร์จะถูกใช้ซ้ำ "
+                    f"~{want / n_srv:.1f} เท่า (กระจายเท่ากันทุกตัวแล้ว)")
+    start = ((machine - 1) * per) % n_srv
+    # per อาจมากกว่าจำนวนเซิร์ฟเวอร์ทั้งหมด — วนซ้ำให้ครบตามที่ขอ
+    ring = groups[start:] + groups[:start]
+    pick = [ring[i % n_srv] for i in range(per)]
+
     files = {}
-    for _, cc, g in pick:
+    for idx, (_, cc, g) in enumerate(pick, 1):
         city = (g.get("city") or cc).replace(" ", "-")
         nick = (g.get("nick") or str(g.get("id"))).replace(" ", "-")
         lines = ["[Interface]", f"PrivateKey = {kp['PrivateKey']}", f"Address = {kp['Address']}",
@@ -382,7 +393,9 @@ def _wg_build(agent_id, per, total_machines):
                  f"AllowedIPs = {kp.get('AllowedIPs', '0.0.0.0/0, ::/0')}",
                  f"Endpoint = {g['wg_endpoint']}:443", f"PresharedKey = {kp['PresharedKey']}", ""]
         text = chr(10).join(lines)
-        files[f"Windscribe-{city}-{nick}-WG.conf"] = base64.b64encode(text.encode()).decode()
+        # ใส่เลขลำดับนำหน้า กันชื่อชนเมื่อเซิร์ฟเวอร์เดิมถูกหยิบซ้ำในเครื่องเดียวกัน
+        # (เกิดได้เมื่อจอต่อเครื่องมากกว่าจำนวนเซิร์ฟเวอร์) ไม่งั้นไฟล์จะหายไปเงียบๆ
+        files[f"{idx:03d}-Windscribe-{city}-{nick}-WG.conf"] = base64.b64encode(text.encode()).decode()
     return machine, key_no + 1, files
 
 
@@ -4792,9 +4805,12 @@ function openWgDashboard() {
       <div id="wgInfo" style="font-size:12px; margin-bottom:10px; color:var(--text-dim)">กำลังโหลดข้อมูล server...</div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:13px">
         <label style="display:flex; align-items:center; gap:5px">จอต่อเครื่อง
-          <input type="number" id="wgPer" min="1" max="60" value="15" style="width:64px; padding:6px 8px"></label>
+          <input type="number" id="wgPer" min="1" max="2000" value="15" style="width:70px; padding:6px 8px"
+                 oninput="wgCalc()" title="ใส่เท่าไหร่ก็ได้ ถ้าเกินจำนวนเซิร์ฟเวอร์ที่มี จะวนใช้ซ้ำแบบกระจายเท่ากัน"></label>
         <label style="display:flex; align-items:center; gap:5px" title="ใช้คำนวณว่ากี่เครื่องต่อ 1 Key Pair">จำนวนเครื่องทั้งหมด
-          <input type="number" id="wgTotal" min="1" max="200" value="${Math.max(30, agents.length)}" style="width:64px; padding:6px 8px"></label>
+          <input type="number" id="wgTotal" min="1" max="2000" value="${Math.max(30, agents.length)}" style="width:70px; padding:6px 8px"
+                 oninput="wgCalc()"></label>
+        <span id="wgCalcHint" style="font-size:12px; color:var(--text-dim)"></span>
         <button class="btn" onclick="wgTick(true)">☑️ ติ๊กทั้งหมด</button>
         <button class="btn" onclick="wgTick(false)">⬜ ไม่ติ๊ก</button>
         <button class="btn" onclick="wgRun('update')" title="agent เก่าจะขึ้น Unknown action: wg_manage - กดอันนี้ก่อน (ดึง agent.py ใหม่ + รีสตาร์ท)">⬆️ อัปเดต agent</button>
@@ -4814,6 +4830,8 @@ function openWgDashboard() {
     const el = document.getElementById('wgInfo');
     if (!el) return;
     window._wgAssign = r.assign || {};
+    window._wgServers = r.servers;        // ไว้คำนวณว่าจะซ้ำกี่เท่า
+    wgCalc();
     el.innerHTML = `Key Pair ที่ server: <b>${r.keys}</b> อัน (วางไฟล์ .conf จาก Windscribe ไว้ที่ <code>${escHtml(r.keys_dir)}</code>) · เซิร์ฟเวอร์ Windscribe: <b>${escHtml(String(r.servers))}</b> · เลขเครื่องแจกไปแล้ว ${Object.keys(r.assign || {}).length} เครื่อง` +
       (r.keys ? '' : ' <span style="color:#f87171">— ยังไม่มี Key Pair สร้างไฟล์ไม่ได้</span>');
     (window._wgAgents || []).forEach((a, i) => {
@@ -4823,6 +4841,25 @@ function openWgDashboard() {
     });
   });
   socket.emit('wg_info');
+}
+
+// บอกสดๆ ว่าตั้งค่านี้แล้วเซิร์ฟเวอร์จะถูกใช้ซ้ำกี่เท่า (ซ้ำได้ แต่กระจายเท่ากันทุกตัว)
+function wgCalc() {
+  const el = document.getElementById('wgCalcHint');
+  if (!el) return;
+  const per = parseInt((document.getElementById('wgPer') || {}).value || '0', 10) || 0;
+  const tot = parseInt((document.getElementById('wgTotal') || {}).value || '0', 10) || 0;
+  const srv = parseInt(window._wgServers, 10);
+  if (!per || !tot || !srv) { el.textContent = ''; return; }
+  const spare = 5;                       // WG_SPARE ฝั่ง server เติมสำรองให้อีก 5 ไฟล์/เครื่อง
+  const want = tot * (per + spare);
+  if (want <= srv) {
+    el.innerHTML = `<span style="color:var(--success)">= ${want} จอ จาก ${srv} เซิร์ฟเวอร์ · ไม่ซ้ำกันเลย</span>`;
+  } else {
+    const times = want / srv;
+    const color = times <= 3 ? 'var(--warning)' : 'var(--danger)';
+    el.innerHTML = `<span style="color:${color}">= ${want} จอ จาก ${srv} เซิร์ฟเวอร์ · ซ้ำ ~${times.toFixed(1)} เท่า</span>`;
+  }
 }
 
 function wgSyncCard(i) {
