@@ -33,7 +33,10 @@ echo ================================================================
 echo.
 
 :: ----- เปิด quick tunnel (ไม่ต้องมีบัญชี) -----
-"%CF%" tunnel --url http://localhost:%PORT%
+:: 127.0.0.1 ไม่ใช่ localhost — server ผูกที่ IPv4 อย่างเดียว ถ้าใช้ localhost
+:: cloudflared จะลอง [::1] ก่อนแล้วโดนปฏิเสธ (ช้า + log เต็มไปด้วย error ลวง)
+:: http2 แทน quic ค่าเริ่มต้น — QUIC/UDP หลุดบ่อยกับเน็ตบ้าน
+"%CF%" tunnel --url http://127.0.0.1:%PORT% --protocol http2 --no-autoupdate
 
 echo.
 echo (tunnel ปิดแล้ว)

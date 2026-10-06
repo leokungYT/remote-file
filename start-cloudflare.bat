@@ -46,7 +46,10 @@ if not "%CF_TOKEN%"=="" (
     echo   * เอา URL นั้นส่งให้คนอื่นเปิดในเบราว์เซอร์ได้เลย
     echo   * อย่าปิดหน้าต่างนี้ (ปิด = tunnel ดับ URL ใช้ไม่ได้)
     echo ================================================================
-    "%CF_EXE%" tunnel --url http://localhost:%PORT%
+    :: 127.0.0.1 ไม่ใช่ localhost — server ผูกที่ IPv4 อย่างเดียว ถ้าใช้ localhost
+    :: cloudflared จะลอง [::1] ก่อนแล้วโดนปฏิเสธ (ช้า + log เต็มไปด้วย error ลวง)
+    :: http2 แทน quic ค่าเริ่มต้น — QUIC/UDP หลุดบ่อยกับเน็ตบ้าน
+    "%CF_EXE%" tunnel --url http://127.0.0.1:%PORT% --protocol http2 --no-autoupdate
 )
 
 echo.
