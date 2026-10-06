@@ -2362,6 +2362,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openDashboard()">⚽ Dashboard PES</button>
     <button class="btn" onclick="openBackupDashboard()">🗄️ Dashboard Backup</button>
     <button class="btn" onclick="openInputIdDashboard()">📥 input-id รายเครื่อง</button>
+    <button class="btn" onclick="openRangerInputDashboard()" title="ไฟล์ .xml ใน main/input-id ของ Line Ranger รายเครื่อง + โหลด/แบ่งได้">📥 input-id (Line Ranger)</button>
     <button class="btn" onclick="openCookieDashboard()">🍪 Dashboard Cookie-Run</button>
     <button class="btn" onclick="openRangerDashboard()">🏹 Dashboard Line Ranger</button>
     <button class="btn" onclick="openRangerFindDashboard()">🔎 Line Ranger-Find</button>
@@ -2844,14 +2845,16 @@ const FOLDER_DASH = {
   // input-id ของ Line Ranger — โชว์รวมอยู่ในหน้า Dashboard Backup ไม่มีหน้าของตัวเอง
   // มีไว้ให้ปุ่มแบ่งไฟล์/โหลด .zip ใช้ config ชุดเดียวกับ dashboard อื่น
   lgrinput: { subpath: 'input-id', base: 'main', title: '📥 input-id (Line Ranger)', label: 'input-id', reopen: 'openBackupRich' },
+  rangerinput: { subpath: 'input-id', base: 'main', title: '📥 Dashboard input-id (Line Ranger) — ไฟล์ .xml รายเครื่อง', label: 'input-id (.xml)', reopen: 'openRangerInputDashboard' },
   nohero: { subpath: 'no-hero', base: 'pes', title: '🚫 Dashboard no-hero — ไฟล์ที่ไม่เจอฮีโร่ รายเครื่อง (PES)', label: 'no-hero', reopen: 'openNoHeroDashboard',
             moveTo: { subpath: 'check-coin', label: 'check-coin' } },
 };
-let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL', rangerid: 'ALL', loginsuccess: 'ALL', nohero: 'ALL', lgrinput: 'ALL' };
+let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL', rangerid: 'ALL', loginsuccess: 'ALL', nohero: 'ALL', lgrinput: 'ALL', rangerinput: 'ALL' };
 function openNoHeroDashboard() { return openFolderDash('nohero'); }
 function openLoginSuccessDashboard() { return openFolderDash('loginsuccess'); }
 
 function openInputIdDashboard() { return openFolderDash('inputid'); }
+function openRangerInputDashboard() { return openFolderDash('rangerinput'); }
 function openBackupDashboard() { return openBackupRich(); }   // Backup โชว์ breakdown ข้างในแบบ PES (นับ .xml)
 function openFastRandomDashboard() { return openFolderDash('fastrandom'); }
 function openBottiketDashboard() { return openFolderDash('bottiket'); }
