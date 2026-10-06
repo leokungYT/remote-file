@@ -283,6 +283,8 @@ WG_ASSIGN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wg_as
 WG_SERVERLIST_URL = "https://assets.windscribe.com/serverlist/mob-v2/1/0"
 WG_COUNTRIES = ["TH", "SG", "HK", "MY", "VN", "JP", "KR", "TW", "ID", "PH", "KH",
                 "IN", "AU", "NZ", "AE", "TR", "US", "CA", "GB", "DE", "FR", "NL"]
+# ประเทศที่เกมบล็อก IP VPN (ทดสอบ 2026-10-06: Bangkok ออกเน็ตได้ แต่เซิร์ฟเวอร์เกมไม่ตอบ) - ไม่แจกให้เครื่องลูก
+WG_EXCLUDE = {c.strip().upper() for c in os.environ.get("WG_EXCLUDE", "TH").split(",") if c.strip()}
 _wg_cache = {"t": 0, "groups": None}
 _wg_lock = threading.Lock()
 
@@ -321,9 +323,9 @@ def _wg_groups():
     order = {c: i for i, c in enumerate(WG_COUNTRIES)}
     groups = []
     for loc in data:
-        if not loc.get("status", 1):
-            continue
         cc = loc.get("country_code", "")
+        if not loc.get("status", 1) or cc in WG_EXCLUDE:
+            continue
         for g in loc.get("groups") or []:
             if g.get("wg_pubkey") and g.get("wg_endpoint") and g.get("nodes"):
                 groups.append((order.get(cc, len(order)), cc, g))
