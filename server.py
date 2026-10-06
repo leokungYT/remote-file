@@ -2346,6 +2346,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openCoinDashboard()" title="ไฟล์ .dat ใน pes/check-coin แยกตามเลข [900] ... รายเครื่อง + โหลด .zip">🪙 check-coin</button>
     <button class="btn" onclick="openLoginSuccessDashboard()" title="ไฟล์ใน main/login-success รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">✅ login-success</button>
     <button class="btn" onclick="openFastRandomDashboard()">🎲 fast-random</button>
+    <button class="btn" onclick="openNoHeroDashboard()" title="ไฟล์ใน pes/no-hero รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">🚫 no-hero</button>
     <button class="btn" onclick="openBottiketDashboard()">🎫 Dashboard bot-tiket</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
     <button class="btn" onclick="openBroadcastBackup()">💾 ส่งเข้า backup (ทุกเครื่อง)</button>
@@ -2816,8 +2817,11 @@ const FOLDER_DASH = {
   rangerid: { subpath: 'backup-id', base: 'main', title: '🏹 Dashboard Line Ranger', label: 'backup-id', reopen: 'openRangerDashboard' },
   // login-success ของ Line Ranger: ไฟล์ id ที่ล็อกอินสำเร็จ (ชื่อไฟล์ไม่มีชื่อฮีโร่ → ใช้แดชบอร์ดนับรายเครื่อง + โหลด/ย้ายทั้งหมด)
   loginsuccess: { subpath: 'login-success', base: 'main', title: '✅ Dashboard login-success — ไฟล์ที่ล็อกอินสำเร็จ รายเครื่อง (Line Ranger)', label: 'login-success', reopen: 'openLoginSuccessDashboard' },
+  // no-hero ของบอท PES: id ที่สุ่มแล้วไม่เจอฮีโร่ที่ต้องการ — นับรายเครื่อง + โหลด/ย้ายออกมาทั้งหมด
+  nohero: { subpath: 'no-hero', base: 'pes', title: '🚫 Dashboard no-hero — ไฟล์ที่ไม่เจอฮีโร่ รายเครื่อง (PES)', label: 'no-hero', reopen: 'openNoHeroDashboard' },
 };
-let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL', rangerid: 'ALL', loginsuccess: 'ALL' };
+let _folderScope = { inputid: 'ALL', backup: 'ALL', fastrandom: 'ALL', bottiket: 'ALL', rangerid: 'ALL', loginsuccess: 'ALL', nohero: 'ALL' };
+function openNoHeroDashboard() { return openFolderDash('nohero'); }
 function openLoginSuccessDashboard() { return openFolderDash('loginsuccess'); }
 
 function openInputIdDashboard() { return openFolderDash('inputid'); }
