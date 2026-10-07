@@ -429,7 +429,7 @@ def handle_wg_info(data=None):
         n_srv = len(_wg_groups())
     except Exception as e:
         n_srv = f"โหลดไม่ได้: {e}"
-    emit("wg_info_result", {"keys": len(_wg_keys()), "assign": _wg_assign_load(), "servers": n_srv,
+    emit("wg_info_result", {"keys": len(_wg_keys()), "share": max(1, min(int(os.environ.get("WG_SHARE", "5")), len(_wg_keys()) or 1)), "spare": int(os.environ.get("WG_SPARE_SERVERS", "2")), "assign": _wg_assign_load(), "servers": n_srv,
                             "keys_dir": WG_KEYS_DIR})
 
 
@@ -4974,6 +4974,7 @@ function openWgDashboard() {
     if (!el) return;
     window._wgAssign = r.assign || {};
     window._wgServers = r.servers;        // ไว้คำนวณว่าจะซ้ำกี่เท่า
+    window._wgShare = r.share || 1; window._wgSpare = (r.spare == null ? 2 : r.spare);
     wgCalc();
     el.innerHTML = `Key Pair ที่ server: <b>${r.keys}</b> อัน (วางไฟล์ .conf จาก Windscribe ไว้ที่ <code>${escHtml(r.keys_dir)}</code>) · เซิร์ฟเวอร์ Windscribe: <b>${escHtml(String(r.servers))}</b> · เลขเครื่องแจกไปแล้ว ${Object.keys(r.assign || {}).length} เครื่อง` +
       (r.keys ? '' : ' <span style="color:#f87171">— ยังไม่มี Key Pair สร้างไฟล์ไม่ได้</span>');
@@ -4994,19 +4995,19 @@ function wgCalc() {
   const tot = parseInt((document.getElementById('wgTotal') || {}).value || '0', 10) || 0;
   const srv = parseInt(window._wgServers, 10);
   if (!per || !tot || !srv) { el.textContent = ''; return; }
-  const spare = 5;                       // WG_SPARE ฝั่ง server เติมสำรองให้อีก 5 ไฟล์/เครื่อง
-  const want = tot * (per + spare);
-  const each = per + spare;        // จอต่อ 1 เครื่อง (รวมสำรอง)
+  // 1 IP ใช้ร่วมกัน share จอ (คนละกุญแจ) -> 1 เครื่องใช้ ceil(จอ/share) IP + สำรอง
+  const share = parseInt(window._wgShare, 10) || 1;
+  const spare = parseInt(window._wgSpare, 10) || 0;
+  const each = Math.ceil(per / share) + spare;   // IP ต่อ 1 เครื่อง (รวมสำรอง)
+  const want = tot * each;
+  const head = `${per} จอ = ${Math.ceil(per / share)} IP (${share} จอ/IP) +สำรอง ${spare} → ${each} IP/เครื่อง · `;
   if (want <= srv) {
-    el.innerHTML = `<span style="color:var(--success)">= ${want} จอ จาก ${srv} IP · ไม่ซ้ำกันเลยทั้งระบบ</span>`;
+    el.innerHTML = `<span style="color:var(--success)">${head}รวม ${want}/${srv} IP · ไม่ซ้ำกันเลยทั้งระบบ</span>`;
   } else if (each <= srv) {
-    // ที่สำคัญที่สุดคือ "ในเครื่องเดียวกันต้องไม่ซ้ำ" — ซ้ำข้ามเครื่องไม่ค่อยมีผล
-    const times = want / srv;
-    el.innerHTML = `<span style="color:var(--success)">ในเครื่องเดียวกันไม่ซ้ำเลย (${each}/${srv} IP)</span>`
-      + `<span style="color:var(--text-dim)"> · ข้ามเครื่องซ้ำ ~${times.toFixed(1)} เท่า</span>`;
+    el.innerHTML = `<span style="color:var(--success)">${head}</span>`
+      + `<span style="color:var(--danger)">รวม ${want} > ${srv} IP · ข้ามเครื่องซ้ำ ~${(want / srv).toFixed(1)} เท่า (ลดจอต่อเครื่อง/จำนวนเครื่อง)</span>`;
   } else {
-    el.innerHTML = `<span style="color:var(--danger)">${each} จอ/เครื่อง > ${srv} IP `
-      + `· ในเครื่องเดียวกันจะซ้ำ ${each - srv} จอ</span>`;
+    el.innerHTML = `<span style="color:var(--danger)">${head}เกิน ${srv} IP ที่มี · ในเครื่องเดียวกันจะซ้ำ</span>`;
   }
 }
 
