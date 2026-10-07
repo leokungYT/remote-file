@@ -284,7 +284,9 @@ WG_SERVERLIST_URL = "https://assets.windscribe.com/serverlist/mob-v2/1/0"
 WG_COUNTRIES = ["TH", "SG", "HK", "MY", "VN", "JP", "KR", "TW", "ID", "PH", "KH",
                 "IN", "AU", "NZ", "AE", "TR", "US", "CA", "GB", "DE", "FR", "NL"]
 # ประเทศที่เกมบล็อก IP VPN (ทดสอบ 2026-10-06: Bangkok ออกเน็ตได้ แต่เซิร์ฟเวอร์เกมไม่ตอบ) - ไม่แจกให้เครื่องลูก
-WG_EXCLUDE = {c.strip().upper() for c in os.environ.get("WG_EXCLUDE", "TH").split(",") if c.strip()}
+# ไม่ตัดประเทศไหนออกโดยปริยาย — ใช้เซิร์ฟเวอร์ทุกตัวที่มี เพื่อให้ IP ซ้ำกันน้อยที่สุด
+# ถ้าจะตัดประเทศไหนค่อยตั้ง env WG_EXCLUDE="TH,CN" เอา
+WG_EXCLUDE = {c.strip().upper() for c in os.environ.get("WG_EXCLUDE", "").split(",") if c.strip()}
 _wg_cache = {"t": 0, "groups": None}
 _wg_lock = threading.Lock()
 
@@ -314,7 +316,17 @@ def _wg_keys():
 
 
 def _wg_groups():
-    """รายชื่อเซิร์ฟเวอร์ WireGuard ของ Windscribe เรียงตายตัว (ประเทศใกล้ไทยก่อน) - cache 1 ชม."""
+    """รายชื่อเซิร์ฟเวอร์ WireGuard ของ Windscribe เรียงตายตัว (ประเทศใกล้ไทยก่อน) - cache 1 ชม.
+
+    *** นับเป็นราย node ไม่ใช่ราย group ***
+    ของเดิมใช้ group ละ 1 ตัว (hostname wg_endpoint) ได้แค่ ~199 ตัว
+    แต่ 1 group มีได้หลาย node แต่ละ node เป็นคนละเครื่อง คนละ IP รวมแล้ว ~356 IP
+    ตรวจแล้วว่า hostname ของ group resolve ออกมาเป็น IP ของ node ในกลุ่มนั้นจริง (8/8)
+    เอา IP ของ node มาใส่เป็น Endpoint ตรงๆ ได้เลย -> IP เพิ่มเกือบเท่าตัว
+
+    เรียงแบบวนรอบ: node ตัวแรกของทุกกลุ่มก่อน แล้วค่อยวนตัวที่ 2 ของทุกกลุ่ม ...
+    เครื่องที่หยิบช่วงติดกันจึงได้คนละเมืองให้มากที่สุดก่อน ไม่กระจุกอยู่ไม่กี่เมือง
+    """
     import urllib.request
     if _wg_cache["groups"] and time.time() - _wg_cache["t"] < 3600:
         return _wg_cache["groups"]
@@ -330,8 +342,21 @@ def _wg_groups():
             if g.get("wg_pubkey") and g.get("wg_endpoint") and g.get("nodes"):
                 groups.append((order.get(cc, len(order)), cc, g))
     groups.sort(key=lambda x: (x[0], x[1], int(x[2].get("id") or 0)))
-    _wg_cache.update(t=time.time(), groups=groups)
-    return groups
+
+    servers, seen_ip = [], set()
+    depth = max((len(g.get("nodes") or []) for _o, _c, g in groups), default=0)
+    for lvl in range(depth):
+        for o, cc, g in groups:
+            nodes = g.get("nodes") or []
+            if lvl >= len(nodes):
+                continue
+            ip = nodes[lvl].get("ip")
+            if not ip or ip in seen_ip:       # กัน IP ซ้ำข้ามกลุ่ม
+                continue
+            seen_ip.add(ip)
+            servers.append((o, cc, g, ip))
+    _wg_cache.update(t=time.time(), groups=servers)
+    return servers
 
 
 def _wg_assign_load():
@@ -387,17 +412,19 @@ def _wg_build(agent_id, per, total_machines):
     pick = [ring[i % n_srv] for i in range(per)]
 
     files = {}
-    for idx, (_, cc, g) in enumerate(pick, 1):
+    for idx, (_, cc, g, node_ip) in enumerate(pick, 1):
         city = (g.get("city") or cc).replace(" ", "-")
         nick = (g.get("nick") or str(g.get("id"))).replace(" ", "-")
         lines = ["[Interface]", f"PrivateKey = {kp['PrivateKey']}", f"Address = {kp['Address']}",
                  f"DNS = {kp['DNS']}", "", "[Peer]", f"PublicKey = {g['wg_pubkey']}",
                  f"AllowedIPs = {kp.get('AllowedIPs', '0.0.0.0/0, ::/0')}",
-                 f"Endpoint = {g['wg_endpoint']}:443", f"PresharedKey = {kp['PresharedKey']}", ""]
+                 # ใช้ IP ของ node ตรงๆ แทน hostname ของกลุ่ม — hostname เดียวชี้ได้หลาย node
+                 # ถ้าใช้ hostname หลายจอในกลุ่มเดียวกันอาจได้ IP ซ้ำกันจากการสุ่มของ DNS
+                 f"Endpoint = {node_ip}:443", f"PresharedKey = {kp['PresharedKey']}", ""]
         text = chr(10).join(lines)
         # ใส่เลขลำดับนำหน้า กันชื่อชนเมื่อเซิร์ฟเวอร์เดิมถูกหยิบซ้ำในเครื่องเดียวกัน
         # (เกิดได้เมื่อจอต่อเครื่องมากกว่าจำนวนเซิร์ฟเวอร์) ไม่งั้นไฟล์จะหายไปเงียบๆ
-        files[f"{idx:03d}-Windscribe-{city}-{nick}-WG.conf"] = base64.b64encode(text.encode()).decode()
+        files[f"{idx:03d}-Windscribe-{city}-{nick}-{node_ip.replace('.', '-')}-WG.conf"] = base64.b64encode(text.encode()).decode()
     return machine, key_no + 1, files
 
 
@@ -4915,12 +4942,17 @@ function wgCalc() {
   if (!per || !tot || !srv) { el.textContent = ''; return; }
   const spare = 5;                       // WG_SPARE ฝั่ง server เติมสำรองให้อีก 5 ไฟล์/เครื่อง
   const want = tot * (per + spare);
+  const each = per + spare;        // จอต่อ 1 เครื่อง (รวมสำรอง)
   if (want <= srv) {
-    el.innerHTML = `<span style="color:var(--success)">= ${want} จอ จาก ${srv} เซิร์ฟเวอร์ · ไม่ซ้ำกันเลย</span>`;
-  } else {
+    el.innerHTML = `<span style="color:var(--success)">= ${want} จอ จาก ${srv} IP · ไม่ซ้ำกันเลยทั้งระบบ</span>`;
+  } else if (each <= srv) {
+    // ที่สำคัญที่สุดคือ "ในเครื่องเดียวกันต้องไม่ซ้ำ" — ซ้ำข้ามเครื่องไม่ค่อยมีผล
     const times = want / srv;
-    const color = times <= 3 ? 'var(--warning)' : 'var(--danger)';
-    el.innerHTML = `<span style="color:${color}">= ${want} จอ จาก ${srv} เซิร์ฟเวอร์ · ซ้ำ ~${times.toFixed(1)} เท่า</span>`;
+    el.innerHTML = `<span style="color:var(--success)">ในเครื่องเดียวกันไม่ซ้ำเลย (${each}/${srv} IP)</span>`
+      + `<span style="color:var(--text-dim)"> · ข้ามเครื่องซ้ำ ~${times.toFixed(1)} เท่า</span>`;
+  } else {
+    el.innerHTML = `<span style="color:var(--danger)">${each} จอ/เครื่อง > ${srv} IP `
+      + `· ในเครื่องเดียวกันจะซ้ำ ${each - srv} จอ</span>`;
   }
 }
 
