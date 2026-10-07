@@ -3938,7 +3938,6 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
       <div class="stat-tile"><div class="stat-label">ไฟล์ ${RANGER_CFG.label} รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">id ที่มีชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${combos.length}</div></div>
-      <div class="stat-tile"><div class="stat-label">input-id เหลือรวม</div><div class="stat-val" style="color:var(--accent)">${inputTotal.toLocaleString()}</div></div>
     </div>
     <h3 style="margin:4px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ทุกเครื่อง (ชื่อเดียวกันคนละ combo บวกรวมกัน)</h3>
     <div class="hero-grid big">${nameCards}</div>
@@ -4147,6 +4146,7 @@ function renderBackupDash(comboTotals, grandTotal, matchedTotal, perAgent, total
       <div class="stat-tile"><div class="stat-label">ไฟล์ .xml ใน backup รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">.xml ที่มีชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${combos.length}</div></div>
+      <div class="stat-tile"><div class="stat-label">input-id เหลือรวม</div><div class="stat-val" style="color:var(--accent)">${inputTotal.toLocaleString()}</div></div>
     </div>
     <h3 style="margin:4px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ทุกเครื่อง <span style="color:var(--text-dim); font-weight:400">(กดชื่อเพื่อดูรายเครื่อง + โหลดไฟล์)</span></h3>
     <div class="hero-grid big">${nameCards}</div>
