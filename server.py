@@ -350,7 +350,7 @@ def _wg_groups():
             nodes = g.get("nodes") or []
             if lvl >= len(nodes):
                 continue
-            ip = nodes[lvl].get("ip")
+            ip = nodes[lvl].get("ip3") or nodes[lvl].get("ip")   # WireGuard ฟังที่ ip3 (hostname ของกลุ่ม resolve เป็น ip3) - ip เฉย ๆ ต่อไม่ติด
             if not ip or ip in seen_ip:       # กัน IP ซ้ำข้ามกลุ่ม
                 continue
             seen_ip.add(ip)
