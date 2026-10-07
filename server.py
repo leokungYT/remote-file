@@ -382,6 +382,23 @@ def _wg_machine_for(agent_id):
         return int(a[agent_id])
 
 
+WG_HELD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wg_held.json")
+
+
+def _wg_held_load():
+    """IP ที่แต่ละคอมถืออยู่ตอนนี้ {agent_id: {"key": n, "ips": [...]}}"""
+    try:
+        with open(WG_HELD_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _wg_held_save(d):
+    with open(WG_HELD_FILE, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False)
+
+
 def _wg_build(agent_id, per, total_machines):
     """สร้างไฟล์ .conf ของเครื่องนี้ -> (machine, key_no, {ชื่อไฟล์: base64}) หรือ raise"""
     keys = _wg_keys()
@@ -406,10 +423,25 @@ def _wg_build(agent_id, per, total_machines):
     if want > n_srv:
         logger.info(f"🔐 wg: จอรวม {want} > เซิร์ฟเวอร์ {n_srv} — เซิร์ฟเวอร์จะถูกใช้ซ้ำ "
                     f"~{want / n_srv:.1f} เท่า (กระจายเท่ากันทุกตัวแล้ว)")
-    start = ((machine - 1) * per) % n_srv
-    # per อาจมากกว่าจำนวนเซิร์ฟเวอร์ทั้งหมด — วนซ้ำให้ครบตามที่ขอ
-    ring = groups[start:] + groups[:start]
-    pick = [ring[i % n_srv] for i in range(per)]
+    # ── สุ่ม IP ใหม่ทุกครั้งที่กดสร้าง (เหมือนได้เส้นเน็ตใหม่) ──
+    # กันชน: ไม่หยิบ IP ที่คอมอื่น "ที่ใช้กุญแจเดียวกัน" ถืออยู่ (กุญแจ+IP คู่เดียวกันพร้อมกัน = ตีกัน)
+    # ไม่ซ้ำชุดเดิมของคอมนี้ถ้ายังมี IP อื่นเหลือ
+    import random
+    held = _wg_held_load()
+    taken = {ip for aid, h in held.items() if aid != agent_id and h.get("key") == key_no for ip in h.get("ips", [])}
+    mine_old = set((held.get(agent_id) or {}).get("ips", []))
+    pool = [x for x in groups if x[3] not in taken]
+    fresh = [x for x in pool if x[3] not in mine_old]
+    random.shuffle(fresh)
+    rest = [x for x in pool if x[3] in mine_old]
+    random.shuffle(rest)
+    pick = (fresh + rest)[:per]
+    if len(pick) < per:                       # IP ไม่พอ -> ยอมซ้ำ (วนจากทั้งหมด)
+        extra = groups[:]
+        random.shuffle(extra)
+        pick += [extra[i % n_srv] for i in range(per - len(pick))]
+    held[agent_id] = {"key": key_no, "ips": [x[3] for x in pick], "t": time.time()}
+    _wg_held_save(held)
 
     files = {}
     for idx, (_, cc, g, node_ip) in enumerate(pick, 1):
