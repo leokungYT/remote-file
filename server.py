@@ -178,7 +178,7 @@ def handle_list_dir(data):
         "path": data.get("path", ""),
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -190,7 +190,7 @@ def handle_download(data):
         "path": data["path"],
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -205,7 +205,7 @@ def handle_upload(data):
         "file_size": data.get("file_size", 0),
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -255,7 +255,7 @@ def handle_delete(data):
         "path": data["path"],
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -267,7 +267,7 @@ def handle_delete_many(data):
         "paths": data.get("paths", []),
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -450,16 +450,16 @@ def handle_request_wg(data):
             machine, key_no, files = _wg_build(aid, data.get("per", 15), data.get("total", 30))
         except Exception as e:
             emit("error", {"message": f"[VPN] {aid}: {e}"})
-            emit("request_sent", {"request_id": None, "error": str(e)})
+            _emit_sent(None, data, str(e))
             return
         payload = {"sub": "write", "clear": True, "files": files, "machine": machine, "key": key_no,
                    "base_match": payload["base_match"]}
     req_id = send_to_agent(aid, "wg_manage", payload, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{aid}' is offline"})
-        emit("request_sent", {"request_id": None, "error": "offline"})
+        _emit_sent(None, data, "offline")
 
 
 @socketio.on("request_count_heroes")
@@ -471,7 +471,7 @@ def handle_count_heroes(data):
         "base_match": data.get("base_match", "pes"),
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -486,7 +486,7 @@ def handle_count_prefix_ids(data):
         "by": data.get("by", "filename"),
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -499,7 +499,7 @@ def handle_list_ids(data):
         "base_match": data.get("base_match", "cookie-run"),
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -512,7 +512,7 @@ def handle_rename(data):
         "new_name": data["new_name"],
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -525,7 +525,7 @@ def handle_move(data):
         "dest_path": data["dest_path"],
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -535,7 +535,7 @@ def handle_shutdown_req(data):
     """สั่งปิดโปรแกรม agent ที่เครื่องลูกจากระยะไกล"""
     req_id = send_to_agent(data["agent_id"], "shutdown", {}, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -545,7 +545,7 @@ def handle_self_update_req(data):
     """สั่งให้ agent ดึงโค้ดใหม่จาก GitHub + รีสตาร์ทตัวเอง"""
     req_id = send_to_agent(data["agent_id"], "self_update", {}, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -569,7 +569,7 @@ def handle_mumu_req(data):
         "restart": data.get("restart", True),
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -589,7 +589,7 @@ def handle_mumu_clone_req(data):
         "close_first": data.get("close_first", True),   # ปิด MuMu ก่อนเริ่ม
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -605,7 +605,7 @@ def handle_run_file_req(data):
         "force": bool(data.get("force")),
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -618,7 +618,7 @@ def handle_screenshot_req(data):
         "quality": data.get("quality", 55),
     }, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
@@ -648,6 +648,25 @@ def get_agents_list():
         }
         for info in latest.values()
     ]
+
+
+def _emit_sent(req_id, data, error=None):
+    """ตอบกลับหน้าเว็บว่าส่งคำสั่งให้เครื่องลูกแล้ว
+
+    ถ้า client แนบ ref มาด้วย = เรียกแบบขนาน (หน้า dashboard ถามหลายเครื่องพร้อมกัน)
+    ให้ยิงเป็น event คนละชื่อ "request_sent_ref" เพื่อไม่ให้ไปชนกับตัวรับแบบเก่า
+    socket.once('request_sent') ที่ยังมีอยู่อีกหลายที่ในหน้าเว็บ — ตัวเก่าเป็น listener
+    ตัวเดียวร่วมกัน ถ้าเห็น event ของงานขนานจะจับคู่ผิดคำสั่ง
+    """
+    payload = {"request_id": req_id}
+    if error:
+        payload["error"] = error
+    ref = (data or {}).get("ref")
+    if ref:
+        payload["ref"] = ref
+        emit("request_sent_ref", payload)
+    else:
+        emit("request_sent", payload)
 
 
 def send_to_agent(agent_id, action, data, web_sid):
@@ -1110,7 +1129,7 @@ def handle_request_balance(data):
     }
     req_id = send_to_agent(data.get("agent_id"), action, payload, request.sid)
     if req_id:
-        emit("request_sent", {"request_id": req_id})
+        _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data.get('agent_id')}' is offline"})
 
@@ -2564,31 +2583,15 @@ function pcSelectHtml(scopeVal, onchangeExpr) {
 }
 
 function countHeroesOnAgent(agentId, subpath) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    socket.once('request_sent', (data) => {
-      const rid = data.request_id;
-      socket.once('response_' + rid, (resp) => {
-        settled = true;
-        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
-      });
-    });
-    socket.emit('request_count_heroes', { agent_id: agentId, names: HERO_LIST, subpath: subpath || 'found-hero', base_match: 'pes' });
-    setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 20000);
-  });
+  // ยังโยน error ให้ผู้เรียกเดิมจับได้เหมือนเดิม (หน้า PES ใช้ try/catch ดักอยู่)
+  return rpc(agentId, 'request_count_heroes',
+             { names: HERO_LIST, subpath: subpath || 'found-hero', base_match: 'pes' })
+    .then(r => { if (r && r.error) throw new Error(r.error); return r; });
 }
 
 // นับไฟล์ที่เหลือในโฟลเดอร์ pes/input-id ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
 function countInputIdOnAgent(agentId) {
-  return new Promise((resolve) => {
-    let settled = false;
-    socket.once('request_sent', (data) => {
-      const rid = data.request_id;
-      socket.once('response_' + rid, (resp) => { settled = true; resolve(resp || {}); });
-    });
-    socket.emit('request_list_ids', { agent_id: agentId, subpath: 'input-id', base_match: 'pes' });
-    setTimeout(() => { if (!settled) resolve({ error: 'timeout' }); }, 20000);
-  });
+  return rpc(agentId, 'request_list_ids', { subpath: 'input-id', base_match: 'pes' });
 }
 
 // dashboard แบบนับไฟล์ตามชื่อฮีโร่ — ใช้ทั้ง PES (found-hero) และ Backup (backup) โครงเดียวกัน ต่างแค่โฟลเดอร์
@@ -2644,13 +2647,17 @@ async function openHeroDash(kind) {
   let grandTotal = 0, onlineCount = 0, matchedTotal = 0;
   const perAgent = [];
 
-  for (const a of agents) {
+  // ถามพร้อมกันทีละ 8 เครื่อง และยิง found-hero + input-id ของเครื่องเดียวกันคู่กันไปเลย
+  const pesRes = await pMap(agents, a =>
+    Promise.all([countHeroesOnAgent(a.agent_id, cfg.subpath), countInputIdOnAgent(a.agent_id)])
+      .then(v => ({ ok: v }), e => ({ err: e })));
+  for (let ai = 0; ai < agents.length; ai++) {
+    const a = agents[ai];
     try {
-      const res = await countHeroesOnAgent(a.agent_id, cfg.subpath);
+      if (pesRes[ai].err) throw pesRes[ai].err;
+      const [res, ir] = pesRes[ai].ok;
       onlineCount++;
       grandTotal += res.total_files || 0;
-      // นับไฟล์ที่เหลือใน pes/input-id ของเครื่องนี้
-      const ir = await countInputIdOnAgent(a.agent_id);
       perAgent.push({
         name: a.name || a.hostname || a.agent_id,
         total: res.total_files || 0, exists: res.exists,
@@ -2897,16 +2904,65 @@ function openFastRandomDashboard() { return openFolderDash('fastrandom'); }
 function openBottiketDashboard() { return openFolderDash('bottiket'); }
 
 // นับไฟล์ในโฟลเดอร์ <base>/<subpath> ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
-function countFolderOnAgent(agentId, subpath, base) {
-  return new Promise((resolve) => {
-    let settled = false;
-    socket.once('request_sent', (data) => {
-      const rid = data.request_id;
-      socket.once('response_' + rid, (resp) => { settled = true; resolve(resp || {}); });
-    });
-    socket.emit('request_list_ids', { agent_id: agentId, subpath: subpath, base_match: base });
-    setTimeout(() => { if (!settled) resolve({ error: 'timeout' }); }, 20000);
+// ══════════════════════════════════════════════════════════════
+//  ยิงคำสั่งหาเครื่องลูกแบบขนานได้
+//  ของเดิมใช้ socket.once('request_sent') ซึ่งเป็น listener ตัวเดียวร่วมกันทั้งหน้า
+//  ยิงพร้อมกันหลายตัวแล้วคำตอบสลับคู่กัน เลยต้องเข้าคิวทีละเครื่อง — 29 เครื่อง
+//  คูณ timeout 20 วิ ทำให้หน้า dashboard ค้างนานมากถ้ามีเครื่องไม่ตอบไม่กี่ตัว
+//  ตอนนี้แนบ ref เฉพาะตัวไปกับคำสั่ง แล้ว server สะท้อนกลับมาใน request_sent
+//  จับคู่ได้ถูกตัวเสมอ จึงยิงพร้อมกันได้
+// ══════════════════════════════════════════════════════════════
+const _rpcWait = new Map();          // ref -> ตัวรับ request_id
+let _rpcSeq = 0;
+let _rpcBound = false;
+
+function _rpcBind() {
+  if (_rpcBound) return;
+  _rpcBound = true;
+  socket.on('request_sent_ref', (d) => {
+    const w = d && d.ref ? _rpcWait.get(d.ref) : null;
+    if (!w) return;                  // ไม่มี ref = คำสั่งจากที่อื่นในหน้า ปล่อยผ่าน
+    _rpcWait.delete(d.ref);
+    w(d);
   });
+}
+
+// ส่งคำสั่ง 1 อย่างไปเครื่องเดียว แล้วรอคำตอบ — ไม่ throw คืน object เสมอ
+function rpc(agentId, eventName, payload, waitMs) {
+  _rpcBind();
+  const ref = 'r' + (++_rpcSeq) + '_' + Date.now().toString(36);
+  const wait = waitMs || 20000;
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; _rpcWait.delete(ref); resolve(v || {}); } };
+    _rpcWait.set(ref, (d) => {
+      if (!d.request_id) { finish({ error: d.error || 'ส่งคำสั่งไม่สำเร็จ' }); return; }
+      socket.once('response_' + d.request_id, (resp) => finish(resp));
+    });
+    socket.emit(eventName, Object.assign({ agent_id: agentId, ref: ref }, payload || {}));
+    setTimeout(() => finish({ error: 'หมดเวลา (เครื่องไม่ตอบ)' }), wait);
+  });
+}
+
+// ทำงานกับหลายเครื่องพร้อมกัน แต่จำกัดจำนวนที่วิ่งพร้อมกัน (กัน server/เน็ตสำลัก)
+// คืนผลเรียงตามลำดับเดิมเสมอ
+const RPC_PARALLEL = 8;
+async function pMap(items, fn, limit) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit || RPC_PARALLEL, items.length) }, worker));
+  return out;
+}
+
+function countFolderOnAgent(agentId, subpath, base) {
+  return rpc(agentId, 'request_list_ids', { subpath: subpath, base_match: base });
 }
 
 // ═══ Dashboard เช็ค 7 วัน (โฟลเดอร์ 7day-check) — นับตามแบบ [7=7],[7=4]... ═══
@@ -2950,12 +3006,13 @@ async function _sevenLoad(agents) {
   const perAgent = [];
   const catTotal = {};
   let grandTotal = 0, onlineCount = 0;
-  for (const a of agents) {
+  const svRes = await pMap(agents, a => countFolderOnAgent(a.agent_id, '7day-check', _sevenBase));
+  agents.forEach((a, ai) => {
     const name = a.name || a.hostname || a.agent_id;
-    const r = await countFolderOnAgent(a.agent_id, '7day-check', _sevenBase);
-    if (r && r.error) { perAgent.push({ name, error: r.error }); continue; }
+    const r = svRes[ai];
+    if (r && r.error) { perAgent.push({ name, error: r.error }); return; }
     onlineCount++;
-    if (r && r.exists === false) { perAgent.push({ name, exists: false, cats: {}, total: 0 }); continue; }
+    if (r && r.exists === false) { perAgent.push({ name, exists: false, cats: {}, total: 0 }); return; }
     const cats = {};
     (r.ids || []).forEach(id => {
       const m = String(id).match(/\[(\d+)\s*=\s*(\d+)\]/);   // [7=7] -> 7/7
@@ -2965,7 +3022,7 @@ async function _sevenLoad(agents) {
       grandTotal++;
     });
     perAgent.push({ name, cats, total: (r.ids || []).length });
-  }
+  });
   _sevenData = { perAgent, catTotal, totalMachines: agents.length, onlineCount, grandTotal };
   _render7Day();
 }
@@ -3102,12 +3159,13 @@ async function _coinLoad(agents) {
   const perAgent = [];
   const numTotal = {};
   let grandTotal = 0, grandCoin = 0, onlineCount = 0;
-  for (const a of agents) {
+  const ccRes = await pMap(agents, a => countFolderOnAgent(a.agent_id, 'check-coin', 'pes'));
+  agents.forEach((a, ai) => {
     const name = a.name || a.hostname || a.agent_id;
-    const r = await countFolderOnAgent(a.agent_id, 'check-coin', 'pes');
-    if (r && r.error) { perAgent.push({ name, error: r.error }); continue; }
+    const r = ccRes[ai];
+    if (r && r.error) { perAgent.push({ name, error: r.error }); return; }
     onlineCount++;
-    if (r && r.exists === false) { perAgent.push({ name, exists: false, nums: {}, total: 0, coin: 0 }); continue; }
+    if (r && r.exists === false) { perAgent.push({ name, exists: false, nums: {}, total: 0, coin: 0 }); return; }
     const nums = {};
     let total = 0, coin = 0;
     (r.entries || []).forEach(p => {
@@ -3122,7 +3180,7 @@ async function _coinLoad(agents) {
     });
     grandTotal += total; grandCoin += coin;
     perAgent.push({ name, nums, total, coin });
-  }
+  });
   // เลขที่เคยเลือกไว้แต่รอบนี้ไม่มีแล้ว → ตัดออก
   _coinPicked = new Set([..._coinPicked].filter(k => numTotal[k]));
   if (_coinFilter) _coinPicked = new Set(_coinKeysIn(numTotal));   // รีเฟรชแล้วเลขใหม่ที่เข้าเงื่อนไขก็ติดมาด้วย
@@ -3304,9 +3362,10 @@ async function openFolderDash(kind) {
 
   const perAgent = [];
   let total = 0, onlineCount = 0;
-  for (const a of agents) {
+  const fdRes = await pMap(agents, a => countFolderOnAgent(a.agent_id, cfg.filesub || cfg.subpath, cfg.base));
+  agents.forEach((a, i) => {
     const name = a.name || a.hostname || a.agent_id;
-    const ir = await countFolderOnAgent(a.agent_id, cfg.filesub || cfg.subpath, cfg.base);
+    const ir = fdRes[i];
     if (ir && ir.error) {
       perAgent.push({ name, agentId: a.agent_id, error: ir.error });
     } else {
@@ -3315,7 +3374,7 @@ async function openFolderDash(kind) {
       total += cnt;
       perAgent.push({ name, agentId: a.agent_id, count: cnt, exists: ir ? ir.exists : undefined });
     }
-  }
+  });
   renderFolderDash(kind, perAgent, agents.length, onlineCount, total);
 }
 
@@ -3758,17 +3817,9 @@ let _rangerScope = 'ALL';
 
 // นับ id ในโฟลเดอร์ main/backup-id ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
 function countRangerOnAgent(agentId, by) {
-  return new Promise((resolve) => {
-    let settled = false;
-    socket.once('request_sent', (data) => {
-      const rid = data.request_id;
-      socket.once('response_' + rid, (resp) => { settled = true; resolve(resp || {}); });
-    });
-    socket.emit('request_count_prefix_ids', {
-      agent_id: agentId, subpath: RANGER_CFG.subpath, base_match: RANGER_CFG.base,
-      exts: ['.xml'], by: by || 'filename',
-    });
-    setTimeout(() => { if (!settled) resolve({ error: 'timeout' }); }, 20000);
+  return rpc(agentId, 'request_count_prefix_ids', {
+    subpath: RANGER_CFG.subpath, base_match: RANGER_CFG.base,
+    exts: ['.xml'], by: by || 'filename',
   });
 }
 
@@ -3797,12 +3848,15 @@ async function openRangerDashboard() {
   let grandTotal = 0, matchedTotal = 0, onlineCount = 0;
   const perAgent = [];
 
-  for (const a of agents) {
+  // ถามพร้อมกันทีละ 8 เครื่อง — ของเดิมถามทีละเครื่อง 29 รอบ เครื่องที่ไม่ตอบ
+  // กิน timeout 20 วิต่อตัว หน้าเลยค้างเป็นนาที
+  const rgRes = await pMap(agents, a => countRangerOnAgent(a.agent_id));
+  agents.forEach((a, i) => {
     const name = a.name || a.hostname || a.agent_id;
-    const res = await countRangerOnAgent(a.agent_id);
+    const res = rgRes[i];
     if (!res || res.error) {
       perAgent.push({ name, error: String((res && res.error) || 'ไม่ตอบกลับ') });
-      continue;
+      return;
     }
     onlineCount++;
     grandTotal += res.total_files || 0;
@@ -3812,7 +3866,7 @@ async function openRangerDashboard() {
     });
     const combos = res.combos || {};
     for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
-  }
+  });
   renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, agents.length, onlineCount);
 }
 
@@ -3931,17 +3985,9 @@ let _backupCache = null;
 
 // นับไฟล์ .xml ในโฟลเดอร์ main/backup ของเครื่องนั้น ตามชื่อฮีโร่หน้าไฟล์ (ไม่ throw — คืน object เสมอ)
 function countBackupOnAgent(agentId) {
-  return new Promise((resolve) => {
-    let settled = false;
-    socket.once('request_sent', (data) => {
-      const rid = data.request_id;
-      socket.once('response_' + rid, (resp) => { settled = true; resolve(resp || {}); });
-    });
-    socket.emit('request_count_prefix_ids', {
-      agent_id: agentId, subpath: BACKUP_CFG.subpath, base_match: BACKUP_CFG.base,
-      exts: ['.xml'], by: 'filename',
-    });
-    setTimeout(() => { if (!settled) resolve({ error: 'timeout' }); }, 20000);
+  return rpc(agentId, 'request_count_prefix_ids', {
+    subpath: BACKUP_CFG.subpath, base_match: BACKUP_CFG.base,
+    exts: ['.xml'], by: 'filename',
   });
 }
 
@@ -3970,17 +4016,20 @@ async function openBackupRich() {
   const perAgent = [];
   let grandTotal = 0, matchedTotal = 0, onlineCount = 0;
 
-  for (const a of agents) {
+  // ถามพร้อมกันทีละ 8 เครื่อง และยิง backup + input-id ของเครื่องเดียวกันคู่กันไปเลย
+  const bkRes = await pMap(agents, a => Promise.all([
+    countBackupOnAgent(a.agent_id),
+    countFolderOnAgent(a.agent_id, 'input-id', 'main'),
+  ]));
+  agents.forEach((a, i) => {
     const name = a.name || a.hostname || a.agent_id;
-    const res = await countBackupOnAgent(a.agent_id);
-    if (!res || res.error) { perAgent.push({ name, agentId: a.agent_id, error: String((res && res.error) || 'ไม่ตอบกลับ') }); continue; }
+    const [res, ir] = bkRes[i] || [];
+    if (!res || res.error) { perAgent.push({ name, agentId: a.agent_id, error: String((res && res.error) || 'ไม่ตอบกลับ') }); return; }
     onlineCount++;
     grandTotal += res.total_files || 0;
     matchedTotal += res.matched_files || 0;
     const combos = res.combos || {};
     for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
-    // นับไฟล์ที่เหลือใน main/input-id ของเครื่องนี้ด้วย — โชว์รวมหน้าเดียวกับ backup
-    const ir = await countFolderOnAgent(a.agent_id, 'input-id', 'main');
     perAgent.push({
       name, agentId: a.agent_id,
       total: res.total_files || 0, matched: res.matched_files || 0, exists: res.exists,
@@ -3988,7 +4037,7 @@ async function openBackupRich() {
       inputExists: ir ? ir.exists : undefined,
       byGroup: { [BACKUP_CFG.label]: combos },   // เก็บ combo รายเครื่องไว้ให้หน้ารายละเอียดแจกแจง
     });
-  }
+  });
   // cache สำหรับกดการ์ดดูรายละเอียด (โครงเดียวกับ _rfCache — ใช้ชุดเดียวชื่อ 'backup')
   _backupCache = {
     groupCombos: { [BACKUP_CFG.label]: comboTotals },
@@ -4170,11 +4219,12 @@ async function openRangerFindDashboard(useCache) {
   const perAgent = [];
   let onlineCount = 0;
 
-  for (const a of agents) {
+  // 'folder' = อ่านชื่อตัวจากชื่อโฟลเดอร์ (backup-id\<ชุด>\<ชื่อตัว>\) ไม่ใช่จากชื่อไฟล์
+  const rfRes = await pMap(agents, a => countRangerOnAgent(a.agent_id, 'folder'));
+  agents.forEach((a, ai) => {
     const name = a.name || a.hostname || a.agent_id;
-    // 'folder' = อ่านชื่อตัวจากชื่อโฟลเดอร์ (backup-id\<ชุด>\<ชื่อตัว>\) ไม่ใช่จากชื่อไฟล์
-    const res = await countRangerOnAgent(a.agent_id, 'folder');
-    if (!res || res.error) { perAgent.push({ name, error: String((res && res.error) || 'ไม่ตอบกลับ') }); continue; }
+    const res = rfRes[ai];
+    if (!res || res.error) { perAgent.push({ name, error: String((res && res.error) || 'ไม่ตอบกลับ') }); return; }
     onlineCount++;
     // นับเฉพาะไฟล์ที่อยู่ในโฟลเดอร์ย่อย — ไฟล์ที่วางไว้ชั้นนอกของ backup-id ไม่เอา (key '')
     const gt = res.group_totals || {};
@@ -4192,7 +4242,7 @@ async function openRangerFindDashboard(useCache) {
       for (const k in gc[g]) dst[k] = (dst[k] || 0) + gc[g][k];
     }
     for (const g in gt) if (g !== '') groupFiles[g] = (groupFiles[g] || 0) + gt[g];
-  }
+  });
 
   _rfCache = { groupCombos, groupFiles, perAgent, machines: agents.length, onlineCount };
   renderRangerFind(_rfCache);
