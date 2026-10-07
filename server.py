@@ -284,9 +284,9 @@ WG_SERVERLIST_URL = "https://assets.windscribe.com/serverlist/mob-v2/1/0"
 WG_COUNTRIES = ["TH", "SG", "HK", "MY", "VN", "JP", "KR", "TW", "ID", "PH", "KH",
                 "IN", "AU", "NZ", "AE", "TR", "US", "CA", "GB", "DE", "FR", "NL"]
 # ประเทศที่เกมบล็อก IP VPN (ทดสอบ 2026-10-06: Bangkok ออกเน็ตได้ แต่เซิร์ฟเวอร์เกมไม่ตอบ) - ไม่แจกให้เครื่องลูก
-# ไม่ตัดประเทศไหนออกโดยปริยาย — ใช้เซิร์ฟเวอร์ทุกตัวที่มี เพื่อให้ IP ซ้ำกันน้อยที่สุด
-# ถ้าจะตัดประเทศไหนค่อยตั้ง env WG_EXCLUDE="TH,CN" เอา
-WG_EXCLUDE = {c.strip().upper() for c in os.environ.get("WG_EXCLUDE", "").split(",") if c.strip()}
+# ตัด TH ออกโดยปริยาย — เกมบล็อก IP ไทย (เหตุผลเดิมจาก commit 3bd008f ห้ามเอาออก)
+# จะเปลี่ยนรายการค่อยตั้ง env เช่น WG_EXCLUDE="TH,CN" หรือ WG_EXCLUDE="" ถ้าจะเอาไทยกลับมา
+WG_EXCLUDE = {c.strip().upper() for c in os.environ.get("WG_EXCLUDE", "TH").split(",") if c.strip()}
 _wg_cache = {"t": 0, "groups": None}
 _wg_lock = threading.Lock()
 
