@@ -383,43 +383,49 @@ def _wg_machine_for(agent_id):
 
 
 def _wg_build(agent_id, per, total_machines):
-    """สร้างไฟล์ .conf ของเครื่องนี้ -> (machine, key_no, {ชื่อไฟล์: base64}) หรือ raise
-
-    แบบแชร์ IP (WG_SHARE, default 5): 1 เซิร์ฟเวอร์ = 1 IP ใช้ร่วมกัน SHARE จอ โดยแต่ละจอใช้ "กุญแจคนละตัว"
-    (กุญแจเดียวกันต่อเซิร์ฟเวอร์เดียวกันพร้อมกัน = ตีกันเน็ตหลุด แต่คนละกุญแจต่อได้)
-    แต่ละเครื่องได้ชุดเซิร์ฟเวอร์ของตัวเองไม่ทับกัน -> เครื่องอื่นไม่มีวันใช้กุญแจ+เซิร์ฟเวอร์คู่เดียวกัน"""
+    """สร้างไฟล์ .conf ของเครื่องนี้ -> (machine, key_no, {ชื่อไฟล์: base64}) หรือ raise"""
     keys = _wg_keys()
     if not keys:
         raise RuntimeError("ยังไม่มี Key Pair ที่ server - วางไฟล์ .conf จาก Windscribe ไว้ในโฟลเดอร์ wg_keys/")
     groups = _wg_groups()
     machine = _wg_machine_for(agent_id)
-    share = max(1, min(int(os.environ.get("WG_SHARE", "5")), len(keys)))
-    spare = int(os.environ.get("WG_SPARE_SERVERS", "2"))     # เซิร์ฟเวอร์สำรองต่อเครื่อง ไว้สลับตอนโดนบล็อก
-    n_need = -(-max(1, int(per)) // share) + spare           # จำนวนเซิร์ฟเวอร์ที่เครื่องนี้ต้องใช้
+    # +สำรอง 5 ไฟล์ต่อเครื่อง ให้บอทสลับเซิร์ฟเวอร์เองตอนเน็ตหลุดซ้ำ (auto failover) - ช่วงของเครื่องกว้างขึ้นตาม ไม่ทับกัน
+    per = max(1, int(per)) + int(os.environ.get("WG_SPARE", "5"))
     total_machines = max(int(total_machines or 0), machine)
+    group_size = -(-total_machines // len(keys))            # ปัดขึ้น: กี่เครื่องต่อ 1 กุญแจ
+    key_no = min((machine - 1) // group_size, len(keys) - 1)
+    kp = keys[key_no]
+
+    # ── แจกเซิร์ฟเวอร์: ไม่จำกัดจำนวนจอ ซ้ำได้ แต่ให้ซ้ำน้อยที่สุด ──
+    # เครื่องที่ n กินช่วงต่อจากเครื่องก่อนหน้าแบบวนรอบ ((n-1)*per ไปอีก per ตัว)
+    # วิธีนี้ทำให้ทุกเซิร์ฟเวอร์ถูกใช้จำนวนครั้งเท่ากัน (ต่างกันไม่เกิน 1) = ซ้ำน้อยที่สุด
+    # เท่าที่เป็นไปได้ ถ้าจอรวมมากกว่าเซิร์ฟเวอร์ที่มี ของเดิมโยน error ทิ้งไปเลย
+    # ตอนนี้ปล่อยให้ทำต่อ แล้วบอกใน log ว่าจะซ้ำกี่เท่า
     n_srv = len(groups)
-    if total_machines * n_need > n_srv:
-        logger.info(f"🔐 wg: ต้องการ {total_machines * n_need} เซิร์ฟเวอร์ > มี {n_srv} — บางเซิร์ฟเวอร์จะซ้ำข้ามเครื่อง")
-    start = ((machine - 1) * n_need) % n_srv
+    want = total_machines * per
+    if want > n_srv:
+        logger.info(f"🔐 wg: จอรวม {want} > เซิร์ฟเวอร์ {n_srv} — เซิร์ฟเวอร์จะถูกใช้ซ้ำ "
+                    f"~{want / n_srv:.1f} เท่า (กระจายเท่ากันทุกตัวแล้ว)")
+    start = ((machine - 1) * per) % n_srv
+    # per อาจมากกว่าจำนวนเซิร์ฟเวอร์ทั้งหมด — วนซ้ำให้ครบตามที่ขอ
     ring = groups[start:] + groups[:start]
-    pick = [ring[i % n_srv] for i in range(n_need)]
+    pick = [ring[i % n_srv] for i in range(per)]
 
     files = {}
-    idx = 0
-    for _, cc, g, node_ip in pick:
+    for idx, (_, cc, g, node_ip) in enumerate(pick, 1):
         city = (g.get("city") or cc).replace(" ", "-")
         nick = (g.get("nick") or str(g.get("id"))).replace(" ", "-")
-        for k in range(share):
-            kp = keys[k]
-            idx += 1
-            lines = ["[Interface]", f"PrivateKey = {kp['PrivateKey']}", f"Address = {kp['Address']}",
-                     f"DNS = {kp['DNS']}", "", "[Peer]", f"PublicKey = {g['wg_pubkey']}",
-                     f"AllowedIPs = {kp.get('AllowedIPs', '0.0.0.0/0, ::/0')}",
-                     # IP ของ node ตรงๆ (hostname ของกลุ่มสุ่มได้หลาย node -> จอที่ควรแชร์ IP อาจได้คนละตัว)
-                     f"Endpoint = {node_ip}:443", f"PresharedKey = {kp['PresharedKey']}", ""]
-            name = f"{idx:03d}-Windscribe-{city}-{nick}-{node_ip.replace('.', '-')}-k{k + 1}-WG.conf"
-            files[name] = base64.b64encode(chr(10).join(lines).encode()).decode()
-    return machine, share, files
+        lines = ["[Interface]", f"PrivateKey = {kp['PrivateKey']}", f"Address = {kp['Address']}",
+                 f"DNS = {kp['DNS']}", "", "[Peer]", f"PublicKey = {g['wg_pubkey']}",
+                 f"AllowedIPs = {kp.get('AllowedIPs', '0.0.0.0/0, ::/0')}",
+                 # ใช้ IP ของ node ตรงๆ แทน hostname ของกลุ่ม — hostname เดียวชี้ได้หลาย node
+                 # ถ้าใช้ hostname หลายจอในกลุ่มเดียวกันอาจได้ IP ซ้ำกันจากการสุ่มของ DNS
+                 f"Endpoint = {node_ip}:443", f"PresharedKey = {kp['PresharedKey']}", ""]
+        text = chr(10).join(lines)
+        # ใส่เลขลำดับนำหน้า กันชื่อชนเมื่อเซิร์ฟเวอร์เดิมถูกหยิบซ้ำในเครื่องเดียวกัน
+        # (เกิดได้เมื่อจอต่อเครื่องมากกว่าจำนวนเซิร์ฟเวอร์) ไม่งั้นไฟล์จะหายไปเงียบๆ
+        files[f"{idx:03d}-Windscribe-{city}-{nick}-{node_ip.replace('.', '-')}-WG.conf"] = base64.b64encode(text.encode()).decode()
+    return machine, key_no + 1, files
 
 
 @socketio.on("wg_info")
@@ -429,7 +435,7 @@ def handle_wg_info(data=None):
         n_srv = len(_wg_groups())
     except Exception as e:
         n_srv = f"โหลดไม่ได้: {e}"
-    emit("wg_info_result", {"keys": len(_wg_keys()), "share": max(1, min(int(os.environ.get("WG_SHARE", "5")), len(_wg_keys()) or 1)), "spare": int(os.environ.get("WG_SPARE_SERVERS", "2")), "assign": _wg_assign_load(), "servers": n_srv,
+    emit("wg_info_result", {"keys": len(_wg_keys()), "share": 1, "spare": int(os.environ.get("WG_SPARE", "5")), "assign": _wg_assign_load(), "servers": n_srv,
                             "keys_dir": WG_KEYS_DIR})
 
 
