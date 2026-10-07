@@ -4953,10 +4953,10 @@ function openWgDashboard() {
       <div class="pick-head"><span class="pick-title">🔐 VPN แยกจอ (WireGuard) — บอท LGR (โฟลเดอร์ main/wg)</span></div>
       <div id="wgInfo" style="font-size:12px; margin-bottom:10px; color:var(--text-dim)">กำลังโหลดข้อมูล server...</div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:13px">
-        <label style="display:flex; align-items:center; gap:5px">จอต่อเครื่อง
+        <label style="display:flex; align-items:center; gap:5px" title="จำนวนอีมูเลเตอร์ MuMu ที่เปิดในคอม 1 เครื่อง">จอ MuMu ต่อคอม
           <input type="number" id="wgPer" min="1" max="2000" value="15" style="width:70px; padding:6px 8px"
                  oninput="wgCalc()" title="ใส่เท่าไหร่ก็ได้ ถ้าเกินจำนวนเซิร์ฟเวอร์ที่มี จะวนใช้ซ้ำแบบกระจายเท่ากัน"></label>
-        <label style="display:flex; align-items:center; gap:5px" title="ใช้คำนวณว่ากี่เครื่องต่อ 1 Key Pair">จำนวนเครื่องทั้งหมด
+        <label style="display:flex; align-items:center; gap:5px" title="จำนวนคอมที่รันบอท (pc_1, pc_2 ...) - ใช้แบ่ง Key Pair">จำนวนคอม
           <input type="number" id="wgTotal" min="1" max="2000" value="${Math.max(30, agents.length)}" style="width:70px; padding:6px 8px"
                  oninput="wgCalc()"></label>
         <span id="wgCalcHint" style="font-size:12px; color:var(--text-dim)"></span>
@@ -5006,12 +5006,12 @@ function wgCalc() {
   const spare = parseInt(window._wgSpare, 10) || 0;
   const each = Math.ceil(per / share) + spare;   // IP ต่อ 1 เครื่อง (รวมสำรอง)
   const want = tot * each;
-  const head = `${per} จอ = ${Math.ceil(per / share)} IP (${share} จอ/IP) +สำรอง ${spare} → ${each} IP/เครื่อง · `;
+  const head = `คอมละ ${per} จอ MuMu → ได้ ${each} ไฟล์ VPN (= ${each} IP: ใช้ ${Math.ceil(per / share)} + สำรอง ${spare}) · `;
   if (want <= srv) {
     el.innerHTML = `<span style="color:var(--success)">${head}รวม ${want}/${srv} IP · ไม่ซ้ำกันเลยทั้งระบบ</span>`;
   } else if (each <= srv) {
     el.innerHTML = `<span style="color:var(--success)">${head}</span>`
-      + `<span style="color:var(--danger)">รวม ${want} > ${srv} IP · ข้ามเครื่องซ้ำ ~${(want / srv).toFixed(1)} เท่า (ลดจอต่อเครื่อง/จำนวนเครื่อง)</span>`;
+      + `<span style="color:var(--danger)">รวม ${want} > ${srv} IP · ข้ามเครื่องซ้ำ ~${(want / srv).toFixed(1)} เท่า (ลดจอ MuMu ต่อคอม/จำนวนคอม)</span>`;
   } else {
     el.innerHTML = `<span style="color:var(--danger)">${head}เกิน ${srv} IP ที่มี · ในเครื่องเดียวกันจะซ้ำ</span>`;
   }
