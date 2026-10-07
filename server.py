@@ -2133,12 +2133,20 @@ WEB_UI_HTML = r"""
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 10px 12px;
-    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+    /* กดตรงไหนของการ์ดก็ติ๊กได้ ไม่ต้องเล็งช่องเล็กๆ · ลากข้ามการ์ดเพื่อติ๊กรวดได้ */
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .wg-card:hover { border-color: var(--accent); box-shadow: 0 6px 16px rgba(0,0,0,0.25); }
-  .wg-card.off { opacity: 0.5; }
-  .wg-top { display: flex; align-items: center; gap: 7px; }
-  .wg-top input[type="checkbox"] { width: auto; margin: 0; flex: none; }
+  .wg-card.on { border-color: rgba(96,165,250,0.55); background: linear-gradient(150deg, rgba(96,165,250,0.10), var(--bg-secondary)); }
+  .wg-card.off { opacity: 0.45; }
+  .wg-top { display: flex; align-items: center; gap: 8px; }
+  /* ช่องติ๊กเป็นแค่ไอคอนบอกสถานะ — คลิกจริงรับที่ตัวการ์ด กันกดแล้วสลับสองรอบ */
+  .wg-top input[type="checkbox"] {
+    width: auto; margin: 0; flex: none; transform: scale(1.2); pointer-events: none;
+  }
   .wg-nm {
     flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -4880,9 +4888,11 @@ function openWgDashboard() {
     content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
     return;
   }
-  const rows = agents.map((a, i) => `<div class="wg-card" id="wg_c_${i}">
+  const rows = agents.map((a, i) => `<div class="wg-card on" id="wg_c_${i}"
+       onmousedown="wgDown(event, ${i})" onmouseenter="wgEnter(${i})"
+       title="กดที่การ์ด (ตรงไหนก็ได้) เพื่อติ๊ก · ลากข้ามการ์ดเพื่อติ๊กรวด · Shift+กด = เลือกเป็นช่วง">
       <div class="wg-top">
-        <input type="checkbox" class="wg-chk" data-i="${i}" checked onchange="wgSyncCard(${i})">
+        <input type="checkbox" class="wg-chk" data-i="${i}" checked tabindex="-1">
         <span class="wg-nm" title="${escAttr(a.name || a.hostname || a.agent_id)}">🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}</span>
         <span class="wg-no" id="wg_m_${i}">-</span>
       </div>
@@ -4910,7 +4920,7 @@ function openWgDashboard() {
     </div>
     <div style="display:flex; align-items:center; gap:10px; margin:0 2px 8px">
       <h3 style="flex:1; font-size:13px; color:var(--text-secondary); margin:0">
-        เครื่องทั้งหมด ${agents.length} เครื่อง <span style="color:var(--text-dim); font-weight:400">— ติ๊กเครื่องที่จะสั่งงาน</span></h3>
+        เครื่องทั้งหมด ${agents.length} เครื่อง <span style="color:var(--text-dim); font-weight:400">— กดที่การ์ดเพื่อติ๊ก · ลากข้ามการ์ดเพื่อติ๊กรวด · Shift+กด = เลือกเป็นช่วง</span></h3>
       <input type="text" class="dash-search" placeholder="🔍 ค้นหาเครื่อง..." oninput="wgFilter(this.value)">
     </div>
     <div class="wg-grid">${rows}</div>
@@ -4959,11 +4969,52 @@ function wgCalc() {
 function wgSyncCard(i) {
   const chk = document.querySelector('.wg-chk[data-i="' + i + '"]');
   const card = document.getElementById('wg_c_' + i);
-  if (chk && card) card.classList.toggle('off', !chk.checked);
+  if (!chk || !card) return;
+  card.classList.toggle('off', !chk.checked);
+  card.classList.toggle('on', chk.checked);
 }
 function wgTick(on) {
   document.querySelectorAll('.wg-chk').forEach(c => { c.checked = on; wgSyncCard(c.dataset.i); });
 }
+
+// ── ติ๊กเครื่อง: กดตรงไหนของการ์ดก็ได้ · ลากข้ามการ์ด · Shift+กด = เลือกเป็นช่วง ──
+let _wgDrag = false;      // กำลังลากอยู่ไหม
+let _wgPaint = null;      // ลากแล้วจะตั้งเป็นติ๊ก (true) หรือเอาออก (false)
+let _wgLast = null;       // การ์ดที่กดล่าสุด ไว้ใช้กับ Shift
+
+function wgSet(i, on) {
+  const chk = document.querySelector('.wg-chk[data-i="' + i + '"]');
+  if (!chk || chk.checked === on) return;
+  chk.checked = on;
+  wgSyncCard(i);
+}
+
+function wgDown(ev, i) {
+  if (ev.button !== 0) return;                 // เอาเฉพาะคลิกซ้าย
+  ev.preventDefault();                         // กันลากแล้วไปไฮไลต์ตัวหนังสือ
+  const chk = document.querySelector('.wg-chk[data-i="' + i + '"]');
+  if (!chk) return;
+
+  if (ev.shiftKey && _wgLast !== null) {
+    // Shift+กด = ตั้งทั้งช่วงจากการ์ดก่อนหน้าถึงการ์ดนี้ ให้เป็นค่าตรงข้ามของการ์ดนี้
+    const on = !chk.checked;
+    const [a, b] = _wgLast < i ? [_wgLast, i] : [i, _wgLast];
+    for (let k = a; k <= b; k++) wgSet(k, on);
+    _wgPaint = on;
+  } else {
+    _wgPaint = !chk.checked;
+    wgSet(i, _wgPaint);
+  }
+  _wgLast = i;
+  _wgDrag = true;
+}
+
+function wgEnter(i) {
+  if (_wgDrag && _wgPaint !== null) wgSet(i, _wgPaint);   // ลากผ่าน = ทาค่าเดิมต่อ
+}
+
+// ปล่อยเมาส์ที่ไหนก็จบการลาก (ลากออกนอกกริดแล้วปล่อยก็ต้องหยุด)
+document.addEventListener('mouseup', () => { _wgDrag = false; });
 function wgFilter(q) {
   q = (q || '').trim().toLowerCase();
   let shown = 0;
