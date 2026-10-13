@@ -2679,22 +2679,27 @@ async function openHeroDash(kind) {
   let grandTotal = 0, onlineCount = 0, matchedTotal = 0;
   const perAgent = [];
 
-  // ถามพร้อมกันทีละ 8 เครื่อง และยิง found-hero + input-id ของเครื่องเดียวกันคู่กันไปเลย
+  // ถามพร้อมกันทีละ 8 เครื่อง: found-hero, input-id และ no-hero
   const pesRes = await pMap(agents, a =>
-    Promise.all([countHeroesOnAgent(a.agent_id, cfg.subpath), countInputIdOnAgent(a.agent_id)])
+    Promise.all([countHeroesOnAgent(a.agent_id, cfg.subpath), countInputIdOnAgent(a.agent_id),
+                 countFolderOnAgent(a.agent_id, 'no-hero', 'pes')])
       .then(v => ({ ok: v }), e => ({ err: e })));
+  let noHeroTotal = 0;
   for (let ai = 0; ai < agents.length; ai++) {
     const a = agents[ai];
     try {
       if (pesRes[ai].err) throw pesRes[ai].err;
-      const [res, ir] = pesRes[ai].ok;
+      const [res, ir, nr] = pesRes[ai].ok;
       onlineCount++;
       grandTotal += res.total_files || 0;
+      const noHeroCount = nr && !nr.error && typeof nr.total === 'number' ? nr.total : null;
+      if (noHeroCount != null) noHeroTotal += noHeroCount;
       perAgent.push({
         name: a.name || a.hostname || a.agent_id,
         total: res.total_files || 0, exists: res.exists,
         inputId: (ir && typeof ir.total === 'number') ? ir.total : null,
         inputExists: ir ? ir.exists : undefined,
+        noHeroCount,
       });
       mergeCombos(comboTotals, res.combos);
       // แยกตามโฟลเดอร์ย่อย (hero1 / hero2 / ...) เอาไว้โชว์ว่าไฟล์อยู่โฟลเดอร์ไหน
@@ -2714,7 +2719,7 @@ async function openHeroDash(kind) {
     }
   }
   _pesCache = { groupCombos: pesGroupCombos, groupFiles: folderTotals, perAgent: pesPerAgent };
-  renderHeroDash(kind, comboTotals, grandTotal, perAgent, agents.length, onlineCount, folderTotals, matchedTotal);
+  renderHeroDash(kind, comboTotals, grandTotal, perAgent, agents.length, onlineCount, folderTotals, matchedTotal, noHeroTotal);
 }
 
 function filterHeroCards(q) {
@@ -2729,7 +2734,7 @@ function filterHeroCards(q) {
   if (noRes) noRes.style.display = shown === 0 ? '' : 'none';
 }
 
-function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, onlineCount, folderTotals, matchedTotal) {
+function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, onlineCount, folderTotals, matchedTotal, noHeroTotal) {
   const cfg = DASH_KINDS[kind];
   const content = document.getElementById('contentArea');
   const sorted = Object.keys(comboTotals)
@@ -2793,7 +2798,12 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
         : (p.total + ' ไฟล์');
       right = '<span title="ไฟล์ที่เหลือในโฟลเดอร์ input-id">📥 input-id: ' + inputTxt + '</span>'
             + '<span style="color:var(--text-dim); margin:0 10px">·</span>'
-            + '<span style="color:var(--text-secondary)" title="ไฟล์ในโฟลเดอร์ ' + cfg.label + '">🗂️ ' + cfg.label + ': ' + folderTxt + '</span>';
+        + '<span style="color:var(--text-secondary)" title="ไฟล์ในโฟลเดอร์ ' + cfg.label + '">🗂️ ' + cfg.label + ': ' + folderTxt + '</span>'
+        + '<span style="color:var(--text-dim); margin:0 10px">·</span>'
+        + '<span title="ไฟล์ใน pes/no-hero">🚫 no-hero: '
+        + (p.noHeroCount == null ? '<span style="color:var(--text-dim)">-</span>'
+                 : '<b style="color:var(--warning)">' + p.noHeroCount.toLocaleString() + '</b> ไฟล์')
+        + '</span>';
     }
     return '<div class="agent-stat"><span>🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
   }).join('');
@@ -2811,7 +2821,21 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
       <div class="stat-tile"><div class="stat-label">input-id เหลือรวม</div><div class="stat-val" style="color:var(--accent)">${inputIdTotal}</div></div>
       <div class="stat-tile"><div class="stat-label">ไฟล์ ${cfg.label} รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal}</div></div>
       <div class="stat-tile"><div class="stat-label">id ที่ตรงชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ no-hero รวม</div><div class="stat-val" style="color:var(--warning)">${noHeroTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
+    </div>
+    <div class="pick-panel" style="margin:0 0 18px">
+      <div class="pick-head" style="margin-bottom:0">
+        <span class="pick-title">🚫 ไฟล์ใน pes/no-hero <span style="color:var(--text-dim); font-weight:400">— ${noHeroTotal.toLocaleString()} ไฟล์ จากเครื่องที่เลือก</span></span>
+        <button class="btn btn-primary" id="pesNoHeroBtn" onclick="pesExportNoHero()" ${noHeroTotal ? '' : 'disabled'}>📦 โหลด no-hero เป็น ZIP</button>
+      </div>
+      <div id="pesNoHeroProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="pesNoHeroMsg" style="color:var(--text-secondary)"></span>
+          <span id="pesNoHeroPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="pesNoHeroBar" style="width:0%"></div></div>
+      </div>
     </div>
     ${folderCards ? `<h3 style="margin:4px 0 10px; font-size:14px; color:var(--text-secondary)">
       แยกตามโฟลเดอร์ใน ${cfg.label} <span style="color:var(--text-dim); font-weight:400">— กดการ์ดเพื่อติ๊กเลือกโฟลเดอร์ที่จะโหลด</span></h3>
@@ -2851,6 +2875,15 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
     <div class="agent-stats">${agentRows}</div>
   `;
   pesSyncPick();      // ตั้งป้ายบนปุ่มให้ตรงกับโฟลเดอร์ที่ติ๊กไว้
+}
+
+function pesExportNoHero() {
+  return rfRunExport({
+    mode: 'flat', key: '', subpath: 'no-hero', base: 'pes',
+    scope: _dashScope.hero,
+    label: 'no-hero', fileName: 'no-hero.zip',
+    ui: { btn: 'pesNoHeroBtn', prog: 'pesNoHeroProg', msg: 'pesNoHeroMsg', bar: 'pesNoHeroBar', pct: 'pesNoHeroPct' },
+  });
 }
 
 // ── ติ๊กเลือกโฟลเดอร์ (hero1/hero2/…) แล้วโหลดเฉพาะที่ติ๊ก ──
