@@ -455,12 +455,12 @@ def get_windows_drives():
     return drives
 
 
-def format_file_info(path, name):
+def format_file_info(path, name, entry=None):
     """สร้าง dict ข้อมูลไฟล์"""
     full_path = os.path.join(path, name)
     try:
-        stat = os.stat(full_path)
-        is_dir = os.path.isdir(full_path)
+        stat = entry.stat() if entry else os.stat(full_path)
+        is_dir = entry.is_dir() if entry else os.path.isdir(full_path)
         modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
         return {
             "name": name,
@@ -664,14 +664,14 @@ def handle_list_dir(req_id, data):
         return
 
     try:
-        entries = os.listdir(path)
         files = []
-        for name in entries:
-            # ข้ามไฟล์ระบบที่ซ่อน
-            if name.startswith('.') or name in ('$Recycle.Bin', 'System Volume Information'):
-                continue
-            info = format_file_info(path, name)
-            files.append(info)
+        with os.scandir(path) as entries:
+            for entry in entries:
+                name = entry.name
+                # ข้ามไฟล์ระบบที่ซ่อน
+                if name.startswith('.') or name in ('$Recycle.Bin', 'System Volume Information'):
+                    continue
+                files.append(format_file_info(path, name, entry))
 
         # เพิ่มปุ่มย้อนกลับ (ไม่ให้ย้อนเกินขอบเขตที่อนุญาต)
         parent = os.path.dirname(path.rstrip("\\/"))

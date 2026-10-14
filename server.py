@@ -1697,6 +1697,9 @@ WEB_UI_HTML = r"""
   .file-count .dim { color: var(--text-dim); }
   .file-count.sel-chip { border-color: var(--accent); background: rgba(59,130,246,0.12); color: var(--accent); }
   .file-count.sel-chip b { color: var(--accent); }
+  .file-render-progress { display: flex; align-items: center; gap: 8px; min-width: 230px; flex: 1 1 230px; color: var(--text-secondary); font-size: 12px; }
+  .file-render-track { height: 6px; flex: 1; min-width: 70px; overflow: hidden; border-radius: 3px; background: var(--border); }
+  .file-render-fill { height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.12s linear; }
   .select-n { display: flex; align-items: center; gap: 6px; }
   .select-n input {
     width: 100px; padding: 8px 10px; background: var(--bg-card);
@@ -3011,7 +3014,7 @@ function rpc(agentId, eventName, payload, waitMs) {
 
 // ทำงานกับหลายเครื่องพร้อมกัน แต่จำกัดจำนวนที่วิ่งพร้อมกัน (กัน server/เน็ตสำลัก)
 // คืนผลเรียงตามลำดับเดิมเสมอ
-const RPC_PARALLEL = 8;
+const RPC_PARALLEL = 32;
 async function pMap(items, fn, limit) {
   const out = new Array(items.length);
   let next = 0;
@@ -8085,7 +8088,7 @@ function selectAgent(agentId) {
 
 function loadDir(path) {
   currentPath = path;
-  showLoading();
+  showLoading('กำลังโหลดรายการไฟล์จากเครื่อง...');
 
   const reqHandler = (data) => {
     socket.off('response_' + data.request_id);
@@ -8109,7 +8112,28 @@ function loadDir(path) {
 // ═══════════════════════════════════════════════════════════
 //  RENDER FILES
 // ═══════════════════════════════════════════════════════════
+let _fileRenderToken = 0;
+
+function fileRowHtml(f, i, disabled) {
+  const off = disabled ? ' disabled' : '';
+  return `
+    <tr ${f.name === '..' ? '' : `data-row="${i}"`} ondblclick="${f.is_dir ? `loadDir('${escAttr(f.full_path)}')` : `downloadFile('${escAttr(f.full_path)}', '${escAttr(f.name)}')`}">
+      <td style="text-align:center" onclick="event.stopPropagation()" ondblclick="event.stopPropagation()">
+        ${f.name === '..' ? '' : `<input type="checkbox" class="file-check" data-index="${i}"${off}>`}
+      </td>
+      <td><div class="file-name"><span class="file-icon">${f.is_dir ? '📂' : getFileIcon(f.name)}</span>${escHtml(f.name)}</div></td>
+      <td class="file-size">${f.is_dir ? '-' : formatSize(f.size)}</td>
+      <td class="file-date">${f.modified || '-'}</td>
+      <td><div class="file-actions">
+        ${!f.is_dir ? `<button class="btn"${off} onclick="event.stopPropagation(); downloadFile('${escAttr(f.full_path)}', '${escAttr(f.name)}')">💾</button>` : ''}
+        <button class="btn"${off} onclick="event.stopPropagation(); startRename('${escAttr(f.full_path)}', '${escAttr(f.name)}')">✏️</button>
+        <button class="btn btn-danger"${off} onclick="event.stopPropagation(); deleteFile('${escAttr(f.full_path)}', '${escAttr(f.name)}')">🗑️</button>
+      </div></td>
+    </tr>`;
+}
+
 function renderFiles(files, path) {
+  const renderToken = ++_fileRenderToken;
   const content = document.getElementById('contentArea');
   const agent = agentsData.find(a => a.agent_id === currentAgent);
   const allowed = (agent && agent.allowed_paths) || [];
@@ -8137,21 +8161,30 @@ function renderFiles(files, path) {
   const fileCount = realItems.filter(f => !f.is_dir).length;
   const dirCount = realItems.filter(f => f.is_dir).length;
 
+  const initialCount = Math.min(files.length, 200);
+  const isProgressive = files.length > initialCount;
+  const initialPercent = files.length ? Math.floor(initialCount * 100 / files.length) : 100;
   content.innerHTML = `
     <div class="toolbar">
       ${projectSelect}
       ${lockChip}
       <div class="breadcrumb">${breadcrumb}</div>
-      <button class="btn" id="btnDownloadSel" onclick="downloadSelected()">💾 โหลดที่เลือก</button>
-      <button class="btn" id="btnTransfer" onclick="openTransfer()" title="ย้าย/คัดลอกไฟล์ที่เลือกไปเครื่องอื่น">📦 ย้ายไปเครื่องอื่น</button>
-      <button class="btn btn-danger" id="btnDeleteSel" onclick="deleteSelected()">🗑️ ลบที่เลือก</button>
+      <button class="btn" id="btnDownloadSel" onclick="downloadSelected()"${isProgressive ? ' disabled' : ''}>💾 โหลดที่เลือก</button>
+      <button class="btn" id="btnTransfer" onclick="openTransfer()" title="ย้าย/คัดลอกไฟล์ที่เลือกไปเครื่องอื่น"${isProgressive ? ' disabled' : ''}>📦 ย้ายไปเครื่องอื่น</button>
+      <button class="btn btn-danger" id="btnDeleteSel" onclick="deleteSelected()"${isProgressive ? ' disabled' : ''}>🗑️ ลบที่เลือก</button>
       <button class="btn" onclick="loadDir(currentPath)">🔄 รีเฟรช</button>
       <button class="btn btn-primary" onclick="openUpload()">📤 อัปโหลด</button>
       <div class="select-n" title="กรอกจำนวน แล้วเลือกไฟล์ตั้งแต่บนสุดตามจำนวนนั้น">
-        <input type="number" id="selectNInput" min="1" placeholder="เลือกกี่ไฟล์" onkeydown="if(event.key==='Enter')selectFirstN()">
-        <button class="btn" onclick="selectFirstN()">✅ เลือกจำนวน</button>
+        <input type="number" id="selectNInput" min="1" placeholder="เลือกกี่ไฟล์" onkeydown="if(event.key==='Enter')selectFirstN()"${isProgressive ? ' disabled' : ''}>
+        <button class="btn" onclick="selectFirstN()"${isProgressive ? ' disabled' : ''}>✅ เลือกจำนวน</button>
       </div>
       <span class="file-count" title="จำนวนไฟล์ที่เหลือในโฟลเดอร์นี้">📄 เหลือ <b>${fileCount}</b> ไฟล์${dirCount ? ` <span class="dim">· ${dirCount} โฟลเดอร์</span>` : ''}</span>
+      <div class="file-render-progress" id="fileRenderProgress" role="status" aria-live="polite"${isProgressive ? '' : ' style="display:none"'}>
+        <span id="fileRenderLabel">กำลังแสดงไฟล์ ${initialCount.toLocaleString()} / ${files.length.toLocaleString()} (${initialPercent}%)</span>
+        <div class="file-render-track" role="progressbar" aria-label="ความคืบหน้าการแสดงไฟล์" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${initialPercent}">
+          <div class="file-render-fill" id="fileRenderFill" style="width:${initialPercent}%"></div>
+        </div>
+      </div>
       <span class="file-count sel-chip" id="selChip" style="display:none" title="จำนวนไฟล์ที่เลือกอยู่">✅ เลือก <b>0</b> ไฟล์</span>
     </div>
     ${files.length === 0 ? '<div class="empty-state"><div class="icon">📭</div><h3>โฟลเดอร์ว่าง</h3></div>' : `
@@ -8159,41 +8192,59 @@ function renderFiles(files, path) {
     <table class="file-table">
       <thead>
         <tr>
-          <th style="width:36px; text-align:center"><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this)" title="เลือกทั้งหมด"></th>
+          <th style="width:36px; text-align:center"><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this)" title="เลือกทั้งหมด"${isProgressive ? ' disabled' : ''}></th>
           <th style="width:46%">ชื่อ</th>
           <th>ขนาด</th>
           <th>แก้ไขล่าสุด</th>
           <th style="width:140px"></th>
         </tr>
       </thead>
-      <tbody>
-        ${files.map((f, i) => `
-          <tr ${f.name === '..' ? '' : `data-row="${i}"`} ondblclick="${f.is_dir ? `loadDir('${escAttr(f.full_path)}')` : `downloadFile('${escAttr(f.full_path)}', '${escAttr(f.name)}')`}">
-            <td style="text-align:center" onclick="event.stopPropagation()" ondblclick="event.stopPropagation()">
-              ${f.name === '..' ? '' : `<input type="checkbox" class="file-check" data-index="${i}">`}
-            </td>
-            <td>
-              <div class="file-name">
-                <span class="file-icon">${f.is_dir ? '📂' : getFileIcon(f.name)}</span>
-                ${escHtml(f.name)}
-              </div>
-            </td>
-            <td class="file-size">${f.is_dir ? '-' : formatSize(f.size)}</td>
-            <td class="file-date">${f.modified || '-'}</td>
-            <td>
-              <div class="file-actions">
-                ${!f.is_dir ? `<button class="btn" onclick="event.stopPropagation(); downloadFile('${escAttr(f.full_path)}', '${escAttr(f.name)}')">💾</button>` : ''}
-                <button class="btn" onclick="event.stopPropagation(); startRename('${escAttr(f.full_path)}', '${escAttr(f.name)}')">✏️</button>
-                <button class="btn btn-danger" onclick="event.stopPropagation(); deleteFile('${escAttr(f.full_path)}', '${escAttr(f.name)}')">🗑️</button>
-              </div>
-            </td>
-          </tr>
-        `).join('')}
-      </tbody>
+      <tbody id="fileRows"></tbody>
     </table>
     </div>
     `}
   `;
+  const rows = document.getElementById('fileRows');
+  let cursor = 0;
+  const appendBatch = (end) => {
+    rows.insertAdjacentHTML('beforeend', files.slice(cursor, end)
+      .map((f, offset) => fileRowHtml(f, cursor + offset, isProgressive)).join(''));
+    cursor = end;
+  };
+  if (files.length) appendBatch(initialCount);
+  if (isProgressive) {
+    const appendNextBatch = () => {
+      if (renderToken !== _fileRenderToken || !rows.isConnected) return;
+      appendBatch(Math.min(cursor + 300, files.length));
+      const progress = document.getElementById('fileRenderProgress');
+      if (cursor < files.length) {
+        const percent = Math.floor(cursor * 100 / files.length);
+        const label = document.getElementById('fileRenderLabel');
+        const fill = document.getElementById('fileRenderFill');
+        const track = progress && progress.querySelector('[role="progressbar"]');
+        if (label) label.textContent = `กำลังแสดงไฟล์ ${cursor.toLocaleString()} / ${files.length.toLocaleString()} (${percent}%)`;
+        if (fill) fill.style.width = `${percent}%`;
+        if (track) track.setAttribute('aria-valuenow', percent);
+        requestAnimationFrame(appendNextBatch);
+        return;
+      }
+      rows.querySelectorAll('input, button').forEach(el => { el.disabled = false; });
+      const selectAll = document.getElementById('selectAll');
+      if (selectAll) selectAll.disabled = false;
+      const selectNInput = document.getElementById('selectNInput');
+      const selectNButton = selectNInput && selectNInput.nextElementSibling;
+      if (selectNInput) selectNInput.disabled = false;
+      if (selectNButton) selectNButton.disabled = false;
+      const label = document.getElementById('fileRenderLabel');
+      const fill = document.getElementById('fileRenderFill');
+      const track = progress && progress.querySelector('[role="progressbar"]');
+      if (label) label.textContent = `แสดงไฟล์ครบ ${files.length.toLocaleString()} / ${files.length.toLocaleString()} (100%)`;
+      if (fill) fill.style.width = '100%';
+      if (track) track.setAttribute('aria-valuenow', 100);
+      updateSelectedCount();
+    };
+    requestAnimationFrame(appendNextBatch);
+  }
   updateSelectedCount();
 }
 
@@ -8954,8 +9005,8 @@ function getFileIcon(name) {
   return icons[ext] || '📄';
 }
 
-function showLoading() {
-  document.getElementById('contentArea').innerHTML = '<div class="loading"><div class="spinner"></div>กำลังโหลด...</div>';
+function showLoading(message = 'กำลังโหลด...') {
+  document.getElementById('contentArea').innerHTML = `<div class="loading" role="status" aria-live="polite"><div class="spinner"></div>${escHtml(message)}</div>`;
 }
 function showEmpty(msg) {
   document.getElementById('contentArea').innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><h3>${escHtml(msg)}</h3></div>`;
