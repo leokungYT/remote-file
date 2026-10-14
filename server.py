@@ -181,6 +181,7 @@ def handle_list_dir(data):
         _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+        _emit_sent(None, data, "offline")
 
 
 @socketio.on("request_download")
@@ -506,6 +507,7 @@ def handle_count_heroes(data):
         _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+        _emit_sent(None, data, "offline")
 
 
 @socketio.on("request_count_prefix_ids")
@@ -521,6 +523,7 @@ def handle_count_prefix_ids(data):
         _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+        _emit_sent(None, data, "offline")
 
 
 @socketio.on("request_list_ids")
@@ -534,6 +537,7 @@ def handle_list_ids(data):
         _emit_sent(req_id, data)
     else:
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+        _emit_sent(None, data, "offline")
 
 
 @socketio.on("request_rename")
@@ -2620,13 +2624,13 @@ function pcSelectHtml(scopeVal, onchangeExpr) {
 function countHeroesOnAgent(agentId, subpath) {
   // ยังโยน error ให้ผู้เรียกเดิมจับได้เหมือนเดิม (หน้า PES ใช้ try/catch ดักอยู่)
   return rpc(agentId, 'request_count_heroes',
-             { names: HERO_LIST, subpath: subpath || 'found-hero', base_match: 'pes' })
+             { names: HERO_LIST, subpath: subpath || 'found-hero', base_match: 'pes' }, 0)
     .then(r => { if (r && r.error) throw new Error(r.error); return r; });
 }
 
 // นับไฟล์ที่เหลือในโฟลเดอร์ pes/input-id ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
 function countInputIdOnAgent(agentId) {
-  return rpc(agentId, 'request_list_ids', { subpath: 'input-id', base_match: 'pes' });
+  return rpc(agentId, 'request_list_ids', { subpath: 'input-id', base_match: 'pes' }, 0);
 }
 
 // dashboard แบบนับไฟล์ตามชื่อฮีโร่ — ใช้ทั้ง PES (found-hero) และ Backup (backup) โครงเดียวกัน ต่างแค่โฟลเดอร์
@@ -2999,7 +3003,7 @@ function _rpcBind() {
 function rpc(agentId, eventName, payload, waitMs) {
   _rpcBind();
   const ref = 'r' + (++_rpcSeq) + '_' + Date.now().toString(36);
-  const wait = waitMs || 20000;
+  const wait = waitMs === undefined ? 20000 : waitMs;
   return new Promise((resolve) => {
     let done = false;
     const finish = (v) => { if (!done) { done = true; _rpcWait.delete(ref); resolve(v || {}); } };
@@ -3008,7 +3012,7 @@ function rpc(agentId, eventName, payload, waitMs) {
       socket.once('response_' + d.request_id, (resp) => finish(resp));
     });
     socket.emit(eventName, Object.assign({ agent_id: agentId, ref: ref }, payload || {}));
-    setTimeout(() => finish({ error: 'หมดเวลา (เครื่องไม่ตอบ)' }), wait);
+    if (wait > 0) setTimeout(() => finish({ error: 'หมดเวลา (เครื่องไม่ตอบ)' }), wait);
   });
 }
 
@@ -3030,7 +3034,7 @@ async function pMap(items, fn, limit) {
 }
 
 function countFolderOnAgent(agentId, subpath, base) {
-  return rpc(agentId, 'request_list_ids', { subpath: subpath, base_match: base });
+  return rpc(agentId, 'request_list_ids', { subpath: subpath, base_match: base }, 0);
 }
 
 // ═══ Dashboard เช็ค 7 วัน (โฟลเดอร์ 7day-check) — นับตามแบบ [7=7],[7=4]... ═══
@@ -3888,7 +3892,7 @@ function countRangerOnAgent(agentId, by) {
   return rpc(agentId, 'request_count_prefix_ids', {
     subpath: RANGER_CFG.subpath, base_match: RANGER_CFG.base,
     exts: ['.xml'], by: by || 'filename',
-  });
+  }, 0);
 }
 
 async function openRangerDashboard() {
@@ -4055,7 +4059,7 @@ function countBackupOnAgent(agentId) {
   return rpc(agentId, 'request_count_prefix_ids', {
     subpath: BACKUP_CFG.subpath, base_match: BACKUP_CFG.base,
     exts: ['.xml'], by: 'filename',
-  });
+  }, 0);
 }
 
 async function openBackupRich() {
@@ -6784,18 +6788,9 @@ async function mcDeleteAllEvery() {
 //  DASHBOARD COOKIE-RUN (ดึงชื่อ id จากโฟลเดอร์ id-found)
 // ═══════════════════════════════════════════════════════════
 function listIdsOnAgent(agentId) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    socket.once('request_sent', (data) => {
-      const rid = data.request_id;
-      socket.once('response_' + rid, (resp) => {
-        settled = true;
-        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
-      });
-    });
-    socket.emit('request_list_ids', { agent_id: agentId, subpath: 'id-found', base_match: 'cookie-run' });
-    setTimeout(() => { if (!settled) reject(new Error('timeout')); }, 20000);
-  });
+  return rpc(agentId, 'request_list_ids',
+    { subpath: 'id-found', base_match: 'cookie-run' }, 0)
+    .then(r => { if (r && r.error) throw new Error(r.error); return r; });
 }
 
 async function openCookieDashboard() {
@@ -8089,24 +8084,17 @@ function selectAgent(agentId) {
 function loadDir(path) {
   currentPath = path;
   showLoading('กำลังโหลดรายการไฟล์จากเครื่อง...');
-
-  const reqHandler = (data) => {
-    socket.off('response_' + data.request_id);
-
-    socket.on('response_' + data.request_id, (resp) => {
-      socket.off('response_' + data.request_id);
-      if (resp.error) {
-        toast(resp.error, 'error');
-        showEmpty('เกิดข้อผิดพลาด: ' + resp.error);
-        return;
-      }
-      currentFiles = resp.files || [];
-      renderFiles(currentFiles, resp.path || path);
-    });
-  };
-
-  socket.once('request_sent', reqHandler);
-  socket.emit('request_list_dir', { agent_id: currentAgent, path: path });
+  const requestedAgent = currentAgent;
+  rpc(requestedAgent, 'request_list_dir', { path: path }, 0).then(resp => {
+    if (currentAgent !== requestedAgent || currentPath !== path) return;
+    if (resp && resp.error) {
+      toast(resp.error, 'error');
+      showEmpty('เกิดข้อผิดพลาด: ' + resp.error);
+      return;
+    }
+    currentFiles = (resp && resp.files) || [];
+    renderFiles(currentFiles, (resp && resp.path) || path);
+  });
 }
 
 // ═══════════════════════════════════════════════════════════
