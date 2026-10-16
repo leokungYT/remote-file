@@ -2339,6 +2339,26 @@ WEB_UI_HTML = r"""
     border: 1px solid var(--border);
     border-radius: 10px;
   }
+  .pes-load-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 7px;
+  }
+  .pes-load-card {
+    min-width: 0;
+    padding: 8px 10px;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+  }
+  .pes-load-card > span {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   /* ═══════════════ RESPONSIVE ═══════════════
      กติกา: หน้าเว็บห้ามเลื่อนซ้าย-ขวา อะไรที่กว้างเกิน (ตาราง/แถบปุ่ม/breadcrumb)
@@ -2868,7 +2888,7 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
     const color = s.state === 'success' ? 'var(--success)'
       : s.state === 'error' ? 'var(--danger)'
       : s.state === 'warning' ? 'var(--warning)' : 'var(--accent)';
-    return `<div class="agent-stat"><span>🖥️ ${escHtml(s.name)}</span><span style="color:${color}">${escHtml(s.text)}</span></div>`;
+    return `<div class="agent-stat pes-load-card"><span title="${escHtml(s.name)}">🖥️ ${escHtml(s.name)}</span><span title="${escHtml(s.text)}" style="color:${color}">${escHtml(s.text)}</span></div>`;
   }).join('');
 
   content.innerHTML = `
@@ -2887,7 +2907,7 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
       <div class="stat-tile"><div class="stat-label">ไฟล์ no-hero รวม</div><div class="stat-val" style="color:var(--warning)">${noHeroTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
     </div>
-    ${loadStates.length ? `<h3 style="margin:14px 0 8px; font-size:14px; color:var(--text-secondary)">สถานะโหลดรายเครื่อง — ${loadDone}/${loadStates.length} เสร็จ</h3><div class="agent-stats">${loadStatusRows}</div>` : ''}
+    ${loadStates.length ? `<h3 style="margin:14px 0 8px; font-size:14px; color:var(--text-secondary)">สถานะโหลดรายเครื่อง — ${loadDone}/${loadStates.length} เสร็จ</h3><div class="agent-stats pes-load-grid">${loadStatusRows}</div>` : ''}
     <div class="pick-panel" style="margin:0 0 18px">
       <div class="pick-head" style="margin-bottom:0">
         <span class="pick-title">🚫 ไฟล์ใน pes/no-hero <span style="color:var(--text-dim); font-weight:400">— ${noHeroTotal.toLocaleString()} ไฟล์ จากเครื่องที่เลือก</span></span>
