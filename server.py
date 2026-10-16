@@ -126,10 +126,17 @@ def handle_agent_response(data):
     if job and job in export_jobs:
         info = export_jobs[job]
         info["replied"] += 1
+        aid = (req or {}).get("agent_id") or "?"
+        info["responded_agents"].add(aid)
         if data.get("error"):
-            info["errors"].append(str(data.get("error"))[:120])
+            info["failed"] += 1
+            info["failed_agents"].append(aid)
+            info["errors"].append(f"{aid}: {str(data.get('error'))[:120]}")
         else:
             info["files"] += int(data.get("files") or 0)
+            if int(data.get("files") or 0) == 0:
+                  info["no_files"] += 1
+                  info["no_file_agents"].append(aid)
             # ขอกรองชื่อไฟล์ไว้ แต่ agent ตัวนี้เก่า (ไม่รู้จัก pats) → มันส่งมาทั้งโฟลเดอร์
             # server จะกรองให้ตอนรวม zip แต่ต้องบอกคนใช้ด้วยว่าเครื่องไหนยังเก่า
             if info.get("pats") and not data.get("pats_ok"):
@@ -745,6 +752,9 @@ def send_to_agent(agent_id, action, data, web_sid):
         "created_at": time.time(),
         "completed": False,
     }
+    if action == "export_folder":
+          # ผูก request กับ job ก่อน emit เพราะ agent ที่ไม่มีไฟล์อาจตอบกลับทันที
+        export_reqs[req_id] = data.get("job")
 
     socketio.emit("command", {
         "request_id": req_id,
@@ -1001,6 +1011,13 @@ def export_status(job):
         "done": len(info["agents"]),            # เครื่องที่ส่ง zip มาแล้ว
         "replied": info["replied"],             # เครื่องที่ตอบแล้ว (รวมพวกที่ไม่มีไฟล์)
         "expect": info["expect"],
+        "no_files": info["no_files"],
+        "no_file_agents": [info["agent_names"].get(aid, aid) for aid in info["no_file_agents"]],
+        "failed": info["failed"],
+        "failed_agents": [info["agent_names"].get(aid, aid) for aid in info["failed_agents"]],
+        "pending": max(0, info["expect"] - info["replied"]),
+        "pending_agents": [info["agent_names"].get(aid, aid)
+               for aid in info["expected_agents"] if aid not in info["responded_agents"]],
         "files": info["files"],
         "bytes": sum(a["bytes"] for a in info["agents"].values()),
         "finished": info["replied"] >= info["expect"],
@@ -1084,7 +1101,13 @@ def handle_request_export(data):
     label = "".join(ch for ch in label if ch.isalnum() or ch in "-_")[:60] or "export"
 
     pats = [_pat_norm(x) for x in (data.get("pats") or []) if str(x).strip()]
+    agent_names = {
+      item.get("agent_id"): item.get("name") or item.get("hostname") or item.get("agent_id")
+      for item in agents.values()
+    }
     export_jobs[job] = {"agents": {}, "expect": len(agent_ids), "replied": 0, "files": 0,
+              "no_files": 0, "failed": 0, "no_file_agents": [], "failed_agents": [],
+              "expected_agents": [], "responded_agents": set(), "agent_names": agent_names,
                         "errors": [], "created": time.time(), "label": label,
                         "pats": pats, "pats_not": bool(data.get("pats_not")),
                         "unfiltered": [], "kept": None}
@@ -1110,7 +1133,7 @@ def handle_request_export(data):
         }, request.sid)
         if rid:
             sent += 1
-            export_reqs[rid] = job
+            export_jobs[job]["expected_agents"].append(aid)
     export_jobs[job]["expect"] = sent
     emit("export_started", {"job": job, "expect": sent})
 
@@ -4621,9 +4644,26 @@ async function rfRunExport(o) {
   while (Date.now() - t0 < 20 * 60 * 1000) {
     await _sleep(1200);
     try { st = await (await fetch('/export-status/' + job.job)).json(); } catch (e) { continue; }
-    setMsg(`ตอบแล้ว ${st.replied}/${st.expect} เครื่อง · มีไฟล์ ${st.done} เครื่อง · ${st.files.toLocaleString()} ไฟล์ · ${(st.bytes / 1048576).toFixed(1)} MB`,
+    setMsg(`ตอบ ${st.replied}/${st.expect} · ได้ ZIP ${st.done} · ไม่มีไฟล์ ${st.no_files || 0} · ผิดพลาด ${st.failed == null ? (st.errors || []).length : st.failed} · รอ ${st.pending == null ? Math.max(0, st.expect - st.replied) : st.pending} · ${st.files.toLocaleString()} ไฟล์`,
            st.expect ? (st.replied / st.expect) * 90 : 0);
     if (st.finished) break;
+  }
+
+  if (st && !st.finished) {
+    const pending = st.pending == null ? Math.max(0, st.expect - st.replied) : st.pending;
+    const pendingNames = (st.pending_agents || []).join(', ');
+    setMsg(`ยังโหลดไม่ครบ: ตอบ ${st.replied}/${st.expect} · ค้าง ${pending}${pendingNames ? ` (${pendingNames})` : ''} · ตรวจเครื่องแล้วลองใหม่`, 90);
+    toast(`ยังได้คำตอบไม่ครบ ${st.expect} เครื่อง จึงไม่สร้าง ZIP ที่ข้อมูลขาด`, 'error');
+    if (btn) btn.disabled = false;
+    return;
+  }
+
+  if (st && st.failed) {
+    const failedNames = (st.failed_agents || []).join(', ');
+    setMsg(`ตอบครบ ${st.replied}/${st.expect} แต่ ${st.failed} เครื่องผิดพลาด${failedNames ? ` (${failedNames})` : ''}: ${(st.errors || [])[0] || 'ตรวจ log ที่ server'}`, 90);
+    toast('มีเครื่องส่งออกไม่สำเร็จ จึงไม่สร้าง ZIP ที่ข้อมูลไม่ครบ', 'error');
+    if (btn) btn.disabled = false;
+    return;
   }
 
   if (!st || !st.files) {
@@ -4655,8 +4695,10 @@ async function rfRunExport(o) {
       if (st2 && typeof st2.kept === 'number') got = st2.kept;
       if (st2 && st2.unfiltered) oldList = st2.unfiltered;
     } catch (e) {}
-    setMsg(`เสร็จแล้ว · ${got.toLocaleString()} ไฟล์ · ${(blob.size / 1048576).toFixed(1)} MB`, 100);
-    toast(move ? `ย้ายออกมาแล้ว ${got} ไฟล์` : `โหลดแล้ว ${got} ไฟล์`, 'success');
+    const noFileNames = (st.no_file_agents || []).join(', ');
+    const machineSummary = `ZIP ${st.done}/${st.expect} เครื่อง${st.no_files ? ` · ไม่มีไฟล์ ${st.no_files}${noFileNames ? ` (${noFileNames})` : ''}` : ''}`;
+    setMsg(`เสร็จแล้ว · ${machineSummary} · ${got.toLocaleString()} ไฟล์ · ${(blob.size / 1048576).toFixed(1)} MB`, 100);
+    toast(move ? `ย้ายออกมาแล้ว ${got} ไฟล์ จาก ${st.done}/${st.expect} เครื่อง` : `โหลดแล้ว ${got} ไฟล์ จาก ${st.done}/${st.expect} เครื่อง`, 'success');
     if ((o.pats && o.pats.length) && oldList.length) {
       toast(`⚠️ ${oldList.length} เครื่องยังใช้ agent เก่า — server กรองให้แล้ว แต่ควรรัน start_agent.bat`, 'info');
     }
