@@ -2624,13 +2624,13 @@ function pcSelectHtml(scopeVal, onchangeExpr) {
 function countHeroesOnAgent(agentId, subpath) {
   // ยังโยน error ให้ผู้เรียกเดิมจับได้เหมือนเดิม (หน้า PES ใช้ try/catch ดักอยู่)
   return rpc(agentId, 'request_count_heroes',
-             { names: HERO_LIST, subpath: subpath || 'found-hero', base_match: 'pes' }, 0)
+             { names: HERO_LIST, subpath: subpath || 'found-hero', base_match: 'pes' }, 90000)
     .then(r => { if (r && r.error) throw new Error(r.error); return r; });
 }
 
 // นับไฟล์ที่เหลือในโฟลเดอร์ pes/input-id ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
 function countInputIdOnAgent(agentId) {
-  return rpc(agentId, 'request_list_ids', { subpath: 'input-id', base_match: 'pes' }, 0);
+  return rpc(agentId, 'request_list_ids', { subpath: 'input-id', base_match: 'pes' }, 90000);
 }
 
 // dashboard แบบนับไฟล์ตามชื่อฮีโร่ — ใช้ทั้ง PES (found-hero) และ Backup (backup) โครงเดียวกัน ต่างแค่โฟลเดอร์
@@ -2638,6 +2638,7 @@ const DASH_KINDS = {
   hero:   { subpath: 'found-hero', label: 'found-hero', title: '⚽ Dashboard PES', reopen: 'openDashboard' },
 };
 let _dashScope = { hero: 'ALL' };
+let _heroDashRunId = 0;
 
 function openDashboard() { return openHeroDash('hero'); }
 
@@ -2659,6 +2660,7 @@ function mergeCombos(dst, src) {
 }
 
 async function openHeroDash(kind) {
+  const runId = ++_heroDashRunId;
   const cfg = DASH_KINDS[kind];
   currentAgent = null;
   document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
@@ -2673,7 +2675,11 @@ async function openHeroDash(kind) {
       ${pcSelectHtml(_dashScope[kind], `_dashScope['${kind}']=this.value; ${cfg.reopen}()`)}
       <button class="btn btn-primary" onclick="${cfg.reopen}()">🔄 รีเฟรช</button>
     </div>
-    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>
+    <h3 style="margin:16px 0 10px; font-size:14px; color:var(--text-secondary)">สถานะโหลดรายเครื่อง</h3>
+    <div class="agent-stats" id="pesLoadStatusList">${agents.map((a, i) => `
+      <div class="agent-stat"><span>🖥️ ${escHtml(a.name || a.hostname || a.agent_id)}</span>
+      <span id="pesLoadStatus_${runId}_${i}" style="color:var(--accent)">กำลังโหลด...</span></div>`).join('')}</div>`;
 
   if (!allAgents.length) {
     content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
@@ -2687,10 +2693,26 @@ async function openHeroDash(kind) {
   const perAgent = [];
 
   // ถามพร้อมกันทีละ 8 เครื่อง: found-hero, input-id และ no-hero
-  const pesRes = await pMap(agents, a =>
+  const pesRes = await pMap(agents, (a, ai) =>
     Promise.all([countHeroesOnAgent(a.agent_id, cfg.subpath), countInputIdOnAgent(a.agent_id),
-                 countFolderOnAgent(a.agent_id, 'no-hero', 'pes')])
-      .then(v => ({ ok: v }), e => ({ err: e })));
+                 rpc(a.agent_id, 'request_list_ids', { subpath: 'no-hero', base_match: 'pes' }, 90000)])
+      .then(v => {
+        const errors = v.filter(r => r && r.error).map(r => r.error);
+        const node = document.getElementById(`pesLoadStatus_${runId}_${ai}`);
+        if (node && runId === _heroDashRunId) {
+          node.textContent = errors.length ? `โหลดบางส่วน: ${errors.join(' / ')}` : 'โหลดสำเร็จ';
+          node.style.color = errors.length ? 'var(--warning)' : 'var(--success)';
+        }
+        return { ok: v, errors };
+      }, e => {
+        const node = document.getElementById(`pesLoadStatus_${runId}_${ai}`);
+        if (node && runId === _heroDashRunId) {
+          node.textContent = `โหลดไม่สำเร็จ: ${String(e.message || e)}`;
+          node.style.color = 'var(--danger)';
+        }
+        return { err: e };
+      }));
+  if (runId !== _heroDashRunId) return;
   let noHeroTotal = 0;
   for (let ai = 0; ai < agents.length; ai++) {
     const a = agents[ai];
@@ -2707,6 +2729,7 @@ async function openHeroDash(kind) {
         inputId: (ir && typeof ir.total === 'number') ? ir.total : null,
         inputExists: ir ? ir.exists : undefined,
         noHeroCount,
+        loadWarning: pesRes[ai].errors.join(' / '),
       });
       mergeCombos(comboTotals, res.combos);
       // แยกตามโฟลเดอร์ย่อย (hero1 / hero2 / ...) เอาไว้โชว์ว่าไฟล์อยู่โฟลเดอร์ไหน
@@ -2811,6 +2834,7 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
         + (p.noHeroCount == null ? '<span style="color:var(--text-dim)">-</span>'
                  : '<b style="color:var(--warning)">' + p.noHeroCount.toLocaleString() + '</b> ไฟล์')
         + '</span>';
+      if (p.loadWarning) right += '<span style="color:var(--warning); margin-left:10px" title="' + escHtml(p.loadWarning) + '">⚠️ โหลดบางส่วน</span>';
     }
     return '<div class="agent-stat"><span>🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
   }).join('');
@@ -7935,7 +7959,7 @@ function cssEsc(s) { return String(s).replace(/["\\]/g, '\\$&'); }
 //  SOCKET CONNECTION
 // ═══════════════════════════════════════════════════════════
 function initSocket() {
-  socket = io({ transports: ['websocket', 'polling'] });
+  socket = io({ transports: ['polling', 'websocket'] });
 
   socket.on('connect', () => {
     socket.emit('web_register', {});
