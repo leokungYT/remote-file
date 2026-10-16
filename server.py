@@ -540,6 +540,21 @@ def handle_list_ids(data):
         _emit_sent(None, data, "offline")
 
 
+@socketio.on("request_count_folder")
+def handle_request_count_folder(data):
+    """ขอจำนวนรายการในโฟลเดอร์โดยไม่ขอรายชื่อ/path ที่หน้า dashboard ไม่ได้ใช้"""
+    aid = data["agent_id"]
+    req_id = send_to_agent(aid, "count_folder", {
+        "subpath": data.get("subpath", ""),
+        "base_match": data.get("base_match", "pes"),
+    }, request.sid)
+    if req_id:
+        _emit_sent(req_id, data)
+    else:
+        emit("error", {"message": f"Agent '{aid}' is offline"})
+        _emit_sent(None, data, "offline")
+
+
 @socketio.on("request_rename")
 def handle_rename(data):
     """เปลี่ยนชื่อไฟล์ในเครื่องลูก"""
@@ -2630,7 +2645,16 @@ function countHeroesOnAgent(agentId, subpath) {
 
 // นับไฟล์ที่เหลือในโฟลเดอร์ pes/input-id ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
 function countInputIdOnAgent(agentId) {
-  return rpc(agentId, 'request_list_ids', { subpath: 'input-id', base_match: 'pes' }, 90000);
+  return countPesFolderOnAgent(agentId, 'input-id');
+}
+
+function countPesFolderOnAgent(agentId, subpath) {
+  const agent = (agentsData || []).find(a => a.agent_id === agentId);
+  const payload = { subpath: subpath, base_match: 'pes' };
+  if (agent && (agent.caps || []).includes('count_folder_summary')) {
+    return rpc(agentId, 'request_count_folder', payload, 90000);
+  }
+  return rpc(agentId, 'request_list_ids', payload, 90000);
 }
 
 // dashboard แบบนับไฟล์ตามชื่อฮีโร่ — ใช้ทั้ง PES (found-hero) และ Backup (backup) โครงเดียวกัน ต่างแค่โฟลเดอร์
@@ -2690,47 +2714,46 @@ async function openHeroDash(kind) {
   const folderTotals = {};
   const pesGroupCombos = {}, pesPerAgent = [];
   let grandTotal = 0, onlineCount = 0, matchedTotal = 0;
-  const perAgent = [];
-
-  // ถามพร้อมกันทีละ 8 เครื่อง: found-hero, input-id และ no-hero
-  const pesRes = await pMap(agents, (a, ai) =>
-    Promise.all([countHeroesOnAgent(a.agent_id, cfg.subpath), countInputIdOnAgent(a.agent_id),
-                 rpc(a.agent_id, 'request_list_ids', { subpath: 'no-hero', base_match: 'pes' }, 90000)])
-      .then(v => {
-        const errors = v.filter(r => r && r.error).map(r => r.error);
-        const node = document.getElementById(`pesLoadStatus_${runId}_${ai}`);
-        if (node && runId === _heroDashRunId) {
-          node.textContent = errors.length ? `โหลดบางส่วน: ${errors.join(' / ')}` : 'โหลดสำเร็จ';
-          node.style.color = errors.length ? 'var(--warning)' : 'var(--success)';
-        }
-        return { ok: v, errors };
-      }, e => {
-        const node = document.getElementById(`pesLoadStatus_${runId}_${ai}`);
-        if (node && runId === _heroDashRunId) {
-          node.textContent = `โหลดไม่สำเร็จ: ${String(e.message || e)}`;
-          node.style.color = 'var(--danger)';
-        }
-        return { err: e };
-      }));
-  if (runId !== _heroDashRunId) return;
+  const perAgent = new Array(agents.length);
+  const loadStates = agents.map(a => ({
+    name: a.name || a.hostname || a.agent_id,
+    state: 'loading',
+    text: 'กำลังโหลด...',
+  }));
   let noHeroTotal = 0;
-  for (let ai = 0; ai < agents.length; ai++) {
-    const a = agents[ai];
+  const renderProgress = () => {
+    if (runId !== _heroDashRunId) return;
+    _pesCache = { groupCombos: pesGroupCombos, groupFiles: folderTotals, perAgent: pesPerAgent };
+    renderHeroDash(kind, comboTotals, grandTotal, perAgent.filter(Boolean), agents.length,
+                   onlineCount, folderTotals, matchedTotal, noHeroTotal, loadStates);
+  };
+  renderProgress();
+
+  // ส่งคำขอพร้อมกันและแสดงผลของแต่ละเครื่องทันทีที่เครื่องนั้นตอบ ไม่รอเครื่องที่ช้าที่สุด
+  await Promise.all(agents.map(async (a, ai) => {
     try {
-      if (pesRes[ai].err) throw pesRes[ai].err;
-      const [res, ir, nr] = pesRes[ai].ok;
+      const [res, ir, nr] = await Promise.all([
+        countHeroesOnAgent(a.agent_id, cfg.subpath),
+        countInputIdOnAgent(a.agent_id),
+        countPesFolderOnAgent(a.agent_id, 'no-hero'),
+      ]);
+      const errors = [res, ir, nr].filter(r => r && r.error).map(r => r.error);
+      loadStates[ai].state = errors.length ? (errors.length === 3 ? 'error' : 'warning') : 'success';
+      loadStates[ai].text = errors.length
+        ? `${errors.length === 3 ? 'โหลดไม่สำเร็จ' : 'โหลดบางส่วน'}: ${errors.join(' / ')}`
+        : 'โหลดสำเร็จ';
       onlineCount++;
       grandTotal += res.total_files || 0;
       const noHeroCount = nr && !nr.error && typeof nr.total === 'number' ? nr.total : null;
       if (noHeroCount != null) noHeroTotal += noHeroCount;
-      perAgent.push({
+      perAgent[ai] = {
         name: a.name || a.hostname || a.agent_id,
         total: res.total_files || 0, exists: res.exists,
         inputId: (ir && typeof ir.total === 'number') ? ir.total : null,
         inputExists: ir ? ir.exists : undefined,
         noHeroCount,
-        loadWarning: pesRes[ai].errors.join(' / '),
-      });
+        loadWarning: errors.join(' / '),
+      };
       mergeCombos(comboTotals, res.combos);
       // แยกตามโฟลเดอร์ย่อย (hero1 / hero2 / ...) เอาไว้โชว์ว่าไฟล์อยู่โฟลเดอร์ไหน
       const gt = res.group_totals || {};
@@ -2743,13 +2766,15 @@ async function openHeroDash(kind) {
         gc[g] = mergeCombos({}, gcRaw[g]);                       // ตัดเลขนำหน้าในชั้นโฟลเดอร์ด้วย
         mergeCombos(pesGroupCombos[g] || (pesGroupCombos[g] = {}), gcRaw[g]);
       }
-      pesPerAgent.push({ name: a.name || a.hostname || a.agent_id, byGroup: gc });
+      pesPerAgent[ai] = { name: a.name || a.hostname || a.agent_id, byGroup: gc };
     } catch (e) {
-      perAgent.push({ name: a.name || a.hostname || a.agent_id, error: String(e.message || e) });
+      const message = String(e.message || e);
+      loadStates[ai].state = 'error';
+      loadStates[ai].text = `โหลดไม่สำเร็จ: ${message}`;
+      perAgent[ai] = { name: a.name || a.hostname || a.agent_id, error: message };
     }
-  }
-  _pesCache = { groupCombos: pesGroupCombos, groupFiles: folderTotals, perAgent: pesPerAgent };
-  renderHeroDash(kind, comboTotals, grandTotal, perAgent, agents.length, onlineCount, folderTotals, matchedTotal, noHeroTotal);
+    renderProgress();
+  }));
 }
 
 function filterHeroCards(q) {
@@ -2764,7 +2789,7 @@ function filterHeroCards(q) {
   if (noRes) noRes.style.display = shown === 0 ? '' : 'none';
 }
 
-function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, onlineCount, folderTotals, matchedTotal, noHeroTotal) {
+function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, onlineCount, folderTotals, matchedTotal, noHeroTotal, loadStates = []) {
   const cfg = DASH_KINDS[kind];
   const content = document.getElementById('contentArea');
   const sorted = Object.keys(comboTotals)
@@ -2801,7 +2826,7 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
   _pesFolders = folderKeys.filter(g => g);        // ชื่อโฟลเดอร์จริง (ตัดชั้นนอกออก)
   _pesFolderFiles = {};
   folderKeys.forEach(g => { _pesFolderFiles[g] = fT[g] || 0; });
-  if (!_pesPick.size) _pesFolders.forEach(g => _pesPick.add(g));   // ครั้งแรกติ๊กให้หมด
+  if (!_pesPickTouched) _pesFolders.forEach(g => _pesPick.add(g));   // เลือกโฟลเดอร์ใหม่ที่ทยอยโหลดเข้ามาจนกว่าผู้ใช้เลือกเอง
   const folderCards = folderKeys.map(g => {
     const nm = g || 'ชั้นนอก';
     const on = !g || _pesPick.has(g);
@@ -2838,6 +2863,13 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
     }
     return '<div class="agent-stat"><span>🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
   }).join('');
+  const loadDone = loadStates.filter(s => s.state !== 'loading').length;
+  const loadStatusRows = loadStates.map(s => {
+    const color = s.state === 'success' ? 'var(--success)'
+      : s.state === 'error' ? 'var(--danger)'
+      : s.state === 'warning' ? 'var(--warning)' : 'var(--accent)';
+    return `<div class="agent-stat"><span>🖥️ ${escHtml(s.name)}</span><span style="color:${color}">${escHtml(s.text)}</span></div>`;
+  }).join('');
 
   content.innerHTML = `
     <div class="toolbar">
@@ -2855,6 +2887,7 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
       <div class="stat-tile"><div class="stat-label">ไฟล์ no-hero รวม</div><div class="stat-val" style="color:var(--warning)">${noHeroTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
     </div>
+    ${loadStates.length ? `<h3 style="margin:14px 0 8px; font-size:14px; color:var(--text-secondary)">สถานะโหลดรายเครื่อง — ${loadDone}/${loadStates.length} เสร็จ</h3><div class="agent-stats">${loadStatusRows}</div>` : ''}
     <div class="pick-panel" style="margin:0 0 18px">
       <div class="pick-head" style="margin-bottom:0">
         <span class="pick-title">🚫 ไฟล์ใน pes/no-hero <span style="color:var(--text-dim); font-weight:400">— ${noHeroTotal.toLocaleString()} ไฟล์ จากเครื่องที่เลือก</span></span>
@@ -2919,11 +2952,13 @@ function pesExportNoHero() {
 
 // ── ติ๊กเลือกโฟลเดอร์ (hero1/hero2/…) แล้วโหลดเฉพาะที่ติ๊ก ──
 function pesTogglePick(g) {
+  _pesPickTouched = true;
   if (_pesPick.has(g)) _pesPick.delete(g); else _pesPick.add(g);
   pesSyncPick();
 }
 
 function pesPickAll(on) {
+  _pesPickTouched = true;
   _pesPick.clear();
   if (on) _pesFolders.forEach(g => _pesPick.add(g));
   pesSyncPick();
@@ -4368,6 +4403,7 @@ let _pesCache = null;
 let _pesFolders = [];        // ชื่อโฟลเดอร์ใน found-hero (hero1/hero2/…)
 let _pesFolderFiles = {};    // จำนวนไฟล์ของแต่ละโฟลเดอร์ (ไว้โชว์บนปุ่ม)
 const _pesPick = new Set();  // โฟลเดอร์ที่ติ๊กไว้ว่าจะโหลด
+let _pesPickTouched = false;
 const DETAIL_SRC = {
   ranger: { cfg: () => RANGER_CFG, mode: 'combo', nameMode: 'name', scope: () => _rfScope,
             group: () => _rfGroup, cache: () => _rfCache, unit: 'ชุด' },

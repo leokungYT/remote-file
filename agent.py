@@ -509,6 +509,8 @@ def _dispatch_command(data):
             handle_delete_many(req_id, payload)
         elif action == "count_heroes":
             handle_count_heroes(req_id, payload)
+        elif action == "count_folder":
+            handle_count_folder(req_id, payload)
         elif action == "count_prefix_ids":
             handle_count_prefix_ids(req_id, payload)
         elif action == "export_folder":
@@ -589,7 +591,7 @@ def _make_client(url):
             "peer_port": PEER_PORT,
             "backups": _peer_cached_files(),
             # ความสามารถที่ agent รุ่นนี้มี — เว็บเช็คก่อนสั่งงานที่ agent เก่าทำไม่ได้
-            "caps": ["export_pats"],
+            "caps": ["export_pats", "count_folder_summary"],
         })
 
     @client.event
@@ -1874,6 +1876,30 @@ def handle_list_ids(req_id, data):
         return
 
     _reply_ids(req_id, os.path.join(base, subpath))
+
+
+def handle_count_folder(req_id, data):
+    """นับรายการที่มองเห็นในโฟลเดอร์ โดยไม่ส่งชื่อและ full path กลับไป"""
+    subpath = str(data.get("subpath", "")).strip()
+    match = (data.get("base_match") or "").strip().lower()
+    base = _resolve_game_base(match)
+    if not base:
+        return send_response(req_id, {"success": True, "total": 0, "folder": "", "exists": False})
+    if not subpath or os.path.isabs(subpath):
+        return send_response(req_id, {"error": "โฟลเดอร์ไม่ถูกต้อง"})
+    base = os.path.abspath(base)
+    folder = os.path.abspath(os.path.join(base, subpath))
+    try:
+        if os.path.commonpath((base, folder)).lower() != base.lower() or not is_path_allowed(folder):
+            return send_response(req_id, {"error": "โฟลเดอร์อยู่นอกพาธที่อนุญาต"})
+    except ValueError:
+        return send_response(req_id, {"error": "โฟลเดอร์ไม่ถูกต้อง"})
+    exists = os.path.isdir(folder)
+    try:
+        total = sum(1 for entry in os.scandir(folder) if not entry.name.startswith(".")) if exists else 0
+    except OSError as e:
+        return send_response(req_id, {"error": str(e)})
+    send_response(req_id, {"success": True, "total": total, "folder": folder, "exists": exists})
 
 
 def handle_clear_input(req_id, data):
