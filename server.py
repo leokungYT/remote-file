@@ -894,13 +894,22 @@ def _pat_norm(x):
     return re.sub(r"\s+", "", str(x)).lower()
 
 
-def _pats_keep(name, pats, pats_not):
-    """ชื่อไฟล์นี้ผ่านตัวกรองไหม (pats ว่าง = เอาทุกไฟล์)
-       กรองที่ชื่อไฟล์ล้วน ไม่เอาชื่อโฟลเดอร์มาปน เดี๋ยวโฟลเดอร์ชื่อมี [7=7] จะพาไฟล์อื่นติดมา"""
-    if not pats:
+def _pats_keep(name, pats, pats_not, pats_re=None):
+    """ชื่อไฟล์นี้ผ่านตัวกรองไหม (ไม่มีตัวกรอง = เอาทุกไฟล์)
+       กรองที่ชื่อไฟล์ล้วน ไม่เอาชื่อโฟลเดอร์มาปน เดี๋ยวโฟลเดอร์ชื่อมี [7=7] จะพาไฟล์อื่นติดมา
+       pats_re ใช้ตอน substring ไม่แม่นพอ เช่น "stage30" จะไปตรงกับ "stage300" ด้วย"""
+    if not pats and not pats_re:
         return True
     base = _pat_norm(str(name).replace("\\", "/").rsplit("/", 1)[-1])
-    hit = any(p in base for p in pats)
+    hit = any(p in base for p in (pats or []))
+    if not hit and pats_re:
+        for rx in pats_re:
+            try:
+                if re.search(rx, base, re.I):
+                    hit = True
+                    break
+            except Exception:
+                pass
     return (not hit) if pats_not else hit
 
 
@@ -968,6 +977,7 @@ def export_download(job):
         return ("ไม่พบงาน export นี้ (อาจหมดอายุแล้ว)", 404)
 
     pats = info.get("pats") or []
+    pats_re = info.get("pats_re") or []
     pats_not = bool(info.get("pats_not"))
     merged = os.path.join(d, "_merged.zip")
     if not os.path.isfile(merged):
@@ -982,7 +992,7 @@ def export_download(job):
                                 continue
                             # กรองซ้ำที่ server — เครื่องที่ยังใช้ agent เก่าส่งมาทั้งโฟลเดอร์
                             # ไฟล์ที่ไม่ตรงแบบที่เลือกจะไม่หลุดเข้า zip ที่โหลด
-                            if not _pats_keep(item.filename, pats, pats_not):
+                            if not _pats_keep(item.filename, pats, pats_not, pats_re):
                                 continue
                             kept += 1
                             name = item.filename
@@ -1006,7 +1016,7 @@ def export_download(job):
                     except Exception:
                         pass
         info["kept"] = kept
-        if pats:
+        if pats or pats_re:
             logger.info(f"📦 export {job}: กรองแล้วเหลือ {kept} ไฟล์ "
                         f"(pats={pats}{' NOT' if pats_not else ''})")
     label = info.get("label") or "export"
@@ -1121,7 +1131,8 @@ def handle_request_export(data):
               "no_files": 0, "failed": 0, "no_file_agents": [], "failed_agents": [],
               "expected_agents": [], "responded_agents": set(), "agent_names": agent_names,
                         "errors": [], "created": time.time(), "label": label,
-                        "pats": pats, "pats_not": bool(data.get("pats_not")),
+                        "pats": pats, "pats_re": [str(x) for x in (data.get("pats_re") or []) if str(x).strip()],
+                        "pats_not": bool(data.get("pats_not")),
                         "unfiltered": [], "kept": None}
     os.makedirs(_export_job_dir(job), exist_ok=True)
     _export_cleanup()
@@ -1139,6 +1150,7 @@ def handle_request_export(data):
             "match": data.get("match", "only"),
             "submode": data.get("submode", "combo"),
             "pats": data.get("pats") or [],
+            "pats_re": data.get("pats_re") or [],
             "pats_not": bool(data.get("pats_not")),
             "move": bool(data.get("move")),
             "job": job,
@@ -2535,6 +2547,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openCoinDashboard()" title="ไฟล์ .dat ใน pes/check-coin แยกตามเลข [900] ... รายเครื่อง + โหลด .zip">🪙 check-coin</button>
     <button class="btn" onclick="openLoginSuccessDashboard()" title="ไฟล์ใน main/login-success รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">✅ login-success</button>
     <button class="btn" onclick="openFastRandomDashboard()">🎲 fast-random</button>
+    <button class="btn" onclick="openPlayDashboard()" title="ไฟล์ .xml ใน main\\play ของ Line Ranger แยกตามเลข stage (30/100/150) + โหลด .zip">🎮 play-stage</button>
     <button class="btn" onclick="openNoHeroDashboard()" title="ไฟล์ใน pes/no-hero รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">🚫 no-hero</button>
     <button class="btn" onclick="openBottiketDashboard()">🎫 Dashboard bot-tiket</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
@@ -3149,6 +3162,187 @@ async function pMap(items, fn, limit) {
 
 function countFolderOnAgent(agentId, subpath, base) {
   return rpc(agentId, 'request_list_ids', { subpath: subpath, base_match: base }, 0);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Dashboard play-stage — ไฟล์ .xml ของ Line Ranger ใน main\<โฟลเดอร์>
+//  แยกตามเลข stage ในชื่อไฟล์ (play-stage30 / play-stage100 / play-stage150 ...)
+//  ชื่อโฟลเดอร์พิมพ์เองได้ในหน้า เผื่อแต่ละชุดตั้งชื่อไม่เหมือนกัน
+// ═══════════════════════════════════════════════════════════
+const PLAY_FOLDER_KEY = 'playFolder';
+let _playScope = 'ALL';
+let _playPicked = 'ALL';      // เลข stage ที่เลือกกรอง
+let _playData = null;
+let _playFolder = 'play';
+try { _playFolder = localStorage.getItem(PLAY_FOLDER_KEY) || 'play'; } catch (e) {}
+
+// ดึงเลข stage จากชื่อไฟล์ — รับได้หลายแบบ: play-stage30, stage 30, [30], ..._30.xml
+function _playStageOf(name) {
+  const n = String(name || '');
+  let m = n.match(/stage[\s_-]*(\d+)/i);          // play-stage30  (แบบที่ใช้จริง)
+  if (!m) m = n.match(/\[\s*(\d+)\s*\]/);          // [30]
+  if (!m) m = n.match(/(?:^|[^\d])(\d+)(?:[^\d]*)$/);  // เลขท้ายชื่อไฟล์
+  return m ? String(Number(m[1])) : null;
+}
+// regex ที่ใช้สั่ง agent กรองไฟล์ตอนโหลด zip — ต้องกัน stage30 ไปชน stage300
+function _playRe(stage) { return 'stage[\\s_-]*0*' + stage + '(?!\\d)'; }
+
+function _playCmp(a, b) {      // เลขน้อยไปมาก, 'อื่นๆ' ท้ายสุด
+  if (a === 'อื่นๆ') return 1;
+  if (b === 'อื่นๆ') return -1;
+  return Number(a) - Number(b);
+}
+
+function _playSetFolder(v) {
+  _playFolder = (v || '').trim().replace(/^[\\/]+|[\\/]+$/g, '') || 'play';
+  try { localStorage.setItem(PLAY_FOLDER_KEY, _playFolder); } catch (e) {}
+  openPlayDashboard();
+}
+
+async function openPlayDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const allAgents = agentsData || [];
+  if (_playScope !== 'ALL' && !allAgents.some(a => a.agent_id === _playScope)) _playScope = 'ALL';
+  const agents = _playScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _playScope);
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🎮 Dashboard play-stage — main\\${escHtml(_playFolder)}</h2>
+      ${pcSelectHtml(_playScope, '_playScope=this.value; openPlayDashboard()')}
+      <button class="btn btn-primary" onclick="openPlayDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง (main\\${escHtml(_playFolder)})...</div>`;
+  if (!allAgents.length) { content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>'; return; }
+
+  const perAgent = [];
+  const stageTotal = {};
+  let grandTotal = 0, onlineCount = 0;
+  const res = await pMap(agents, a => countFolderOnAgent(a.agent_id, _playFolder, 'main'));
+  agents.forEach((a, i) => {
+    const name = a.name || a.hostname || a.agent_id;
+    const r = res[i];
+    if (r && r.error) { perAgent.push({ name, error: r.error }); return; }
+    onlineCount++;
+    if (r && r.exists === false) { perAgent.push({ name, exists: false, stages: {}, total: 0 }); return; }
+    const stages = {};
+    let total = 0;
+    (r.entries || []).forEach(full => {
+      const fn = String(full).split(/[\\/]/).pop();
+      if (!/\.xml$/i.test(fn)) return;                 // เอาเฉพาะ .xml ตามที่ขอ
+      const st = _playStageOf(fn) || 'อื่นๆ';
+      stages[st] = (stages[st] || 0) + 1;
+      stageTotal[st] = (stageTotal[st] || 0) + 1;
+      total++; grandTotal++;
+    });
+    perAgent.push({ name, stages, total });
+  });
+  _playData = { perAgent, stageTotal, totalMachines: agents.length, onlineCount, grandTotal };
+  _renderPlay();
+}
+
+function _renderPlay() {
+  if (!_playData) return;
+  const { perAgent, stageTotal, totalMachines, onlineCount, grandTotal } = _playData;
+  const content = document.getElementById('contentArea');
+  const stages = Object.keys(stageTotal).sort(_playCmp);
+  const picked = _playPicked;
+  const pickedTotal = picked === 'ALL' ? grandTotal : (stageTotal[picked] || 0);
+
+  const chip = (c, n, on) => `<div class="stat-tile" style="cursor:pointer;${on ? ' border-color:var(--accent); box-shadow:0 0 0 1px var(--accent)' : ''}" onclick="_playPicked='${escAttr(c)}'; _renderPlay()">
+      <div class="stat-label">${escHtml(c === 'ALL' ? 'ทุก stage' : 'stage ' + c)}</div>
+      <div class="stat-val" style="color:var(--accent)">${n.toLocaleString()}</div></div>`;
+  const chips = chip('ALL', grandTotal, picked === 'ALL') + stages.map(c => chip(c, stageTotal[c], picked === c)).join('');
+
+  const cards = perAgent.map(p => {
+    if (p.error) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--danger); font-size:13px">${escHtml(p.error)}</div></div>`;
+    if (p.exists === false) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--warning)">—</div><div class="mid-label">ไม่พบ ${escHtml(_playFolder)}</div></div>`;
+    if (picked === 'ALL') {
+      const lines = Object.keys(p.stages).sort(_playCmp).map(c =>
+        `<div style="display:flex; justify-content:space-between; font-size:12px; padding:1px 0"><span>${escHtml(c === 'อื่นๆ' ? c : 'stage ' + c)}</span><b style="color:var(--accent)">${p.stages[c]}</b></div>`).join('')
+        || '<div style="font-size:12px; color:var(--text-dim)">ว่าง</div>';
+      return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)} <span style="color:var(--text-dim); font-weight:400">(${p.total})</span></div><div style="margin-top:6px">${lines}</div></div>`;
+    }
+    const c = p.stages[picked] || 0;
+    return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:${c === 0 ? 'var(--text-dim)' : 'var(--accent)'}">${c}</div><div class="mid-label">stage ${escHtml(picked)}</div></div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🎮 play-stage — main\\${escHtml(_playFolder)}${picked !== 'ALL' ? ' · <b>stage ' + escHtml(picked) + '</b>' : ''}</h2>
+      <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap" title="ชื่อโฟลเดอร์ใต้ main ที่เก็บไฟล์ .xml">
+        📁 main\\<input type="text" id="playFolderIn" value="${escAttr(_playFolder)}" style="width:130px; padding:6px 8px"
+          onchange="_playSetFolder(this.value)" onkeydown="if(event.key==='Enter')_playSetFolder(this.value)"></label>
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาเครื่อง..." oninput="filterMidCards(this.value)">
+      ${pcSelectHtml(_playScope, '_playScope=this.value; openPlayDashboard()')}
+      <button class="btn btn-primary" onclick="openPlayDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
+      <div class="stat-tile"><div class="stat-label">ออนไลน์</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ .xml ทั้งหมด</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
+    </div>
+    <h3 style="margin:14px 0 8px; font-size:13px; color:var(--text-secondary)">เลือก stage (คลิกกรอง)</h3>
+    <div class="stat-row" style="flex-wrap:wrap; gap:8px">${chips}</div>
+    <h3 style="margin:18px 0 8px; font-size:13px; color:var(--text-secondary)">รายเครื่อง</h3>
+    <div class="machine-grid">${cards}</div>
+    <div id="midNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบเครื่อง</div>
+
+    <div class="pick-panel" style="margin-top:18px">
+      <div class="pick-head">
+        <span class="pick-title">📦 โหลด${picked === 'ALL' ? 'ทุก stage' : ' <b>stage ' + escHtml(picked) + '</b>'} เป็น .zip ไฟล์เดียว
+          <span style="color:var(--text-dim); font-weight:400">— รวมจาก ${onlineCount} เครื่อง · ${pickedTotal.toLocaleString()} ไฟล์</span></span>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer">
+          <input type="checkbox" id="pyMove" style="width:auto">
+          <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
+        </label>
+        <button class="btn btn-primary" id="pyBtn" onclick="_playExport()" ${pickedTotal ? '' : 'disabled'}>
+          📦 โหลด${picked === 'ALL' ? 'ทั้งหมด' : ' stage ' + escHtml(picked)} (${pickedTotal.toLocaleString()} ไฟล์)</button>
+        <button class="btn" id="pyMoveBtn" style="border-color:var(--danger); color:var(--danger)" onclick="_playExport(true)" ${pickedTotal ? '' : 'disabled'}
+          title="zip แล้วลบต้นทางทุกเครื่องหลังส่งขึ้น server สำเร็จ (ถามยืนยันก่อน)">📤 ย้ายออกมา</button>
+      </div>
+      <div id="pyProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="pyMsg" style="color:var(--text-secondary)"></span>
+          <span id="pyPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="pyBar" style="width:0%"></div></div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        คลิก stage ด้านบนเพื่อเลือกว่าจะโหลดอันไหน · กรองด้วย regex ที่กัน stage30 ไปชน stage300
+      </div>
+    </div>`;
+}
+
+// 📦 โหลดไฟล์ .xml ตาม stage ที่เลือก
+function _playExport(forceMove) {
+  if (!_playData) return;
+  const picked = _playPicked;
+  const all = Object.keys(_playData.stageTotal || {}).filter(x => x !== 'อื่นๆ');
+  let re = null, patsNot = false, tag = 'all';
+  if (picked === 'อื่นๆ') {
+    re = all.map(_playRe);       // ไม่ตรง stage ไหนเลย
+    patsNot = true;
+    tag = 'other';
+  } else if (picked !== 'ALL') {
+    re = [_playRe(picked)];
+    tag = 'stage' + picked;
+  }
+  const move = forceMove === true ? true : !!(document.getElementById('pyMove') || {}).checked;
+  const label = 'play_' + _playFolder + '_' + tag;
+  return rfRunExport({
+    mode: 'flat', key: '', move: move,
+    subpath: _playFolder, base: 'main',
+    scope: _playScope,
+    pats_re: re, pats_not: patsNot,
+    label: (move ? 'move_' : '') + label,
+    fileName: (move ? 'move_' : '') + label + '.zip',
+    confirmText: `⚠️ ย้ายไฟล์ ${picked === 'ALL' ? 'ทั้งหมด' : 'stage ' + picked} ใน main\\${_playFolder} ออกจากเครื่องที่เลือก ?`,
+    ui: { btn: forceMove === true ? 'pyMoveBtn' : 'pyBtn', prog: 'pyProg', msg: 'pyMsg', bar: 'pyBar', pct: 'pyPct' },
+  });
 }
 
 // ═══ Dashboard เช็ค 7 วัน (โฟลเดอร์ 7day-check) — นับตามแบบ [7=7],[7=4]... ═══
@@ -4609,7 +4803,8 @@ async function rfRunExport(o) {
   // ตัวกรองชื่อไฟล์ทำงานที่ agent — เครื่องที่ยังใช้ agent เก่าจะส่งมาทั้งโฟลเดอร์
   // โหลด (คัดลอก) ยังปลอดภัย เพราะ server กรองให้อีกชั้นตอนรวม zip
   // แต่ "ย้ายออกมา" อันตราย: agent เก่าจะลบทั้งโฟลเดอร์ ไม่ใช่แค่แบบที่เลือก → บล็อกไว้
-  const oldAgents = (o.pats && o.pats.length)
+  const hasFilter = (o.pats && o.pats.length) || (o.pats_re && o.pats_re.length);
+  const oldAgents = hasFilter
     ? agents.filter(a => !((a.caps || []).includes('export_pats'))).map(a => a.name || a.hostname || a.agent_id)
     : [];
   if (move && oldAgents.length) {
@@ -4643,7 +4838,7 @@ async function rfRunExport(o) {
       group: o.group || 'ALL', mode: o.mode, key: o.key || '',
       groups: o.groups || null, names: o.names || [], match: o.match || 'only',
       submode: o.submode || 'combo',
-      pats: o.pats || null, pats_not: !!o.pats_not,
+      pats: o.pats || null, pats_re: o.pats_re || null, pats_not: !!o.pats_not,
       move: move, label: o.label,
     });
     setTimeout(() => { if (!done) resolve(null); }, 20000);
@@ -4711,7 +4906,7 @@ async function rfRunExport(o) {
     const machineSummary = `ZIP ${st.done}/${st.expect} เครื่อง${st.no_files ? ` · ไม่มีไฟล์ ${st.no_files}${noFileNames ? ` (${noFileNames})` : ''}` : ''}`;
     setMsg(`เสร็จแล้ว · ${machineSummary} · ${got.toLocaleString()} ไฟล์ · ${(blob.size / 1048576).toFixed(1)} MB`, 100);
     toast(move ? `ย้ายออกมาแล้ว ${got} ไฟล์ จาก ${st.done}/${st.expect} เครื่อง` : `โหลดแล้ว ${got} ไฟล์ จาก ${st.done}/${st.expect} เครื่อง`, 'success');
-    if ((o.pats && o.pats.length) && oldList.length) {
+    if (hasFilter && oldList.length) {
       toast(`⚠️ ${oldList.length} เครื่องยังใช้ agent เก่า — server กรองให้แล้ว แต่ควรรัน start_agent.bat`, 'info');
     }
   } catch (e) {

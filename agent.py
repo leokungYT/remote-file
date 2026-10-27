@@ -1327,14 +1327,24 @@ def _pat_norm(s):
     return re.sub(r"\s+", "", str(s)).lower()
 
 
-def _fname_ok(fn, pats, pats_not):
-    """ชื่อไฟล์นี้ผ่านตัวกรองไหม (pats ว่าง = เอาทุกไฟล์)
-       pats      : list ของคำที่ต้องมีอยู่ในชื่อไฟล์ เช่น ["[7=7]"]
-       pats_not  : True = เอาไฟล์ที่ "ไม่ตรง" คำไหนเลย (ใช้กับหมวด 'อื่นๆ')"""
-    if not pats:
+def _fname_ok(fn, pats, pats_not, pats_re=None):
+    """ชื่อไฟล์นี้ผ่านตัวกรองไหม (ไม่มีตัวกรองเลย = เอาทุกไฟล์)
+       pats      : list ของคำที่ต้องมีอยู่ในชื่อไฟล์ เช่น ["[7=7]"] (เทียบแบบ substring)
+       pats_re   : list ของ regex — ใช้ตอนที่ substring ไม่แม่นพอ
+                   เช่น "stage30" จะไปตรงกับ "stage300" ด้วย ต้องใช้ r"stage30(?!\d)"
+       pats_not  : True = เอาไฟล์ที่ "ไม่ตรง" อันไหนเลย (ใช้กับหมวด 'อื่นๆ')"""
+    if not pats and not pats_re:
         return True
     nfn = _pat_norm(fn)
-    hit = any(p in nfn for p in pats)
+    hit = any(p in nfn for p in (pats or []))
+    if not hit and pats_re:
+        for rx in pats_re:
+            try:
+                if re.search(rx, nfn, re.I):
+                    hit = True
+                    break
+            except Exception:
+                pass          # regex เสียก็ข้ามไป ไม่ทำให้ทั้งงานล้ม
     return (not hit) if pats_not else hit
 
 
@@ -1450,6 +1460,7 @@ def handle_export_folder(req_id, data):
     name_match = (data.get("match") or "only").strip().lower()
     # กรองตาม "ชื่อไฟล์" (เช่น เอาเฉพาะไฟล์ที่มี [7=7] — dashboard เช็ค 7 วัน)
     pats = [_pat_norm(x) for x in (data.get("pats") or []) if str(x).strip()]
+    pats_re = [str(x) for x in (data.get("pats_re") or []) if str(x).strip()]
     pats_not = bool(data.get("pats_not"))
 
     if not job or (mode not in ("multi", "flat") and not key):
@@ -1478,7 +1489,7 @@ def handle_export_folder(req_id, data):
                     if not combo:
                         continue
                     hit = (key in combo.split("+")) if submode == "name" else (combo == key)
-                    if hit and _fname_ok(fn, pats, pats_not):
+                    if hit and _fname_ok(fn, pats, pats_not, pats_re):
                         arc = fn if rel == "." else rel.replace("\\", "/") + "/" + fn
                         file_targets.append((arc, os.path.join(cur, fn)))
         except Exception as e:
@@ -1553,7 +1564,7 @@ def handle_export_folder(req_id, data):
                 for cur, _dirs, files in os.walk(d):
                     rel_in = os.path.relpath(cur, d)
                     for fn in files:
-                        if not _fname_ok(fn, pats, pats_not):
+                        if not _fname_ok(fn, pats, pats_not, pats_re):
                             continue
                         full = os.path.join(cur, fn)
                         arc_parts = [p for p in (set_name, fld) if p]   # flat = ไม่มีชั้นชุด/ชื่อตัว
