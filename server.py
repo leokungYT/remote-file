@@ -609,6 +609,18 @@ def handle_shutdown_req(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_reboot_pc")
+def handle_reboot_pc_req(data):
+    """รีสตาร์ท Windows ของเครื่องลูก (ส่ง cancel: true เพื่อยกเลิกภายในเวลาหน่วง)"""
+    req_id = send_to_agent(data["agent_id"], "reboot_pc",
+                           {"delay": data.get("delay"), "cancel": bool(data.get("cancel"))},
+                           request.sid)
+    if req_id:
+        _emit_sent(req_id, data)
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 @socketio.on("request_self_update")
 def handle_self_update_req(data):
     """สั่งให้ agent ดึงโค้ดใหม่จาก GitHub + รีสตาร์ทตัวเอง"""
@@ -900,13 +912,22 @@ def _pat_norm(x):
     return re.sub(r"\s+", "", str(x)).lower()
 
 
-def _pats_keep(name, pats, pats_not):
-    """ชื่อไฟล์นี้ผ่านตัวกรองไหม (pats ว่าง = เอาทุกไฟล์)
-       กรองที่ชื่อไฟล์ล้วน ไม่เอาชื่อโฟลเดอร์มาปน เดี๋ยวโฟลเดอร์ชื่อมี [7=7] จะพาไฟล์อื่นติดมา"""
-    if not pats:
+def _pats_keep(name, pats, pats_not, pats_re=None):
+    """ชื่อไฟล์นี้ผ่านตัวกรองไหม (ไม่มีตัวกรอง = เอาทุกไฟล์)
+       กรองที่ชื่อไฟล์ล้วน ไม่เอาชื่อโฟลเดอร์มาปน เดี๋ยวโฟลเดอร์ชื่อมี [7=7] จะพาไฟล์อื่นติดมา
+       pats_re ใช้ตอน substring ไม่แม่นพอ เช่น "stage30" จะไปตรงกับ "stage300" ด้วย"""
+    if not pats and not pats_re:
         return True
     base = _pat_norm(str(name).replace("\\", "/").rsplit("/", 1)[-1])
-    hit = any(p in base for p in pats)
+    hit = any(p in base for p in (pats or []))
+    if not hit and pats_re:
+        for rx in pats_re:
+            try:
+                if re.search(rx, base, re.I):
+                    hit = True
+                    break
+            except Exception:
+                pass
     return (not hit) if pats_not else hit
 
 
@@ -974,6 +995,7 @@ def export_download(job):
         return ("ไม่พบงาน export นี้ (อาจหมดอายุแล้ว)", 404)
 
     pats = info.get("pats") or []
+    pats_re = info.get("pats_re") or []
     pats_not = bool(info.get("pats_not"))
     merged = os.path.join(d, "_merged.zip")
     if not os.path.isfile(merged):
@@ -988,7 +1010,7 @@ def export_download(job):
                                 continue
                             # กรองซ้ำที่ server — เครื่องที่ยังใช้ agent เก่าส่งมาทั้งโฟลเดอร์
                             # ไฟล์ที่ไม่ตรงแบบที่เลือกจะไม่หลุดเข้า zip ที่โหลด
-                            if not _pats_keep(item.filename, pats, pats_not):
+                            if not _pats_keep(item.filename, pats, pats_not, pats_re):
                                 continue
                             kept += 1
                             name = item.filename
@@ -1012,7 +1034,7 @@ def export_download(job):
                     except Exception:
                         pass
         info["kept"] = kept
-        if pats:
+        if pats or pats_re:
             logger.info(f"📦 export {job}: กรองแล้วเหลือ {kept} ไฟล์ "
                         f"(pats={pats}{' NOT' if pats_not else ''})")
     label = info.get("label") or "export"
@@ -1127,7 +1149,8 @@ def handle_request_export(data):
               "no_files": 0, "failed": 0, "no_file_agents": [], "failed_agents": [],
               "expected_agents": [], "responded_agents": set(), "agent_names": agent_names,
                         "errors": [], "created": time.time(), "label": label,
-                        "pats": pats, "pats_not": bool(data.get("pats_not")),
+                        "pats": pats, "pats_re": [str(x) for x in (data.get("pats_re") or []) if str(x).strip()],
+                        "pats_not": bool(data.get("pats_not")),
                         "unfiltered": [], "kept": None}
     os.makedirs(_export_job_dir(job), exist_ok=True)
     _export_cleanup()
@@ -1145,6 +1168,7 @@ def handle_request_export(data):
             "match": data.get("match", "only"),
             "submode": data.get("submode", "combo"),
             "pats": data.get("pats") or [],
+            "pats_re": data.get("pats_re") or [],
             "pats_not": bool(data.get("pats_not")),
             "move": bool(data.get("move")),
             "job": job,
@@ -2541,6 +2565,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openCoinDashboard()" title="ไฟล์ .dat ใน pes/check-coin แยกตามเลข [900] ... รายเครื่อง + โหลด .zip">🪙 check-coin</button>
     <button class="btn" onclick="openLoginSuccessDashboard()" title="ไฟล์ใน main/login-success รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">✅ login-success</button>
     <button class="btn" onclick="openFastRandomDashboard()">🎲 fast-random</button>
+    <button class="btn" onclick="openPlayDashboard()" title="ไฟล์ .xml ใน main\\play ของ Line Ranger แยกตามเลข stage (30/100/150) + โหลด .zip">🎮 play-stage</button>
     <button class="btn" onclick="openNoHeroDashboard()" title="ไฟล์ใน pes/no-hero รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">🚫 no-hero</button>
     <button class="btn" onclick="openBottiketDashboard()">🎫 Dashboard bot-tiket</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
@@ -3155,6 +3180,187 @@ async function pMap(items, fn, limit) {
 
 function countFolderOnAgent(agentId, subpath, base) {
   return rpc(agentId, 'request_list_ids', { subpath: subpath, base_match: base }, 0);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Dashboard play-stage — ไฟล์ .xml ของ Line Ranger ใน main\<โฟลเดอร์>
+//  แยกตามเลข stage ในชื่อไฟล์ (play-stage30 / play-stage100 / play-stage150 ...)
+//  ชื่อโฟลเดอร์พิมพ์เองได้ในหน้า เผื่อแต่ละชุดตั้งชื่อไม่เหมือนกัน
+// ═══════════════════════════════════════════════════════════
+const PLAY_FOLDER_KEY = 'playFolder';
+let _playScope = 'ALL';
+let _playPicked = 'ALL';      // เลข stage ที่เลือกกรอง
+let _playData = null;
+let _playFolder = 'play';
+try { _playFolder = localStorage.getItem(PLAY_FOLDER_KEY) || 'play'; } catch (e) {}
+
+// ดึงเลข stage จากชื่อไฟล์ — รับได้หลายแบบ: play-stage30, stage 30, [30], ..._30.xml
+function _playStageOf(name) {
+  const n = String(name || '');
+  let m = n.match(/stage[\s_-]*(\d+)/i);          // play-stage30  (แบบที่ใช้จริง)
+  if (!m) m = n.match(/\[\s*(\d+)\s*\]/);          // [30]
+  if (!m) m = n.match(/(?:^|[^\d])(\d+)(?:[^\d]*)$/);  // เลขท้ายชื่อไฟล์
+  return m ? String(Number(m[1])) : null;
+}
+// regex ที่ใช้สั่ง agent กรองไฟล์ตอนโหลด zip — ต้องกัน stage30 ไปชน stage300
+function _playRe(stage) { return 'stage[\\s_-]*0*' + stage + '(?!\\d)'; }
+
+function _playCmp(a, b) {      // เลขน้อยไปมาก, 'อื่นๆ' ท้ายสุด
+  if (a === 'อื่นๆ') return 1;
+  if (b === 'อื่นๆ') return -1;
+  return Number(a) - Number(b);
+}
+
+function _playSetFolder(v) {
+  _playFolder = (v || '').trim().replace(/^[\\/]+|[\\/]+$/g, '') || 'play';
+  try { localStorage.setItem(PLAY_FOLDER_KEY, _playFolder); } catch (e) {}
+  openPlayDashboard();
+}
+
+async function openPlayDashboard() {
+  currentAgent = null;
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  const content = document.getElementById('contentArea');
+  const allAgents = agentsData || [];
+  if (_playScope !== 'ALL' && !allAgents.some(a => a.agent_id === _playScope)) _playScope = 'ALL';
+  const agents = _playScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _playScope);
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🎮 Dashboard play-stage — main\\${escHtml(_playFolder)}</h2>
+      ${pcSelectHtml(_playScope, '_playScope=this.value; openPlayDashboard()')}
+      <button class="btn btn-primary" onclick="openPlayDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง (main\\${escHtml(_playFolder)})...</div>`;
+  if (!allAgents.length) { content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>'; return; }
+
+  const perAgent = [];
+  const stageTotal = {};
+  let grandTotal = 0, onlineCount = 0;
+  const res = await pMap(agents, a => countFolderOnAgent(a.agent_id, _playFolder, 'main'));
+  agents.forEach((a, i) => {
+    const name = a.name || a.hostname || a.agent_id;
+    const r = res[i];
+    if (r && r.error) { perAgent.push({ name, error: r.error }); return; }
+    onlineCount++;
+    if (r && r.exists === false) { perAgent.push({ name, exists: false, stages: {}, total: 0 }); return; }
+    const stages = {};
+    let total = 0;
+    (r.entries || []).forEach(full => {
+      const fn = String(full).split(/[\\/]/).pop();
+      if (!/\.xml$/i.test(fn)) return;                 // เอาเฉพาะ .xml ตามที่ขอ
+      const st = _playStageOf(fn) || 'อื่นๆ';
+      stages[st] = (stages[st] || 0) + 1;
+      stageTotal[st] = (stageTotal[st] || 0) + 1;
+      total++; grandTotal++;
+    });
+    perAgent.push({ name, stages, total });
+  });
+  _playData = { perAgent, stageTotal, totalMachines: agents.length, onlineCount, grandTotal };
+  _renderPlay();
+}
+
+function _renderPlay() {
+  if (!_playData) return;
+  const { perAgent, stageTotal, totalMachines, onlineCount, grandTotal } = _playData;
+  const content = document.getElementById('contentArea');
+  const stages = Object.keys(stageTotal).sort(_playCmp);
+  const picked = _playPicked;
+  const pickedTotal = picked === 'ALL' ? grandTotal : (stageTotal[picked] || 0);
+
+  const chip = (c, n, on) => `<div class="stat-tile" style="cursor:pointer;${on ? ' border-color:var(--accent); box-shadow:0 0 0 1px var(--accent)' : ''}" onclick="_playPicked='${escAttr(c)}'; _renderPlay()">
+      <div class="stat-label">${escHtml(c === 'ALL' ? 'ทุก stage' : 'stage ' + c)}</div>
+      <div class="stat-val" style="color:var(--accent)">${n.toLocaleString()}</div></div>`;
+  const chips = chip('ALL', grandTotal, picked === 'ALL') + stages.map(c => chip(c, stageTotal[c], picked === c)).join('');
+
+  const cards = perAgent.map(p => {
+    if (p.error) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--danger); font-size:13px">${escHtml(p.error)}</div></div>`;
+    if (p.exists === false) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--warning)">—</div><div class="mid-label">ไม่พบ ${escHtml(_playFolder)}</div></div>`;
+    if (picked === 'ALL') {
+      const lines = Object.keys(p.stages).sort(_playCmp).map(c =>
+        `<div style="display:flex; justify-content:space-between; font-size:12px; padding:1px 0"><span>${escHtml(c === 'อื่นๆ' ? c : 'stage ' + c)}</span><b style="color:var(--accent)">${p.stages[c]}</b></div>`).join('')
+        || '<div style="font-size:12px; color:var(--text-dim)">ว่าง</div>';
+      return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)} <span style="color:var(--text-dim); font-weight:400">(${p.total})</span></div><div style="margin-top:6px">${lines}</div></div>`;
+    }
+    const c = p.stages[picked] || 0;
+    return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:${c === 0 ? 'var(--text-dim)' : 'var(--accent)'}">${c}</div><div class="mid-label">stage ${escHtml(picked)}</div></div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="toolbar">
+      <h2 style="flex:1; font-size:18px">🎮 play-stage — main\\${escHtml(_playFolder)}${picked !== 'ALL' ? ' · <b>stage ' + escHtml(picked) + '</b>' : ''}</h2>
+      <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap" title="ชื่อโฟลเดอร์ใต้ main ที่เก็บไฟล์ .xml">
+        📁 main\\<input type="text" id="playFolderIn" value="${escAttr(_playFolder)}" style="width:130px; padding:6px 8px"
+          onchange="_playSetFolder(this.value)" onkeydown="if(event.key==='Enter')_playSetFolder(this.value)"></label>
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาเครื่อง..." oninput="filterMidCards(this.value)">
+      ${pcSelectHtml(_playScope, '_playScope=this.value; openPlayDashboard()')}
+      <button class="btn btn-primary" onclick="openPlayDashboard()">🔄 รีเฟรช</button>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${totalMachines}</div></div>
+      <div class="stat-tile"><div class="stat-label">ออนไลน์</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ .xml ทั้งหมด</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
+    </div>
+    <h3 style="margin:14px 0 8px; font-size:13px; color:var(--text-secondary)">เลือก stage (คลิกกรอง)</h3>
+    <div class="stat-row" style="flex-wrap:wrap; gap:8px">${chips}</div>
+    <h3 style="margin:18px 0 8px; font-size:13px; color:var(--text-secondary)">รายเครื่อง</h3>
+    <div class="machine-grid">${cards}</div>
+    <div id="midNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบเครื่อง</div>
+
+    <div class="pick-panel" style="margin-top:18px">
+      <div class="pick-head">
+        <span class="pick-title">📦 โหลด${picked === 'ALL' ? 'ทุก stage' : ' <b>stage ' + escHtml(picked) + '</b>'} เป็น .zip ไฟล์เดียว
+          <span style="color:var(--text-dim); font-weight:400">— รวมจาก ${onlineCount} เครื่อง · ${pickedTotal.toLocaleString()} ไฟล์</span></span>
+      </div>
+      <div class="pick-head" style="margin-bottom:0">
+        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer">
+          <input type="checkbox" id="pyMove" style="width:auto">
+          <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
+        </label>
+        <button class="btn btn-primary" id="pyBtn" onclick="_playExport()" ${pickedTotal ? '' : 'disabled'}>
+          📦 โหลด${picked === 'ALL' ? 'ทั้งหมด' : ' stage ' + escHtml(picked)} (${pickedTotal.toLocaleString()} ไฟล์)</button>
+        <button class="btn" id="pyMoveBtn" style="border-color:var(--danger); color:var(--danger)" onclick="_playExport(true)" ${pickedTotal ? '' : 'disabled'}
+          title="zip แล้วลบต้นทางทุกเครื่องหลังส่งขึ้น server สำเร็จ (ถามยืนยันก่อน)">📤 ย้ายออกมา</button>
+      </div>
+      <div id="pyProg" style="display:none; margin-top:10px">
+        <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
+          <span id="pyMsg" style="color:var(--text-secondary)"></span>
+          <span id="pyPct" style="color:var(--accent); font-weight:700"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="pyBar" style="width:0%"></div></div>
+      </div>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
+        คลิก stage ด้านบนเพื่อเลือกว่าจะโหลดอันไหน · กรองด้วย regex ที่กัน stage30 ไปชน stage300
+      </div>
+    </div>`;
+}
+
+// 📦 โหลดไฟล์ .xml ตาม stage ที่เลือก
+function _playExport(forceMove) {
+  if (!_playData) return;
+  const picked = _playPicked;
+  const all = Object.keys(_playData.stageTotal || {}).filter(x => x !== 'อื่นๆ');
+  let re = null, patsNot = false, tag = 'all';
+  if (picked === 'อื่นๆ') {
+    re = all.map(_playRe);       // ไม่ตรง stage ไหนเลย
+    patsNot = true;
+    tag = 'other';
+  } else if (picked !== 'ALL') {
+    re = [_playRe(picked)];
+    tag = 'stage' + picked;
+  }
+  const move = forceMove === true ? true : !!(document.getElementById('pyMove') || {}).checked;
+  const label = 'play_' + _playFolder + '_' + tag;
+  return rfRunExport({
+    mode: 'flat', key: '', move: move,
+    subpath: _playFolder, base: 'main',
+    scope: _playScope,
+    pats_re: re, pats_not: patsNot,
+    label: (move ? 'move_' : '') + label,
+    fileName: (move ? 'move_' : '') + label + '.zip',
+    confirmText: `⚠️ ย้ายไฟล์ ${picked === 'ALL' ? 'ทั้งหมด' : 'stage ' + picked} ใน main\\${_playFolder} ออกจากเครื่องที่เลือก ?`,
+    ui: { btn: forceMove === true ? 'pyMoveBtn' : 'pyBtn', prog: 'pyProg', msg: 'pyMsg', bar: 'pyBar', pct: 'pyPct' },
+  });
 }
 
 // ═══ Dashboard เช็ค 7 วัน (โฟลเดอร์ 7day-check) — นับตามแบบ [7=7],[7=4]... ═══
@@ -4615,7 +4821,8 @@ async function rfRunExport(o) {
   // ตัวกรองชื่อไฟล์ทำงานที่ agent — เครื่องที่ยังใช้ agent เก่าจะส่งมาทั้งโฟลเดอร์
   // โหลด (คัดลอก) ยังปลอดภัย เพราะ server กรองให้อีกชั้นตอนรวม zip
   // แต่ "ย้ายออกมา" อันตราย: agent เก่าจะลบทั้งโฟลเดอร์ ไม่ใช่แค่แบบที่เลือก → บล็อกไว้
-  const oldAgents = (o.pats && o.pats.length)
+  const hasFilter = (o.pats && o.pats.length) || (o.pats_re && o.pats_re.length);
+  const oldAgents = hasFilter
     ? agents.filter(a => !((a.caps || []).includes('export_pats'))).map(a => a.name || a.hostname || a.agent_id)
     : [];
   if (move && oldAgents.length) {
@@ -4649,7 +4856,7 @@ async function rfRunExport(o) {
       group: o.group || 'ALL', mode: o.mode, key: o.key || '',
       groups: o.groups || null, names: o.names || [], match: o.match || 'only',
       submode: o.submode || 'combo',
-      pats: o.pats || null, pats_not: !!o.pats_not,
+      pats: o.pats || null, pats_re: o.pats_re || null, pats_not: !!o.pats_not,
       move: move, label: o.label,
     });
     setTimeout(() => { if (!done) resolve(null); }, 20000);
@@ -4717,7 +4924,7 @@ async function rfRunExport(o) {
     const machineSummary = `ZIP ${st.done}/${st.expect} เครื่อง${st.no_files ? ` · ไม่มีไฟล์ ${st.no_files}${noFileNames ? ` (${noFileNames})` : ''}` : ''}`;
     setMsg(`เสร็จแล้ว · ${machineSummary} · ${got.toLocaleString()} ไฟล์ · ${(blob.size / 1048576).toFixed(1)} MB`, 100);
     toast(move ? `ย้ายออกมาแล้ว ${got} ไฟล์ จาก ${st.done}/${st.expect} เครื่อง` : `โหลดแล้ว ${got} ไฟล์ จาก ${st.done}/${st.expect} เครื่อง`, 'success');
-    if ((o.pats && o.pats.length) && oldList.length) {
+    if (hasFilter && oldList.length) {
       toast(`⚠️ ${oldList.length} เครื่องยังใช้ agent เก่า — server กรองให้แล้ว แต่ควรรัน start_agent.bat`, 'info');
     }
   } catch (e) {
@@ -5867,7 +6074,7 @@ const OC_KEY = 'ocCfg';
 const OC_S = (c, t) => '<span style="color:var(--' + c + '); font-size:12px">' + t + '</span>';
 
 function ocCfg() {
-  let c = { base: 'pes', name: 'login.bat', hidden: false, stop: true, close: true, open: true, arrange: true, wait: 90 };
+  let c = { base: 'pes', name: 'login.bat', hidden: false, stop: true, close: true, open: true, arrange: true, wait: 90, screens: '' };
   try { c = Object.assign(c, JSON.parse(localStorage.getItem(OC_KEY) || '{}')); } catch (e) {}
   const g = (id) => document.getElementById(id);
   if (g('ocProject')) c.base = g('ocProject').value;
@@ -5878,7 +6085,62 @@ function ocCfg() {
   if (g('ocOpen')) c.open = g('ocOpen').checked;
   if (g('ocArrange')) c.arrange = g('ocArrange').checked;
   if (g('ocWait')) { const w = parseInt(g('ocWait').value, 10); c.wait = isNaN(w) ? 90 : Math.max(0, Math.min(900, w)); }
+  if (g('ocScreens')) c.screens = (g('ocScreens').value || '').trim();
   return c;
+}
+
+// ── "จอที่จะเปิด": ว่าง = ทุกจอ · ตัวเลขเดียว = กี่จอแรก · ช่วง/รายการ = เจาะจงเลขจอ ──
+//    เช่น ''        -> ทุกจอ
+//         '8'       -> 8 จอแรก (เอาจากรายชื่อจอจริงของเครื่องนั้น จอที่ถูกลบไปแล้วไม่นับ)
+//         '0-7'     -> จอเลข 0 ถึง 7
+//         '0,2,5'   -> เฉพาะจอ 0, 2, 5
+function ocParseScreens(txt) {
+  const t = String(txt || '').trim();
+  if (!t) return { mode: 'all' };
+  if (/^\d+$/.test(t)) {
+    const n = parseInt(t, 10);
+    return n > 0 ? { mode: 'count', n: n } : { mode: 'all' };
+  }
+  const idx = [];
+  for (const part of t.split(',')) {
+    const p = part.trim();
+    if (!p) continue;
+    const m = p.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (m) {
+      let a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+      if (a > b) { const tmp = a; a = b; b = tmp; }
+      for (let k = a; k <= b && idx.length < 500; k++) idx.push(k);
+    } else if (/^\d+$/.test(p)) {
+      idx.push(parseInt(p, 10));
+    } else {
+      return { mode: 'bad', bad: p };
+    }
+  }
+  const uniq = [...new Set(idx)].sort((x, y) => x - y);
+  return uniq.length ? { mode: 'list', idx: uniq } : { mode: 'all' };
+}
+
+function ocScreensText(txt) {
+  const r = ocParseScreens(txt);
+  if (r.mode === 'bad') return { ok: false, html: '<span style="color:var(--danger)">อ่านไม่ออก: ' + escHtml(r.bad) + '</span>' };
+  if (r.mode === 'all') return { ok: true, html: '<span style="color:var(--text-dim)">เปิด <b>ทุกจอ</b>ที่มีในเครื่องนั้น · ใส่ตัวเลข เช่น <b>8</b> = 8 จอแรก · <b>0-7</b> หรือ <b>0,2,5</b> = เจาะจงเลขจอ (จอเดียวใช้ <b>0-0</b>)</span>' };
+  if (r.mode === 'count') return { ok: true, html: '<span style="color:var(--success)">เปิด <b>' + r.n + ' จอแรก</b> ของแต่ละเครื่อง</span>' };
+  const show = r.idx.slice(0, 20).join(', ') + (r.idx.length > 20 ? ' ...' : '');
+  return { ok: true, html: '<span style="color:var(--success)">เปิด <b>' + r.idx.length + ' จอ</b> (เลข ' + show + ')</span>' };
+}
+
+// ป้ายสั้นสำหรับกล่องยืนยัน (ocScreensText เป็นตัวเต็มมีคำอธิบายยาว ใช้โชว์ใต้ช่องกรอก)
+function ocScreensShort(txt) {
+  const r = ocParseScreens(txt);
+  if (r.mode === 'count') return r.n + ' จอแรก';
+  if (r.mode === 'list') return r.idx.length + ' จอ (' + r.idx.slice(0, 8).join(',') + (r.idx.length > 8 ? '...' : '') + ')';
+  return 'ทุกจอ';
+}
+
+function ocScreensHint() {
+  const el = document.getElementById('ocScreensHint');
+  if (el) el.innerHTML = ocScreensText((document.getElementById('ocScreens') || {}).value).html;
+  ocSaveCfg();
 }
 function ocSaveCfg() { try { localStorage.setItem(OC_KEY, JSON.stringify(ocCfg())); } catch (e) {} }
 function ocIncluded() {
@@ -5931,7 +6193,11 @@ function openOneClickDashboard() {
       <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:10px">
         ${chk('ocStop', cfg.stop, '1️⃣ หยุดบอทเดิมในโฟลเดอร์โปรเจกต์', 'ฆ่า process .bat/.py ที่รันอยู่ในโฟลเดอร์โปรเจกต์ก่อน')}
         ${chk('ocClose', cfg.close, '2️⃣ ปิด MuMu ทั้งหมด', 'taskkill ทุก process MuMu ของเครื่องนั้น')}
-        ${chk('ocOpen', cfg.open, '3️⃣ เปิด MuMu ทุกจอ', 'MuMuManager control -v all launch')}
+        ${chk('ocOpen', cfg.open, '3️⃣ เปิด MuMu', 'สั่งเปิดจอตามช่อง "จอที่จะเปิด" ข้างๆ')}
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap"
+               title="ว่าง = ทุกจอ · ตัวเลขเดียว เช่น 8 = เปิด 8 จอแรก · ช่วง/รายการ เช่น 0-7 หรือ 0,2,5 = เปิดเฉพาะจอนั้น · อยากได้จอเดียวใช้ 0-0">
+          🖥️ จอที่จะเปิด <input type="text" id="ocScreens" value="${escAttr(cfg.screens || '')}"
+            placeholder="ว่าง = ทุกจอ" style="width:120px; padding:6px 8px" oninput="ocScreensHint()"></label>
         <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap" title="หลังสั่งเปิดจอ รอให้จอบูตเสร็จก่อนค่อยเรียงจอ/รัน .bat">
           ⏳ รอจอบูต <input type="number" id="ocWait" min="0" max="900" value="${cfg.wait}" style="width:70px; padding:6px 8px" onchange="ocSaveCfg()"> วิ</label>
         ${chk('ocArrange', cfg.arrange, '4️⃣ เรียงจอ', 'เรียงหน้าต่าง MuMu ด้วยปุ่ม Arrange ของ MuMu (หรือแบบตารางตามที่ตั้งไว้ในหน้า MuMu) หลังจอบูตเสร็จ')}
@@ -5944,9 +6210,23 @@ function openOneClickDashboard() {
         <datalist id="ocFileList"></datalist>
         ${chk('ocHidden', cfg.hidden, 'ซ่อนหน้าต่าง', 'รัน .bat แบบไม่โชว์หน้าต่าง cmd ที่เครื่องลูก')}
       </div>
-      <div id="ocFileHint" style="font-size:11px; color:var(--text-dim); margin-top:8px">⏳ กำลังดึงรายชื่อไฟล์...</div>
+      <div id="ocScreensHint" style="font-size:11px; margin-top:8px">${ocScreensText(cfg.screens).html}</div>
+      <div id="ocFileHint" style="font-size:11px; color:var(--text-dim); margin-top:4px">⏳ กำลังดึงรายชื่อไฟล์...</div>
       <div class="pick-head" style="margin:12px 0 0">
         <button class="btn btn-primary" id="ocGoBtn" onclick="ocRunAll()">🚀 เริ่ม One-click (เครื่องที่ติ๊ก)</button>
+        <button class="btn" id="ocUpdBtn" onclick="ocUpdateAgents()"
+                title="ดึง agent.py ตัวล่าสุดมาแล้วรีสตาร์ท agent — ต้องทำก่อนถ้าเครื่องขึ้น Unknown action">
+          ⬆️ อัปเดต agent (ที่ติ๊ก)</button>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap"
+               title="หน่วงเวลาก่อนเครื่องรีสตาร์ทจริง — ยกเลิกได้ภายในเวลานี้">
+          ♻️ หน่วง <input type="number" id="ocRebootDelay" min="5" max="600" value="30"
+            style="width:70px; padding:6px 8px"> วิ</label>
+        <button class="btn" id="ocRebootBtn" style="border-color:var(--danger); color:var(--danger)"
+                onclick="ocRebootAll()" title="สั่งรีสตาร์ท Windows ของเครื่องที่ติ๊ก (ของจริง ไม่ใช่แค่ปิด agent)">
+          ♻️ รีสตาร์ทเครื่อง (ที่ติ๊ก)</button>
+        <button class="btn" id="ocRebootCancelBtn" onclick="ocRebootAll(true)"
+                title="ยกเลิกคำสั่งรีสตาร์ทที่ตั้งค้างไว้ ใช้ได้ก่อนครบเวลาหน่วง">
+          ✋ ยกเลิกรีสตาร์ท</button>
         <span style="flex:1"></span>
         <button class="btn" onclick="ocTickAll(true)">ติ๊กทุกเครื่อง</button>
         <button class="btn" onclick="ocTickAll(false)">เอาออกทั้งหมด</button>
@@ -5986,7 +6266,13 @@ async function ocRunOne(i, cfg, quiet) {
   const nm = a.name || a.hostname || a.agent_id;
   const steps = [];
   const trail = () => steps.length ? ' <span style="color:var(--text-dim); font-size:11px">(' + escHtml(steps.join(' → ')) + ')</span>' : '';
-  const fail = (t) => { set(OC_S('danger', '❌ ' + escHtml(t)) + trail()); if (!quiet) toast(nm + ': ' + t, 'error'); return false; };
+  const fail = (t) => {
+    // agent เก่าไม่รู้จักคำสั่งใหม่ — บอกทางแก้ไปเลย ไม่ใช่โยน error ดิบๆ ให้งง
+    if (/unknown action/i.test(String(t))) t += ' — เครื่องนี้ยังใช้ agent เวอร์ชันเก่า กดปุ่ม "⬆️ อัปเดต agent (ที่ติ๊ก)" ก่อน';
+    set(OC_S('danger', '❌ ' + escHtml(t)) + trail());
+    if (!quiet) toast(nm + ': ' + t, 'error');
+    return false;
+  };
 
   if (cfg.stop) {
     set(OC_S('accent', '⏹️ หยุดบอทใน ' + escHtml(cfg.base) + '...'));
@@ -6002,8 +6288,26 @@ async function ocRunOne(i, cfg, quiet) {
     await _sleep(5000);           // ให้ process MuMu ตายสนิทก่อนสั่งเปิดใหม่
   }
   if (cfg.open) {
-    set(OC_S('accent', '▶️ เปิด MuMu ทุกจอ...') + trail());
-    const op = await mcReq(a.agent_id, 'request_mumu', { sub: 'open_all', indices: [] }, 240000);
+    const want = ocParseScreens(cfg.screens);
+    let op;
+    if (want.mode === 'all' || want.mode === 'bad') {
+      set(OC_S('accent', '▶️ เปิด MuMu ทุกจอ...') + trail());
+      op = await mcReq(a.agent_id, 'request_mumu', { sub: 'open_all', indices: [] }, 240000);
+    } else {
+      let idx = want.idx;
+      if (want.mode === 'count') {
+        // "กี่จอแรก" = เอาจากรายชื่อจอจริงของเครื่องนั้น (เลขจออาจไม่เรียง/มีช่องว่างถ้าเคยลบจอ)
+        set(OC_S('accent', '🔎 ดูรายชื่อจอ...') + trail());
+        const ls = await mcReq(a.agent_id, 'request_mumu', { sub: 'list', indices: [] }, 60000);
+        if (ls.error) return fail('ดูรายชื่อจอไม่ได้: ' + ls.error);
+        const all = (ls.instances || []).map(x => x.index);
+        idx = all.slice(0, want.n);
+        if (!idx.length) return fail('เครื่องนี้ไม่มีจอให้เปิด');
+        if (idx.length < want.n) steps.push('มีแค่ ' + idx.length + ' จอ (ขอ ' + want.n + ')');
+      }
+      set(OC_S('accent', '▶️ เปิด MuMu ' + idx.length + ' จอ (' + idx.slice(0, 10).join(',') + (idx.length > 10 ? '...' : '') + ')...') + trail());
+      op = await mcReq(a.agent_id, 'request_mumu', { sub: 'open', indices: idx }, 240000);
+    }
     if (op.error) return fail('เปิด MuMu ไม่ได้: ' + op.error);
     steps.push('เปิด ' + (op.count || 0) + ' จอ');
     for (let s = cfg.wait; s > 0; s -= 5) {
@@ -6028,6 +6332,95 @@ async function ocRunOne(i, cfg, quiet) {
   return true;
 }
 
+// ⬆️ อัปเดต agent ของเครื่องที่ติ๊ก (ขนาน) — เครื่องจะหลุดแล้วกลับมาเองในไม่กี่วิ
+//    ต้องทำก่อนใช้คำสั่งใหม่ๆ ไม่งั้น agent เก่าจะตอบ "Unknown action: ..."
+async function ocUpdateAgents() {
+  const idxs = ocIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  if (!confirm(`⬆️ อัปเดต agent ${idxs.length} เครื่อง ?\n\n`
+    + `แต่ละเครื่องจะดึง agent.py ตัวล่าสุดแล้วรีสตาร์ทตัวเอง\n`
+    + `(หลุดจากหน้านี้แล้วกลับมาเองในไม่กี่วินาที — บอทและจอไม่ถูกแตะ)`)) return;
+
+  const btn = document.getElementById('ocUpdBtn');
+  if (btn) btn.disabled = true;
+  let doneN = 0, ok = 0, fresh = 0;
+  const errs = [];
+  mmProgress(`⬆️ กำลังอัปเดต agent... 0/<b>${idxs.length}</b>`, 0);
+  await Promise.all(idxs.map(async (i) => {
+    const a = _ocAgents[i];
+    const nm = a ? (a.name || a.hostname || a.agent_id) : '?';
+    const el = document.getElementById('oc_status_' + i);
+    if (el) el.innerHTML = OC_S('accent', '⬆️ กำลังอัปเดต agent...');
+    const r = await rpc(a.agent_id, 'request_self_update', {}, 60000);
+    doneN++;
+    if (r && !r.error) {
+      ok++;
+      if (r.updated === false) { fresh++; if (el) el.innerHTML = OC_S('success', '✅ เป็นตัวล่าสุดอยู่แล้ว'); }
+      else if (el) el.innerHTML = OC_S('warning', '⬆️ มีของใหม่ กำลังรีสตาร์ท agent... (รอ ~10 วิ)');
+    } else {
+      const msg = (r && r.error) || 'ไม่ตอบ';
+      errs.push(nm + ': ' + msg);
+      if (el) el.innerHTML = OC_S('danger', '❌ ' + escHtml(msg));
+    }
+    mmProgress(`⬆️ อัปเดต agent <b>${doneN}</b>/<b>${idxs.length}</b>`,
+               Math.round(doneN * 100 / idxs.length),
+               doneN === idxs.length ? (ok === idxs.length ? 'var(--success)' : 'var(--warning)') : 'var(--accent)');
+  }));
+  if (btn) btn.disabled = false;
+  if (errs.length) alert('⚠️ อัปเดตไม่สำเร็จบางเครื่อง:\n' + errs.slice(0, 8).join('\n'));
+  else toast(`อัปเดต agent เสร็จ ${ok} เครื่อง (ล่าสุดอยู่แล้ว ${fresh})`, 'success');
+}
+
+// ♻️ รีสตาร์ท Windows ของเครื่องที่ติ๊ก (ของจริง) · cancel=true = ยกเลิกคำสั่งที่ตั้งค้างไว้
+async function ocRebootAll(cancel) {
+  const idxs = ocIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  const d = parseInt((document.getElementById('ocRebootDelay') || {}).value || '30', 10);
+  const delay = isNaN(d) ? 30 : Math.max(5, Math.min(600, d));
+  const names = idxs.map(i => { const a = _ocAgents[i]; return a ? (a.name || a.hostname || a.agent_id) : '?'; });
+
+  if (!cancel) {
+    // งานนี้ย้อนกลับไม่ได้และกระทบทั้งฟลีต — ยืนยัน 2 ชั้น ชั้นหลังต้องพิมพ์เอง
+    if (!confirm(`♻️ รีสตาร์ท Windows จริงๆ ${idxs.length} เครื่อง ?\n\n`
+      + names.slice(0, 12).join(', ') + (names.length > 12 ? ` (และอีก ${names.length - 12})` : '')
+      + `\n\nบอทและจอทั้งหมดจะถูกปิดแบบบังคับ เครื่องจะรีสตาร์ทในอีก ${delay} วินาที\n`
+      + `(กด "ยกเลิกรีสตาร์ท" ได้ก่อนครบเวลา)`)) return;
+    const typed = prompt(`พิมพ์  RESTART  เพื่อยืนยันรีสตาร์ท ${idxs.length} เครื่อง`);
+    if ((typed || '').trim().toUpperCase() !== 'RESTART') { toast('ยกเลิกแล้ว ไม่ได้สั่งอะไร', 'info'); return; }
+  }
+
+  const btn = document.getElementById(cancel ? 'ocRebootCancelBtn' : 'ocRebootBtn');
+  if (btn) btn.disabled = true;
+  let ok = 0;
+  const errs = [];
+  mmProgress((cancel ? '✋ กำลังยกเลิก...' : '♻️ กำลังสั่งรีสตาร์ท...') + ` 0/<b>${idxs.length}</b>`, 0);
+  let doneN = 0;
+  await Promise.all(idxs.map(async (i) => {
+    const a = _ocAgents[i];
+    const nm = a ? (a.name || a.hostname || a.agent_id) : '?';
+    const el = document.getElementById('oc_status_' + i);
+    const r = await mcReq(a.agent_id, 'request_reboot_pc', { delay: delay, cancel: !!cancel }, 60000);
+    doneN++;
+    if (r && !r.error && r.success) {
+      ok++;
+      if (el) el.innerHTML = OC_S(cancel ? 'success' : 'warning',
+        cancel ? '✋ ยกเลิกรีสตาร์ทแล้ว' : `♻️ จะรีสตาร์ทในอีก ${r.delay || delay} วิ`);
+    } else {
+      let msg = (r && r.error) || 'ไม่ตอบ';
+      if (/unknown action/i.test(msg)) msg = 'agent เวอร์ชันเก่า — กด "⬆️ อัปเดต agent (ที่ติ๊ก)" ก่อน';
+      errs.push(nm + ': ' + msg);
+      if (el) el.innerHTML = OC_S('danger', '❌ ' + escHtml(msg));
+    }
+    mmProgress((cancel ? '✋ ยกเลิก' : '♻️ สั่งรีสตาร์ท') + ` <b>${doneN}</b>/<b>${idxs.length}</b>`,
+               Math.round(doneN * 100 / idxs.length),
+               doneN === idxs.length ? (ok === idxs.length ? 'var(--success)' : 'var(--warning)') : 'var(--accent)');
+  }));
+  if (btn) btn.disabled = false;
+  if (errs.length) alert('⚠️ มีเครื่องที่ไม่สำเร็จ:\n' + errs.slice(0, 8).join('\n'));
+  else toast(cancel ? `ยกเลิกรีสตาร์ทแล้ว ${ok} เครื่อง` : `สั่งรีสตาร์ทแล้ว ${ok} เครื่อง (อีก ${delay} วิ)`,
+             'success');
+}
+
 async function ocRunAll() {
   if (_ocRunning) { toast('กำลังทำอยู่ รอให้รอบนี้จบก่อน', 'info'); return; }
   const cfg = ocCfg();
@@ -6035,10 +6428,12 @@ async function ocRunAll() {
   const idxs = ocIncluded();
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
   const plan = [cfg.stop ? 'หยุดบอท' : null, cfg.close ? 'ปิด MuMu' : null,
-                cfg.open ? ('เปิด MuMu ทุกจอ + รอ ' + cfg.wait + ' วิ') : null,
+                cfg.open ? ('เปิด MuMu ' + ocScreensShort(cfg.screens) + ' + รอ ' + cfg.wait + ' วิ') : null,
                 cfg.arrange ? 'เรียงจอ' : null,
                 'รัน ' + cfg.base + '\\' + cfg.name].filter(Boolean).join(' → ');
-  if (!confirm(`🚀 One-click ${idxs.length} เครื่อง ?\n${plan}\n\nทุกเครื่องทำพร้อมกัน — จอทั้งหมดของเครื่องพวกนั้นจะถูกปิดแล้วเปิดใหม่`)) return;
+  const scr = ocScreensText(cfg.screens);
+  if (!scr.ok) { toast('ช่อง "จอที่จะเปิด" กรอกไม่ถูก — ว่าง = ทุกจอ, เลขเดียว = กี่จอแรก, หรือ 0-7 / 0,2,5', 'error'); return; }
+  if (!confirm(`🚀 One-click ${idxs.length} เครื่อง ?\n${plan}\n\nทุกเครื่องทำพร้อมกัน — จอที่เปิดอยู่ของเครื่องพวกนั้นจะถูกปิดก่อนทั้งหมด`)) return;
   ocSaveCfg();
   _ocRunning = true;
   const btn = document.getElementById('ocGoBtn');
