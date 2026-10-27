@@ -7692,7 +7692,7 @@ async function broadcastFiles(fileList) {
 
     let ok = 0; const fails = [];
     const mb = file.size / 1048576;
-    const conc = mb > 20 ? 2 : (mb > 5 ? 4 : 8);      // ไฟล์ใหญ่ส่งทีละเครื่อง กัน socket ตัน
+    const conc = mb > 20 ? 1 : (mb > 5 ? 2 : 4);      // ไฟล์ใหญ่ส่งทีละเครื่อง กัน socket ตัน
     if (mb > 5) bcLog(`⚙️ ${escHtml(file.name)} ${mb.toFixed(1)} MB → ส่งพร้อมกันทีละ ${conc} เครื่อง`, false);
     await runLimited(agents, conc, async (a) => {
       const mname = a.name || a.hostname || a.agent_id;
@@ -7742,7 +7742,7 @@ async function distributeFiles(files, agents, game) {
   const pairs = sortedAgents.slice(0, pairN).map((a, i) => ({ a, file: sortedFiles[i] }));
   // ไฟล์ใหญ่ห้ามยิงพร้อมกันหลายตัว — ทุกเครื่องใช้ socket เส้นเดียวกัน แย่งกันจนช้าแล้ว timeout ยกแผง
   const avgMB = pairs.reduce((s, p) => s + p.file.size, 0) / Math.max(1, pairs.length) / 1048576;
-  const conc = avgMB > 20 ? 2 : (avgMB > 5 ? 4 : 8);
+  const conc = avgMB > 20 ? 1 : (avgMB > 5 ? 2 : 4);
   bcLog(`⚙️ ไฟล์เฉลี่ย ${avgMB.toFixed(1)} MB → ส่งพร้อมกันทีละ ${conc} เครื่อง`, false);
   await runLimited(pairs, conc, async ({ a, file }) => {
     const mname = a.name || a.hostname || a.agent_id;
