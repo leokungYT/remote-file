@@ -5849,7 +5849,7 @@ const OC_KEY = 'ocCfg';
 const OC_S = (c, t) => '<span style="color:var(--' + c + '); font-size:12px">' + t + '</span>';
 
 function ocCfg() {
-  let c = { base: 'pes', name: 'login.bat', hidden: false, stop: true, close: true, open: true, arrange: true, wait: 90 };
+  let c = { base: 'pes', name: 'login.bat', hidden: false, stop: true, close: true, open: true, arrange: true, wait: 90, screens: '' };
   try { c = Object.assign(c, JSON.parse(localStorage.getItem(OC_KEY) || '{}')); } catch (e) {}
   const g = (id) => document.getElementById(id);
   if (g('ocProject')) c.base = g('ocProject').value;
@@ -5860,7 +5860,62 @@ function ocCfg() {
   if (g('ocOpen')) c.open = g('ocOpen').checked;
   if (g('ocArrange')) c.arrange = g('ocArrange').checked;
   if (g('ocWait')) { const w = parseInt(g('ocWait').value, 10); c.wait = isNaN(w) ? 90 : Math.max(0, Math.min(900, w)); }
+  if (g('ocScreens')) c.screens = (g('ocScreens').value || '').trim();
   return c;
+}
+
+// ── "จอที่จะเปิด": ว่าง = ทุกจอ · ตัวเลขเดียว = กี่จอแรก · ช่วง/รายการ = เจาะจงเลขจอ ──
+//    เช่น ''        -> ทุกจอ
+//         '8'       -> 8 จอแรก (เอาจากรายชื่อจอจริงของเครื่องนั้น จอที่ถูกลบไปแล้วไม่นับ)
+//         '0-7'     -> จอเลข 0 ถึง 7
+//         '0,2,5'   -> เฉพาะจอ 0, 2, 5
+function ocParseScreens(txt) {
+  const t = String(txt || '').trim();
+  if (!t) return { mode: 'all' };
+  if (/^\d+$/.test(t)) {
+    const n = parseInt(t, 10);
+    return n > 0 ? { mode: 'count', n: n } : { mode: 'all' };
+  }
+  const idx = [];
+  for (const part of t.split(',')) {
+    const p = part.trim();
+    if (!p) continue;
+    const m = p.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (m) {
+      let a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+      if (a > b) { const tmp = a; a = b; b = tmp; }
+      for (let k = a; k <= b && idx.length < 500; k++) idx.push(k);
+    } else if (/^\d+$/.test(p)) {
+      idx.push(parseInt(p, 10));
+    } else {
+      return { mode: 'bad', bad: p };
+    }
+  }
+  const uniq = [...new Set(idx)].sort((x, y) => x - y);
+  return uniq.length ? { mode: 'list', idx: uniq } : { mode: 'all' };
+}
+
+function ocScreensText(txt) {
+  const r = ocParseScreens(txt);
+  if (r.mode === 'bad') return { ok: false, html: '<span style="color:var(--danger)">อ่านไม่ออก: ' + escHtml(r.bad) + '</span>' };
+  if (r.mode === 'all') return { ok: true, html: '<span style="color:var(--text-dim)">เปิด <b>ทุกจอ</b>ที่มีในเครื่องนั้น · ใส่ตัวเลข เช่น <b>8</b> = 8 จอแรก · <b>0-7</b> หรือ <b>0,2,5</b> = เจาะจงเลขจอ (จอเดียวใช้ <b>0-0</b>)</span>' };
+  if (r.mode === 'count') return { ok: true, html: '<span style="color:var(--success)">เปิด <b>' + r.n + ' จอแรก</b> ของแต่ละเครื่อง</span>' };
+  const show = r.idx.slice(0, 20).join(', ') + (r.idx.length > 20 ? ' ...' : '');
+  return { ok: true, html: '<span style="color:var(--success)">เปิด <b>' + r.idx.length + ' จอ</b> (เลข ' + show + ')</span>' };
+}
+
+// ป้ายสั้นสำหรับกล่องยืนยัน (ocScreensText เป็นตัวเต็มมีคำอธิบายยาว ใช้โชว์ใต้ช่องกรอก)
+function ocScreensShort(txt) {
+  const r = ocParseScreens(txt);
+  if (r.mode === 'count') return r.n + ' จอแรก';
+  if (r.mode === 'list') return r.idx.length + ' จอ (' + r.idx.slice(0, 8).join(',') + (r.idx.length > 8 ? '...' : '') + ')';
+  return 'ทุกจอ';
+}
+
+function ocScreensHint() {
+  const el = document.getElementById('ocScreensHint');
+  if (el) el.innerHTML = ocScreensText((document.getElementById('ocScreens') || {}).value).html;
+  ocSaveCfg();
 }
 function ocSaveCfg() { try { localStorage.setItem(OC_KEY, JSON.stringify(ocCfg())); } catch (e) {} }
 function ocIncluded() {
@@ -5913,7 +5968,11 @@ function openOneClickDashboard() {
       <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:10px">
         ${chk('ocStop', cfg.stop, '1️⃣ หยุดบอทเดิมในโฟลเดอร์โปรเจกต์', 'ฆ่า process .bat/.py ที่รันอยู่ในโฟลเดอร์โปรเจกต์ก่อน')}
         ${chk('ocClose', cfg.close, '2️⃣ ปิด MuMu ทั้งหมด', 'taskkill ทุก process MuMu ของเครื่องนั้น')}
-        ${chk('ocOpen', cfg.open, '3️⃣ เปิด MuMu ทุกจอ', 'MuMuManager control -v all launch')}
+        ${chk('ocOpen', cfg.open, '3️⃣ เปิด MuMu', 'สั่งเปิดจอตามช่อง "จอที่จะเปิด" ข้างๆ')}
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap"
+               title="ว่าง = ทุกจอ · ตัวเลขเดียว เช่น 8 = เปิด 8 จอแรก · ช่วง/รายการ เช่น 0-7 หรือ 0,2,5 = เปิดเฉพาะจอนั้น · อยากได้จอเดียวใช้ 0-0">
+          🖥️ จอที่จะเปิด <input type="text" id="ocScreens" value="${escAttr(cfg.screens || '')}"
+            placeholder="ว่าง = ทุกจอ" style="width:120px; padding:6px 8px" oninput="ocScreensHint()"></label>
         <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap" title="หลังสั่งเปิดจอ รอให้จอบูตเสร็จก่อนค่อยเรียงจอ/รัน .bat">
           ⏳ รอจอบูต <input type="number" id="ocWait" min="0" max="900" value="${cfg.wait}" style="width:70px; padding:6px 8px" onchange="ocSaveCfg()"> วิ</label>
         ${chk('ocArrange', cfg.arrange, '4️⃣ เรียงจอ', 'เรียงหน้าต่าง MuMu ด้วยปุ่ม Arrange ของ MuMu (หรือแบบตารางตามที่ตั้งไว้ในหน้า MuMu) หลังจอบูตเสร็จ')}
@@ -5926,7 +5985,8 @@ function openOneClickDashboard() {
         <datalist id="ocFileList"></datalist>
         ${chk('ocHidden', cfg.hidden, 'ซ่อนหน้าต่าง', 'รัน .bat แบบไม่โชว์หน้าต่าง cmd ที่เครื่องลูก')}
       </div>
-      <div id="ocFileHint" style="font-size:11px; color:var(--text-dim); margin-top:8px">⏳ กำลังดึงรายชื่อไฟล์...</div>
+      <div id="ocScreensHint" style="font-size:11px; margin-top:8px">${ocScreensText(cfg.screens).html}</div>
+      <div id="ocFileHint" style="font-size:11px; color:var(--text-dim); margin-top:4px">⏳ กำลังดึงรายชื่อไฟล์...</div>
       <div class="pick-head" style="margin:12px 0 0">
         <button class="btn btn-primary" id="ocGoBtn" onclick="ocRunAll()">🚀 เริ่ม One-click (เครื่องที่ติ๊ก)</button>
         <span style="flex:1"></span>
@@ -5984,8 +6044,26 @@ async function ocRunOne(i, cfg, quiet) {
     await _sleep(5000);           // ให้ process MuMu ตายสนิทก่อนสั่งเปิดใหม่
   }
   if (cfg.open) {
-    set(OC_S('accent', '▶️ เปิด MuMu ทุกจอ...') + trail());
-    const op = await mcReq(a.agent_id, 'request_mumu', { sub: 'open_all', indices: [] }, 240000);
+    const want = ocParseScreens(cfg.screens);
+    let op;
+    if (want.mode === 'all' || want.mode === 'bad') {
+      set(OC_S('accent', '▶️ เปิด MuMu ทุกจอ...') + trail());
+      op = await mcReq(a.agent_id, 'request_mumu', { sub: 'open_all', indices: [] }, 240000);
+    } else {
+      let idx = want.idx;
+      if (want.mode === 'count') {
+        // "กี่จอแรก" = เอาจากรายชื่อจอจริงของเครื่องนั้น (เลขจออาจไม่เรียง/มีช่องว่างถ้าเคยลบจอ)
+        set(OC_S('accent', '🔎 ดูรายชื่อจอ...') + trail());
+        const ls = await mcReq(a.agent_id, 'request_mumu', { sub: 'list', indices: [] }, 60000);
+        if (ls.error) return fail('ดูรายชื่อจอไม่ได้: ' + ls.error);
+        const all = (ls.instances || []).map(x => x.index);
+        idx = all.slice(0, want.n);
+        if (!idx.length) return fail('เครื่องนี้ไม่มีจอให้เปิด');
+        if (idx.length < want.n) steps.push('มีแค่ ' + idx.length + ' จอ (ขอ ' + want.n + ')');
+      }
+      set(OC_S('accent', '▶️ เปิด MuMu ' + idx.length + ' จอ (' + idx.slice(0, 10).join(',') + (idx.length > 10 ? '...' : '') + ')...') + trail());
+      op = await mcReq(a.agent_id, 'request_mumu', { sub: 'open', indices: idx }, 240000);
+    }
     if (op.error) return fail('เปิด MuMu ไม่ได้: ' + op.error);
     steps.push('เปิด ' + (op.count || 0) + ' จอ');
     for (let s = cfg.wait; s > 0; s -= 5) {
@@ -6017,10 +6095,12 @@ async function ocRunAll() {
   const idxs = ocIncluded();
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
   const plan = [cfg.stop ? 'หยุดบอท' : null, cfg.close ? 'ปิด MuMu' : null,
-                cfg.open ? ('เปิด MuMu ทุกจอ + รอ ' + cfg.wait + ' วิ') : null,
+                cfg.open ? ('เปิด MuMu ' + ocScreensShort(cfg.screens) + ' + รอ ' + cfg.wait + ' วิ') : null,
                 cfg.arrange ? 'เรียงจอ' : null,
                 'รัน ' + cfg.base + '\\' + cfg.name].filter(Boolean).join(' → ');
-  if (!confirm(`🚀 One-click ${idxs.length} เครื่อง ?\n${plan}\n\nทุกเครื่องทำพร้อมกัน — จอทั้งหมดของเครื่องพวกนั้นจะถูกปิดแล้วเปิดใหม่`)) return;
+  const scr = ocScreensText(cfg.screens);
+  if (!scr.ok) { toast('ช่อง "จอที่จะเปิด" กรอกไม่ถูก — ว่าง = ทุกจอ, เลขเดียว = กี่จอแรก, หรือ 0-7 / 0,2,5', 'error'); return; }
+  if (!confirm(`🚀 One-click ${idxs.length} เครื่อง ?\n${plan}\n\nทุกเครื่องทำพร้อมกัน — จอที่เปิดอยู่ของเครื่องพวกนั้นจะถูกปิดก่อนทั้งหมด`)) return;
   ocSaveCfg();
   _ocRunning = true;
   const btn = document.getElementById('ocGoBtn');
