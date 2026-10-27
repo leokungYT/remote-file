@@ -149,6 +149,17 @@ def handle_agent_response(data):
             socketio.emit("response_" + req_id, data, room=web_sid)
 
 
+@socketio.on("upload_progress")
+def handle_upload_progress(data):
+    """agent รายงานว่ารับไฟล์ไปแล้วกี่ไบต์ → ส่งต่อให้หน้าเว็บโชว์ %"""
+    req_id = data.get("request_id")
+    req = pending_requests.get(req_id)
+    if req:
+        req["created_at"] = time.time()
+        if req.get("web_sid"):
+            socketio.emit("upload_progress_" + req_id, data, room=req["web_sid"])
+
+
 @socketio.on("file_chunk")
 def handle_file_chunk(data):
     """รับ chunk ของไฟล์จากเครื่องลูก"""
@@ -241,14 +252,14 @@ def handle_upload_start(data):
 @socketio.on("request_upload_chunk")
 def handle_upload_chunk(data):
     """ส่ง chunk ไฟล์ต่อไปยังเครื่องลูก (ใช้ req_id เดิมของการอัปโหลดนี้)"""
-    agent_id = data["agent_id"]
-    target_sid = None
-    for sid, info in agents.items():
-        if info["agent_id"] == agent_id:
-            target_sid = sid
-            break
+    # ต้องเลือก connection เดียวกับที่ส่ง upload_start (ตัวล่าสุด) — ถ้าเครื่องเคยหลุดแล้วต่อใหม่
+    # จะมี sid ค้างอยู่ 2 ตัว ถ้าส่ง chunk ไปตัวเก่า agent ไม่เคยได้รับ → เว็บค้าง "กำลังส่ง..." ตลอด
+    target_sid = _latest_agent_sid(data["agent_id"])
     if not target_sid:
         return
+    req = pending_requests.get(data["request_id"])
+    if req:
+        req["created_at"] = time.time()   # อัปโหลดยังเดินอยู่ อย่าให้ cleanup 300 วิ ลบทิ้ง
     socketio.emit("command", {
         "request_id": data["request_id"],
         "action": "upload_chunk",
@@ -727,14 +738,21 @@ def _emit_sent(req_id, data, error=None):
         emit("request_sent", payload)
 
 
-def send_to_agent(agent_id, action, data, web_sid):
-    """ส่งคำสั่งไปยังเครื่องลูก (เลือก connection ล่าสุดของ agent_id กันตัวค้างเก่า)"""
+def _latest_agent_sid(agent_id):
+    """sid ของ connection ล่าสุดของ agent_id (กันตัวค้างเก่า)"""
     matches = [(info.get("connected_at", ""), sid)
-               for sid, info in agents.items() if info.get("agent_id") == agent_id]
+               for sid, info in list(agents.items()) if info.get("agent_id") == agent_id]
     if not matches:
         return None
     matches.sort()
-    target_sid = matches[-1][1]
+    return matches[-1][1]
+
+
+def send_to_agent(agent_id, action, data, web_sid):
+    """ส่งคำสั่งไปยังเครื่องลูก (เลือก connection ล่าสุดของ agent_id กันตัวค้างเก่า)"""
+    target_sid = _latest_agent_sid(agent_id)
+    if not target_sid:
+        return None
 
     # กันบวม: ลบ request ที่ค้างนานเกิน 300 วิ (เครื่องที่ตาย/ไม่ตอบกลับ)
     #   ต้องไม่สั้นกว่างานที่นานจริง (ตั้งค่าจอ/รีสตาร์ทหลายสิบจอ) ไม่งั้นจะตัด response
@@ -7086,6 +7104,8 @@ function openBroadcastPanel(kind) {
       <small id="bcHint"></small>
     </div>
     <input type="file" id="bcFile" style="display:none" multiple>
+    <h3 style="margin:20px 0 10px; font-size:14px; color:var(--text-secondary)">สถานะโหลดไฟล์รายเครื่อง</h3>
+    <div id="bcProgress" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:6px; font-size:12px"></div>
     <h3 style="margin:20px 0 10px; font-size:14px; color:var(--text-secondary)">ผลการทำงาน</h3>
     <div id="bcLog" style="display:flex; flex-direction:column; gap:6px; font-size:13px"></div>`;
 
@@ -7148,6 +7168,28 @@ function bcLog(html, danger) {
   el.insertBefore(row, el.firstChild);
 }
 
+// แถบ % รายเครื่อง: state = 'run' | 'ok' | 'err'
+function bcProgress(agentId, mname, fname, pct, state, note) {
+  const box = document.getElementById('bcProgress');
+  if (!box) return;
+  const key = 'bcp_' + String(agentId).replace(/[^\w-]/g, '_');
+  let row = document.getElementById(key);
+  if (!row) {
+    row = document.createElement('div');
+    row.id = key;
+    row.style.cssText = 'padding:8px 10px; background:var(--bg-card); border:1px solid var(--border); border-radius:8px';
+    box.appendChild(row);
+  }
+  const color = state === 'ok' ? 'var(--success)' : state === 'err' ? 'var(--danger)' : 'var(--accent)';
+  const p = Math.max(0, Math.min(100, Math.round(pct)));
+  row.title = note || '';
+  row.innerHTML = '<div style="display:flex; justify-content:space-between; gap:6px"><b>🖥️ ' + escHtml(mname) + '</b>'
+    + '<span style="color:' + color + '">' + (state === 'err' ? '❌' : p + '%') + '</span></div>'
+    + '<div style="color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap">' + escHtml(fname) + (note ? ' — ' + escHtml(note) : '') + '</div>'
+    + '<div style="height:6px; background:var(--border); border-radius:3px; margin-top:4px; overflow:hidden">'
+    + '<div style="height:100%; width:' + (state === 'err' ? 100 : p) + '%; background:' + color + '"></div></div>';
+}
+
 function readAsBase64(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -7160,13 +7202,18 @@ function readAsBase64(file) {
 // อัปโหลด 1 ไฟล์ไปเครื่องเดียว โดยให้ agent วางในโฟลเดอร์ <game>/<subpath> เอง (base_match+subpath)
 // subpath = input-id หรือ backup ตามปุ่มที่เปิดหน้ามา
 // ไม่มี timeout — ไฟล์ใหญ่แค่ไหนก็รอจนจบ เลิกเองเฉพาะตอนเครื่องปลายทางหลุดออฟไลน์จริงๆ
-function uploadToInput(agentId, filename, size, base64, game, subpath) {
+function uploadToInput(agentId, filename, size, base64, game, subpath, onProgress) {
   return new Promise((resolve, reject) => {
     const uploadId = 'bc_' + Math.random().toString(36).substr(2, 9);
     const CHUNK = 512 * 1024;
     const total = Math.ceil(base64.length / CHUNK) || 1;
     let done = false;
-    const cleanup = () => { socket.off('upload_ready', onReady); clearInterval(watch); };
+    let progEvt = null;
+    const onProg = (p) => { if (onProgress && size) onProgress(Math.min(99, p.received / size * 100)); };
+    const cleanup = () => {
+      socket.off('upload_ready', onReady); clearInterval(watch);
+      if (progEvt) socket.off(progEvt, onProg);
+    };
     // เฝ้าดูว่าเครื่องปลายทางยังออนไลน์ไหม — ถ้าหลุดไปเลยค่อยเลิกรอ (ไม่ใช่การจับเวลา)
     const watch = setInterval(() => {
       if (done) return;
@@ -7182,10 +7229,12 @@ function uploadToInput(agentId, filename, size, base64, game, subpath) {
       const rid = info.request_id;
       const onResp = (resp) => {
         socket.off('response_' + rid, onResp);
-        done = true; clearInterval(watch);
+        done = true; cleanup();
         if (resp.error) reject(new Error(resp.error)); else resolve(resp);
       };
       socket.on('response_' + rid, onResp);
+      progEvt = 'upload_progress_' + rid;
+      socket.on(progEvt, onProg);
       for (let i = 0; i < total; i++) {
         socket.emit('request_upload_chunk', {
           agent_id: agentId, request_id: rid,
@@ -7206,13 +7255,25 @@ function uploadToInput(agentId, filename, size, base64, game, subpath) {
 }
 
 // อัปโหลดพร้อมลองใหม่ 1 ครั้ง (ไฟล์ใหญ่เจอสะดุดครั้งเดียวไม่ควรถือว่าเจ๊ง)
-async function uploadWithRetry(agentId, file, b64, game, subpath, onRetry) {
+async function uploadWithRetry(agentId, file, b64, game, subpath, onRetry, mname) {
+  const label = mname || agentId;
+  const prog = (pct) => bcProgress(agentId, label, file.name, pct, 'run');
+  prog(0);
   try {
-    return await uploadToInput(agentId, file.name, file.size, b64, game, subpath);
+    let r;
+    try {
+      r = await uploadToInput(agentId, file.name, file.size, b64, game, subpath, prog);
+    } catch (e) {
+      if (onRetry) onRetry(e);
+      bcProgress(agentId, label, file.name, 0, 'run', 'ลองใหม่');
+      await _sleep(2000);
+      r = await uploadToInput(agentId, file.name, file.size, b64, game, subpath, prog);
+    }
+    bcProgress(agentId, label, file.name, 100, 'ok');
+    return r;
   } catch (e) {
-    if (onRetry) onRetry(e);
-    await _sleep(2000);
-    return await uploadToInput(agentId, file.name, file.size, b64, game, subpath);
+    bcProgress(agentId, label, file.name, 0, 'err', String(e.message || e));
+    throw e;
   }
 }
 
@@ -7236,11 +7297,11 @@ async function broadcastFiles(fileList) {
 
     let ok = 0; const fails = [];
     const mb = file.size / 1048576;
-    const conc = mb > 20 ? 1 : (mb > 5 ? 2 : 4);      // ไฟล์ใหญ่ส่งทีละเครื่อง กัน socket ตัน
+    const conc = mb > 20 ? 2 : (mb > 5 ? 4 : 8);      // ไฟล์ใหญ่ส่งทีละเครื่อง กัน socket ตัน
     if (mb > 5) bcLog(`⚙️ ${escHtml(file.name)} ${mb.toFixed(1)} MB → ส่งพร้อมกันทีละ ${conc} เครื่อง`, false);
     await runLimited(agents, conc, async (a) => {
       const mname = a.name || a.hostname || a.agent_id;
-      try { await uploadWithRetry(a.agent_id, file, base64, game); ok++; }
+      try { await uploadWithRetry(a.agent_id, file, base64, game, null, null, mname); ok++; }
       catch (e) { fails.push(mname + ': ' + (e.message || e)); }
     });
     const failHtml = fails.length ? ' <span style="color:var(--danger)">❌ ' + fails.length + '</span>' : '';
@@ -7286,7 +7347,7 @@ async function distributeFiles(files, agents, game) {
   const pairs = sortedAgents.slice(0, pairN).map((a, i) => ({ a, file: sortedFiles[i] }));
   // ไฟล์ใหญ่ห้ามยิงพร้อมกันหลายตัว — ทุกเครื่องใช้ socket เส้นเดียวกัน แย่งกันจนช้าแล้ว timeout ยกแผง
   const avgMB = pairs.reduce((s, p) => s + p.file.size, 0) / Math.max(1, pairs.length) / 1048576;
-  const conc = avgMB > 20 ? 1 : (avgMB > 5 ? 2 : 4);
+  const conc = avgMB > 20 ? 2 : (avgMB > 5 ? 4 : 8);
   bcLog(`⚙️ ไฟล์เฉลี่ย ${avgMB.toFixed(1)} MB → ส่งพร้อมกันทีละ ${conc} เครื่อง`, false);
   await runLimited(pairs, conc, async ({ a, file }) => {
     const mname = a.name || a.hostname || a.agent_id;
@@ -7295,7 +7356,7 @@ async function distributeFiles(files, agents, game) {
       const t0 = Date.now();
       bcLog(`⏫ <b>${escHtml(mname)}</b> ← ${escHtml(file.name)} (${(file.size / 1048576).toFixed(1)} MB) กำลังส่ง...`, false);
       await uploadWithRetry(a.agent_id, file, b64, game, null,
-        () => bcLog(`🔁 <b>${escHtml(mname)}</b> ← ${escHtml(file.name)} สะดุด กำลังลองใหม่...`, false));
+        () => bcLog(`🔁 <b>${escHtml(mname)}</b> ← ${escHtml(file.name)} สะดุด กำลังลองใหม่...`, false), mname);
       assigned++;
       const secs = Math.round((Date.now() - t0) / 1000);
       bcLog(`🎯 <b>${escHtml(mname)}</b> ← <b>${escHtml(file.name)}</b> [${escHtml(game)}] ✅ <small style="color:var(--text-dim)">${secs} วิ</small>`, false);

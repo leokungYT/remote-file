@@ -862,7 +862,14 @@ def handle_upload_chunk(req_id, data):
             sess["file"].write(chunk)
             sess["received"] += len(chunk)
 
-        if data.get("is_last"):
+        if not data.get("is_last"):
+            client = _current_client()
+            if client is not None:
+                try:
+                    client.emit("upload_progress", {"request_id": req_id, "received": sess["received"]})
+                except Exception:
+                    pass
+        else:
             sess["file"].close()
             path = sess["path"]
             received = sess["received"]
