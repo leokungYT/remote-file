@@ -7884,6 +7884,59 @@ const BU_MODES = {
 //   - ไม่ taskkill python.exe ทั้งเครื่อง (จะฆ่า agent/server/บอทเกมอื่นไปด้วย) — ให้ agent หยุดเฉพาะบอทใน
 //     โฟลเดอร์ main ผ่านคำสั่ง stop ก่อนรันแทน
 //   - ไม่ pause (ไม่มีคนกดที่เครื่องลูก) และเขียนผลลง autoupdate-lg.log บรรทัดแรก (OK/ERROR) ให้เว็บอ่านกลับ
+// โหลดแบบรายไฟล์: ดึงรายชื่อไฟล์จาก GitHub API → ข้าม Tesseract-OCR/logs/old/backup → เทียบ git blob sha
+//   กับไฟล์ในเครื่อง โหลดเฉพาะไฟล์ที่เปลี่ยน ลง %EXTRACT_DIR%\src (เร็วกว่าโหลด zip ทั้งก้อนมาก)
+//   exit 2 = เรียก API ไม่ได้ → bat ถอยไปใช้ zip แบบเดิม · exit 1 = โหลดไฟล์ไม่สำเร็จ
+const BU_LGR_PS = String.raw`
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$log = $env:DOWNLOAD_LOG
+$wc = New-Object Net.WebClient
+$wc.Headers.Add('User-Agent', 'lgr-update')
+try { $t = $wc.DownloadString('https://api.github.com/repos/leokungYT/main/git/trees/main?recursive=1') | ConvertFrom-Json }
+catch { Add-Content -Path $log -Value ('tree api: ' + $_.Exception.Message); exit 2 }
+if ($t.truncated) { exit 2 }
+$skip = '^(Tesseract-OCR|logs|old|backup|backup-id)/|^autoupdate-lg\.bat$'
+$files = @($t.tree | Where-Object { $_.type -eq 'blob' -and $_.path -notmatch $skip })
+$dst = Join-Path $env:EXTRACT_DIR 'src'
+$keep = @{}
+$i = 0; $got = 0
+foreach ($f in $files) {
+  $i++
+  $p = $f.path.Replace('/', '\')
+  $keep[$p.ToLower()] = 1
+  if (Test-Path -LiteralPath $p -PathType Leaf) {
+    $b = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $p).ProviderPath)
+    $h = [Text.Encoding]::ASCII.GetBytes('blob ' + $b.Length + [char]0)
+    $sha = [Security.Cryptography.SHA1]::Create()
+    [void]$sha.TransformBlock($h, 0, $h.Length, $null, 0)
+    [void]$sha.TransformFinalBlock($b, 0, $b.Length)
+    if ((-join ($sha.Hash | ForEach-Object { $_.ToString('x2') })) -eq $f.sha) { continue }
+  }
+  $o = Join-Path $dst $p
+  [void](New-Item -ItemType Directory -Force -Path (Split-Path $o))
+  $url = 'https://raw.githubusercontent.com/leokungYT/main/main/' + (($f.path.Split('/') | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/')
+  Write-Host ('  [' + $i + '/' + $files.Count + '] ' + $f.path)
+  $ok = $false
+  for ($r = 0; $r -lt 3 -and -not $ok; $r++) {
+    try { $wc.DownloadFile($url, $o); $ok = $true } catch { Start-Sleep 2; $err = $_.Exception.Message }
+  }
+  if (-not $ok) { Add-Content -Path $log -Value ($f.path + ': ' + $err); exit 1 }
+  $got++
+}
+if (Test-Path img) {
+  $root = (Get-Location).Path.TrimEnd('\') + '\'
+  Get-ChildItem img -Recurse -File | Where-Object { -not $keep[$_.FullName.Substring($root.Length).ToLower()] } | Remove-Item -Force
+}
+Write-Host ('  changed files: ' + $got)
+exit 0
+`;
+function _psEncoded(s) {
+  let bin = '';
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); bin += String.fromCharCode(c & 255, c >> 8); }
+  return btoa(bin);
+}
+
 const BU_LGR_BAT = [
   '@echo off',
   'title AUTO UPDATE - Line Ranger (LGR) from GitHub',
@@ -7899,7 +7952,16 @@ const BU_LGR_BAT = [
   'taskkill /f /im adb.exe >nul 2>&1',
   'if exist "%ZIP_NAME%" del /q "%ZIP_NAME%"',
   'if exist "%EXTRACT_DIR%" rd /s /q "%EXTRACT_DIR%"',
-  'echo [2/5] Downloading latest version from GitHub ...',
+  'echo [2/5] Downloading changed files from GitHub (skip Tesseract-OCR) ...',
+  'mkdir "%EXTRACT_DIR%\\src" >nul 2>&1',
+  'powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + _psEncoded(BU_LGR_PS),
+  'if errorlevel 2 goto zipdl',
+  'if errorlevel 1 goto dlfail',
+  'set "SRC=%EXTRACT_DIR%\\src"',
+  'dir /s /b /a-d "%SRC%" >nul 2>&1 || goto cleanup',
+  'goto copy',
+  ':zipdl',
+  'echo [2/5] File list unavailable - downloading full zip ...',
   'curl -k -f -L --retry 3 --retry-delay 3 --connect-timeout 15 --speed-limit 1024 --speed-time 60 "%REPO_URL%" -o "%ZIP_NAME%.curl" >nul 2>>"%DOWNLOAD_LOG%"',
   'if errorlevel 1 del /q "%ZIP_NAME%.curl" >nul 2>&1',
   'if exist "%ZIP_NAME%.curl" move /y "%ZIP_NAME%.curl" "%ZIP_NAME%" >nul',
@@ -7910,13 +7972,16 @@ const BU_LGR_BAT = [
   'set "SRC="',
   'for /d %%f in ("%EXTRACT_DIR%\\*") do set "SRC=%%f"',
   'if not defined SRC goto exfail',
-  'echo [4/5] Copying new files over this folder (backup / backup-id are kept) ...',
   'if exist "%SRC%\\backup" rd /s /q "%SRC%\\backup"',
   'if exist "%SRC%\\backup-id" rd /s /q "%SRC%\\backup-id"',
+  'if exist "%SRC%\\Tesseract-OCR" rd /s /q "%SRC%\\Tesseract-OCR"',
   'if exist "%SRC%\\autoupdate-lg.bat" del /q "%SRC%\\autoupdate-lg.bat"',
   'if exist "img" rd /s /q "img"',
+  ':copy',
+  'echo [4/5] Copying new files over this folder (backup / backup-id are kept) ...',
   'xcopy /s /e /y /c "%SRC%\\*" "%~dp0." >nul',
   'if errorlevel 1 goto cpfail',
+  ':cleanup',
   'echo [5/5] Cleaning up ...',
   'del /q "%ZIP_NAME%" >nul 2>&1',
   'rd /s /q "%EXTRACT_DIR%" >nul 2>&1',
