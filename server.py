@@ -598,6 +598,18 @@ def handle_shutdown_req(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_reboot_pc")
+def handle_reboot_pc_req(data):
+    """รีสตาร์ท Windows ของเครื่องลูก (ส่ง cancel: true เพื่อยกเลิกภายในเวลาหน่วง)"""
+    req_id = send_to_agent(data["agent_id"], "reboot_pc",
+                           {"delay": data.get("delay"), "cancel": bool(data.get("cancel"))},
+                           request.sid)
+    if req_id:
+        _emit_sent(req_id, data)
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 @socketio.on("request_self_update")
 def handle_self_update_req(data):
     """สั่งให้ agent ดึงโค้ดใหม่จาก GitHub + รีสตาร์ทตัวเอง"""
@@ -5989,6 +6001,16 @@ function openOneClickDashboard() {
       <div id="ocFileHint" style="font-size:11px; color:var(--text-dim); margin-top:4px">⏳ กำลังดึงรายชื่อไฟล์...</div>
       <div class="pick-head" style="margin:12px 0 0">
         <button class="btn btn-primary" id="ocGoBtn" onclick="ocRunAll()">🚀 เริ่ม One-click (เครื่องที่ติ๊ก)</button>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap"
+               title="หน่วงเวลาก่อนเครื่องรีสตาร์ทจริง — ยกเลิกได้ภายในเวลานี้">
+          ♻️ หน่วง <input type="number" id="ocRebootDelay" min="5" max="600" value="30"
+            style="width:70px; padding:6px 8px"> วิ</label>
+        <button class="btn" id="ocRebootBtn" style="border-color:var(--danger); color:var(--danger)"
+                onclick="ocRebootAll()" title="สั่งรีสตาร์ท Windows ของเครื่องที่ติ๊ก (ของจริง ไม่ใช่แค่ปิด agent)">
+          ♻️ รีสตาร์ทเครื่อง (ที่ติ๊ก)</button>
+        <button class="btn" id="ocRebootCancelBtn" onclick="ocRebootAll(true)"
+                title="ยกเลิกคำสั่งรีสตาร์ทที่ตั้งค้างไว้ ใช้ได้ก่อนครบเวลาหน่วง">
+          ✋ ยกเลิกรีสตาร์ท</button>
         <span style="flex:1"></span>
         <button class="btn" onclick="ocTickAll(true)">ติ๊กทุกเครื่อง</button>
         <button class="btn" onclick="ocTickAll(false)">เอาออกทั้งหมด</button>
@@ -6086,6 +6108,54 @@ async function ocRunOne(i, cfg, quiet) {
   set(OC_S('success', '✅ เสร็จ: ' + escHtml(steps.join(' → '))));
   if (!quiet) toast(nm + ': one-click เสร็จ', 'success');
   return true;
+}
+
+// ♻️ รีสตาร์ท Windows ของเครื่องที่ติ๊ก (ของจริง) · cancel=true = ยกเลิกคำสั่งที่ตั้งค้างไว้
+async function ocRebootAll(cancel) {
+  const idxs = ocIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  const d = parseInt((document.getElementById('ocRebootDelay') || {}).value || '30', 10);
+  const delay = isNaN(d) ? 30 : Math.max(5, Math.min(600, d));
+  const names = idxs.map(i => { const a = _ocAgents[i]; return a ? (a.name || a.hostname || a.agent_id) : '?'; });
+
+  if (!cancel) {
+    // งานนี้ย้อนกลับไม่ได้และกระทบทั้งฟลีต — ยืนยัน 2 ชั้น ชั้นหลังต้องพิมพ์เอง
+    if (!confirm(`♻️ รีสตาร์ท Windows จริงๆ ${idxs.length} เครื่อง ?\n\n`
+      + names.slice(0, 12).join(', ') + (names.length > 12 ? ` (และอีก ${names.length - 12})` : '')
+      + `\n\nบอทและจอทั้งหมดจะถูกปิดแบบบังคับ เครื่องจะรีสตาร์ทในอีก ${delay} วินาที\n`
+      + `(กด "ยกเลิกรีสตาร์ท" ได้ก่อนครบเวลา)`)) return;
+    const typed = prompt(`พิมพ์  RESTART  เพื่อยืนยันรีสตาร์ท ${idxs.length} เครื่อง`);
+    if ((typed || '').trim().toUpperCase() !== 'RESTART') { toast('ยกเลิกแล้ว ไม่ได้สั่งอะไร', 'info'); return; }
+  }
+
+  const btn = document.getElementById(cancel ? 'ocRebootCancelBtn' : 'ocRebootBtn');
+  if (btn) btn.disabled = true;
+  let ok = 0;
+  const errs = [];
+  mmProgress((cancel ? '✋ กำลังยกเลิก...' : '♻️ กำลังสั่งรีสตาร์ท...') + ` 0/<b>${idxs.length}</b>`, 0);
+  let doneN = 0;
+  await Promise.all(idxs.map(async (i) => {
+    const a = _ocAgents[i];
+    const nm = a ? (a.name || a.hostname || a.agent_id) : '?';
+    const el = document.getElementById('oc_status_' + i);
+    const r = await mcReq(a.agent_id, 'request_reboot_pc', { delay: delay, cancel: !!cancel }, 60000);
+    doneN++;
+    if (r && !r.error && r.success) {
+      ok++;
+      if (el) el.innerHTML = OC_S(cancel ? 'success' : 'warning',
+        cancel ? '✋ ยกเลิกรีสตาร์ทแล้ว' : `♻️ จะรีสตาร์ทในอีก ${r.delay || delay} วิ`);
+    } else {
+      errs.push(nm + ': ' + ((r && r.error) || 'ไม่ตอบ'));
+      if (el) el.innerHTML = OC_S('danger', '❌ ' + escHtml((r && r.error) || 'ไม่ตอบ'));
+    }
+    mmProgress((cancel ? '✋ ยกเลิก' : '♻️ สั่งรีสตาร์ท') + ` <b>${doneN}</b>/<b>${idxs.length}</b>`,
+               Math.round(doneN * 100 / idxs.length),
+               doneN === idxs.length ? (ok === idxs.length ? 'var(--success)' : 'var(--warning)') : 'var(--accent)');
+  }));
+  if (btn) btn.disabled = false;
+  if (errs.length) alert('⚠️ มีเครื่องที่ไม่สำเร็จ:\n' + errs.slice(0, 8).join('\n'));
+  else toast(cancel ? `ยกเลิกรีสตาร์ทแล้ว ${ok} เครื่อง` : `สั่งรีสตาร์ทแล้ว ${ok} เครื่อง (อีก ${delay} วิ)`,
+             'success');
 }
 
 async function ocRunAll() {

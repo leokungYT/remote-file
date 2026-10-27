@@ -529,6 +529,8 @@ def _dispatch_command(data):
             handle_move_folder(req_id, payload)
         elif action == "shutdown":
             handle_shutdown(req_id, payload)
+        elif action == "reboot_pc":
+            handle_reboot_pc(req_id, payload)
         elif action == "clear_input":
             handle_clear_input(req_id, payload)
         elif action == "self_update":
@@ -2469,29 +2471,73 @@ def _run_hidden(args, timeout=30):
     return out, r.returncode
 
 
+_MUMU_IMAGES = ("MuMu*", "Nemu*")       # ชื่อโปรเซสของ MuMu ทุกรุ่น (ใช้ wildcard ได้กับ taskkill /IM)
+
+
 def _mumu_kill_all():
-    """taskkill ทุก process ที่ชื่อมี MuMu หรือ Nemu (ปิด MuMu ทั้งหมด)"""
-    killed = []
+    """ปิดทุก process ของ MuMu
+
+    *** ของเดิมช้ามากจนพังบนเครื่องที่เปิดหลายสิบจอ ***
+      - tasklist ไล่ "ทุก process ในเครื่อง" ซึ่งบนเครื่องที่รัน MuMu 15-100 จอ
+        ใช้เวลาเกิน 15 วิประจำ -> timeout -> ปิด MuMu ไม่ได้เลยสักตัว
+      - แล้วยังสั่ง taskkill ทีละ PID อีก (ตัวละไม่เกิน 10 วิ) 100 โปรเซส = ช้ามาก
+    ตอนนี้ยิง taskkill ด้วย wildcard ชื่อโปรเซสตรงๆ ไม่ต้องไล่ดูรายการก่อน
+    ถ้าวิธีนี้ไม่ได้ผลค่อยถอยไปใช้วิธีเดิม (แต่ขยายเวลาและสั่งรวดเดียวหลาย PID)
+    """
+    killed, errors = [], []
+
+    # ── ทางหลัก: ฆ่าตามชื่อโปรเซสเลย ไม่ต้อง enumerate ──
+    #    /T = ฆ่าลูกหลานด้วย · ไม่เจอสักตัวจะคืน exit code 128 ซึ่งไม่ใช่ error
+    for img in _MUMU_IMAGES:
+        try:
+            out, _rc = _run_hidden(["taskkill", "/F", "/T", "/IM", img], timeout=90)
+            killed += [ln for ln in out.splitlines() if "SUCCESS" in ln.upper()]
+        except Exception as e:
+            errors.append(f"{img}: {e}")
+
+    if killed:
+        logger.info(f"  MuMu kill: ปิด {len(killed)} process (ตามชื่อโปรเซส)")
+        return {"success": True, "killed": killed, "count": len(killed)}
+
+    # ── ทางสำรอง: ไล่ดูรายการแล้วฆ่าตาม PID (เผื่อ wildcard ใช้ไม่ได้) ──
     try:
-        out, _ = _run_hidden(["tasklist", "/fo", "csv", "/nh"], timeout=15)
-        for line in out.splitlines():
-            parts = [x.strip().strip('"') for x in line.split('","')]
-            if not parts or not parts[0]:
-                continue
-            name = parts[0].strip('"')
-            low = name.lower()
-            if "mumu" in low or "nemu" in low:
-                pid = parts[1] if len(parts) > 1 else ""
-                if pid.isdigit():
-                    try:
-                        _run_hidden(["taskkill", "/F", "/PID", pid], timeout=10)
-                        killed.append(name)
-                    except Exception:
-                        pass
+        out, _ = _run_hidden(["tasklist", "/fo", "csv", "/nh"], timeout=120)
     except Exception as e:
-        return {"error": f"taskkill ล้มเหลว: {e}"}
-    logger.info(f"  MuMu kill: ปิด {len(killed)} process")
-    return {"success": True, "killed": killed, "count": len(killed)}
+        hint = (" · " + "; ".join(errors[:2])) if errors else ""
+        return {"error": f"ดูรายการโปรเซสไม่ทัน ({e}) — เครื่องน่าจะกำลังโหลดหนัก ลองใหม่อีกครั้ง{hint}"}
+
+    pids, names = [], []
+    for line in out.splitlines():
+        parts = [x.strip().strip('"') for x in line.split('","')]
+        if not parts or not parts[0]:
+            continue
+        name = parts[0].strip('"')
+        low = name.lower()
+        if ("mumu" in low or "nemu" in low) and len(parts) > 1 and parts[1].isdigit():
+            pids.append(parts[1])
+            names.append(name)
+
+    if not pids:
+        logger.info("  MuMu kill: ไม่มี process ของ MuMu เปิดอยู่")
+        return {"success": True, "killed": [], "count": 0}
+
+    # สั่งรวดเดียวหลาย PID (taskkill รับ /PID ซ้ำได้) แบ่งเป็นก้อนละ 40 กันคำสั่งยาวเกิน
+    for i in range(0, len(pids), 40):
+        chunk = pids[i:i + 40]
+        args = ["taskkill", "/F", "/T"]
+        for pid in chunk:
+            args += ["/PID", pid]
+        try:
+            _run_hidden(args, timeout=90)
+            killed += names[i:i + 40]
+        except Exception as e:
+            errors.append(str(e))
+
+    logger.info(f"  MuMu kill: ปิด {len(killed)} process (ตาม PID)")
+    res = {"success": True, "killed": killed, "count": len(killed)}
+    if errors:
+        res["warn"] = "; ".join(errors[:3])
+    return res
 
 
 _MUMU_VFLAGS = ("-v", "--vmindex")
@@ -4479,6 +4525,53 @@ def handle_screenshot(req_id, data):
                                "w": img.size[0], "h": img.size[1]})
     except Exception as e:
         send_response(req_id, {"error": f"จับภาพหน้าจอไม่ได้: {e}"})
+
+
+def handle_reboot_pc(req_id, data):
+    """รีสตาร์ท Windows ของเครื่องนี้จริงๆ (คนละอย่างกับ shutdown ที่ปิดแค่ตัว agent)
+
+    ตั้งเวลาหน่วงไว้เสมอ เพื่อให้ยกเลิกทันถ้าสั่งผิด (ส่ง cancel มาภายในเวลานั้น)
+    /f = บังคับปิดโปรแกรมที่ค้าง (MuMu ไม่ยอมปิดเองบ่อย) ไม่งั้นรีสตาร์ทไม่ไป
+    agent จะกลับมาเองหลังเครื่องบูต ถ้าตั้ง autostart ไว้ (install-autostart.bat)
+    """
+    if os.name != "nt":
+        send_response(req_id, {"error": "สั่งรีสตาร์ทได้เฉพาะ Windows"})
+        return
+
+    # ยกเลิกคำสั่งที่ตั้งค้างไว้
+    if data.get("cancel"):
+        try:
+            out, rc = _run_hidden(["shutdown", "/a"], timeout=20)
+            if rc == 0:
+                logger.info("  reboot: ยกเลิกคำสั่งรีสตาร์ทแล้ว")
+                send_response(req_id, {"success": True, "cancelled": True})
+            else:
+                # rc != 0 ส่วนใหญ่แปลว่า "ไม่มีคำสั่งค้างอยู่" ซึ่งไม่ใช่ปัญหา
+                send_response(req_id, {"success": True, "cancelled": False,
+                                       "message": "ไม่มีคำสั่งรีสตาร์ทค้างอยู่"})
+        except Exception as e:
+            send_response(req_id, {"error": f"ยกเลิกไม่สำเร็จ: {e}"})
+        return
+
+    try:
+        delay = int(data.get("delay") or 20)
+    except Exception:
+        delay = 20
+    delay = max(5, min(600, delay))          # กันตั้ง 0 แล้วยกเลิกไม่ทัน
+
+    try:
+        out, rc = _run_hidden(
+            ["shutdown", "/r", "/t", str(delay), "/f", "/c",
+             "Remote File Manager: restarting"], timeout=20)
+        if rc != 0:
+            send_response(req_id, {"error": f"สั่งรีสตาร์ทไม่สำเร็จ (code {rc}): {' '.join((out or '').split())[:120]}"})
+            return
+    except Exception as e:
+        send_response(req_id, {"error": f"สั่งรีสตาร์ทไม่สำเร็จ: {e}"})
+        return
+
+    logger.warning(f"♻️ ได้รับคำสั่งรีสตาร์ทเครื่อง — จะรีสตาร์ทในอีก {delay} วินาที")
+    send_response(req_id, {"success": True, "delay": delay})
 
 
 def handle_shutdown(req_id, data):
