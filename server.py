@@ -6001,6 +6001,9 @@ function openOneClickDashboard() {
       <div id="ocFileHint" style="font-size:11px; color:var(--text-dim); margin-top:4px">⏳ กำลังดึงรายชื่อไฟล์...</div>
       <div class="pick-head" style="margin:12px 0 0">
         <button class="btn btn-primary" id="ocGoBtn" onclick="ocRunAll()">🚀 เริ่ม One-click (เครื่องที่ติ๊ก)</button>
+        <button class="btn" id="ocUpdBtn" onclick="ocUpdateAgents()"
+                title="ดึง agent.py ตัวล่าสุดมาแล้วรีสตาร์ท agent — ต้องทำก่อนถ้าเครื่องขึ้น Unknown action">
+          ⬆️ อัปเดต agent (ที่ติ๊ก)</button>
         <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap"
                title="หน่วงเวลาก่อนเครื่องรีสตาร์ทจริง — ยกเลิกได้ภายในเวลานี้">
           ♻️ หน่วง <input type="number" id="ocRebootDelay" min="5" max="600" value="30"
@@ -6050,7 +6053,13 @@ async function ocRunOne(i, cfg, quiet) {
   const nm = a.name || a.hostname || a.agent_id;
   const steps = [];
   const trail = () => steps.length ? ' <span style="color:var(--text-dim); font-size:11px">(' + escHtml(steps.join(' → ')) + ')</span>' : '';
-  const fail = (t) => { set(OC_S('danger', '❌ ' + escHtml(t)) + trail()); if (!quiet) toast(nm + ': ' + t, 'error'); return false; };
+  const fail = (t) => {
+    // agent เก่าไม่รู้จักคำสั่งใหม่ — บอกทางแก้ไปเลย ไม่ใช่โยน error ดิบๆ ให้งง
+    if (/unknown action/i.test(String(t))) t += ' — เครื่องนี้ยังใช้ agent เวอร์ชันเก่า กดปุ่ม "⬆️ อัปเดต agent (ที่ติ๊ก)" ก่อน';
+    set(OC_S('danger', '❌ ' + escHtml(t)) + trail());
+    if (!quiet) toast(nm + ': ' + t, 'error');
+    return false;
+  };
 
   if (cfg.stop) {
     set(OC_S('accent', '⏹️ หยุดบอทใน ' + escHtml(cfg.base) + '...'));
@@ -6110,6 +6119,45 @@ async function ocRunOne(i, cfg, quiet) {
   return true;
 }
 
+// ⬆️ อัปเดต agent ของเครื่องที่ติ๊ก (ขนาน) — เครื่องจะหลุดแล้วกลับมาเองในไม่กี่วิ
+//    ต้องทำก่อนใช้คำสั่งใหม่ๆ ไม่งั้น agent เก่าจะตอบ "Unknown action: ..."
+async function ocUpdateAgents() {
+  const idxs = ocIncluded();
+  if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
+  if (!confirm(`⬆️ อัปเดต agent ${idxs.length} เครื่อง ?\n\n`
+    + `แต่ละเครื่องจะดึง agent.py ตัวล่าสุดแล้วรีสตาร์ทตัวเอง\n`
+    + `(หลุดจากหน้านี้แล้วกลับมาเองในไม่กี่วินาที — บอทและจอไม่ถูกแตะ)`)) return;
+
+  const btn = document.getElementById('ocUpdBtn');
+  if (btn) btn.disabled = true;
+  let doneN = 0, ok = 0, fresh = 0;
+  const errs = [];
+  mmProgress(`⬆️ กำลังอัปเดต agent... 0/<b>${idxs.length}</b>`, 0);
+  await Promise.all(idxs.map(async (i) => {
+    const a = _ocAgents[i];
+    const nm = a ? (a.name || a.hostname || a.agent_id) : '?';
+    const el = document.getElementById('oc_status_' + i);
+    if (el) el.innerHTML = OC_S('accent', '⬆️ กำลังอัปเดต agent...');
+    const r = await rpc(a.agent_id, 'request_self_update', {}, 60000);
+    doneN++;
+    if (r && !r.error) {
+      ok++;
+      if (r.updated === false) { fresh++; if (el) el.innerHTML = OC_S('success', '✅ เป็นตัวล่าสุดอยู่แล้ว'); }
+      else if (el) el.innerHTML = OC_S('warning', '⬆️ มีของใหม่ กำลังรีสตาร์ท agent... (รอ ~10 วิ)');
+    } else {
+      const msg = (r && r.error) || 'ไม่ตอบ';
+      errs.push(nm + ': ' + msg);
+      if (el) el.innerHTML = OC_S('danger', '❌ ' + escHtml(msg));
+    }
+    mmProgress(`⬆️ อัปเดต agent <b>${doneN}</b>/<b>${idxs.length}</b>`,
+               Math.round(doneN * 100 / idxs.length),
+               doneN === idxs.length ? (ok === idxs.length ? 'var(--success)' : 'var(--warning)') : 'var(--accent)');
+  }));
+  if (btn) btn.disabled = false;
+  if (errs.length) alert('⚠️ อัปเดตไม่สำเร็จบางเครื่อง:\n' + errs.slice(0, 8).join('\n'));
+  else toast(`อัปเดต agent เสร็จ ${ok} เครื่อง (ล่าสุดอยู่แล้ว ${fresh})`, 'success');
+}
+
 // ♻️ รีสตาร์ท Windows ของเครื่องที่ติ๊ก (ของจริง) · cancel=true = ยกเลิกคำสั่งที่ตั้งค้างไว้
 async function ocRebootAll(cancel) {
   const idxs = ocIncluded();
@@ -6145,8 +6193,10 @@ async function ocRebootAll(cancel) {
       if (el) el.innerHTML = OC_S(cancel ? 'success' : 'warning',
         cancel ? '✋ ยกเลิกรีสตาร์ทแล้ว' : `♻️ จะรีสตาร์ทในอีก ${r.delay || delay} วิ`);
     } else {
-      errs.push(nm + ': ' + ((r && r.error) || 'ไม่ตอบ'));
-      if (el) el.innerHTML = OC_S('danger', '❌ ' + escHtml((r && r.error) || 'ไม่ตอบ'));
+      let msg = (r && r.error) || 'ไม่ตอบ';
+      if (/unknown action/i.test(msg)) msg = 'agent เวอร์ชันเก่า — กด "⬆️ อัปเดต agent (ที่ติ๊ก)" ก่อน';
+      errs.push(nm + ': ' + msg);
+      if (el) el.innerHTML = OC_S('danger', '❌ ' + escHtml(msg));
     }
     mmProgress((cancel ? '✋ ยกเลิก' : '♻️ สั่งรีสตาร์ท') + ` <b>${doneN}</b>/<b>${idxs.length}</b>`,
                Math.round(doneN * 100 / idxs.length),
