@@ -7900,7 +7900,7 @@ const BU_LGR_BAT = [
   'if exist "%ZIP_NAME%" del /q "%ZIP_NAME%"',
   'if exist "%EXTRACT_DIR%" rd /s /q "%EXTRACT_DIR%"',
   'echo [2/5] Downloading latest version from GitHub ...',
-  'curl -k -f -L --retry 3 --retry-delay 3 --connect-timeout 15 "%REPO_URL%" -o "%ZIP_NAME%.curl" >nul 2>>"%DOWNLOAD_LOG%"',
+  'curl -k -f -L --retry 3 --retry-delay 3 --connect-timeout 15 --speed-limit 1024 --speed-time 60 "%REPO_URL%" -o "%ZIP_NAME%.curl" >nul 2>>"%DOWNLOAD_LOG%"',
   'if errorlevel 1 del /q "%ZIP_NAME%.curl" >nul 2>&1',
   'if exist "%ZIP_NAME%.curl" move /y "%ZIP_NAME%.curl" "%ZIP_NAME%" >nul',
   "if not exist \"%ZIP_NAME%\" powershell -NoProfile -Command \"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try { Invoke-WebRequest -Uri '%REPO_URL%' -OutFile '%ZIP_NAME%' -UseBasicParsing -TimeoutSec 60 } catch { $_.Exception.Message | Add-Content -Path '%DOWNLOAD_LOG%'; exit 1 }\" >nul 2>&1",
