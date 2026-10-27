@@ -7893,11 +7893,12 @@ $ErrorActionPreference = 'Stop'
 $log = $env:DOWNLOAD_LOG
 $wc = New-Object Net.WebClient
 $wc.Headers.Add('User-Agent', 'lgr-update')
+$wc.Encoding = [Text.Encoding]::UTF8   # ชื่อไฟล์ภาษาไทย: ถ้าไม่ตั้ง จะถอด JSON ด้วย codepage เครื่อง → path เพี้ยน → 404
 try { $t = $wc.DownloadString('https://api.github.com/repos/leokungYT/main/git/trees/main?recursive=1') | ConvertFrom-Json }
 catch { Add-Content -Path $log -Value ('tree api: ' + $_.Exception.Message); exit 2 }
 if ($t.truncated) { exit 2 }
 $skip = '^(Tesseract-OCR|logs|old|backup|backup-id)/|^autoupdate-lg\.bat$'
-$files = @($t.tree | Where-Object { $_.type -eq 'blob' -and $_.path -notmatch $skip })
+$files = @($t.tree | Where-Object { $_.type -eq 'blob' -and $_.path -notmatch $skip -and $_.path -notmatch '[^\x20-\x7E]' })   # ข้ามไฟล์ชื่อไม่ใช่อังกฤษ (ไทย ฯลฯ)
 $dst = Join-Path $env:EXTRACT_DIR 'src'
 $keep = @{}
 $i = 0; $got = 0
