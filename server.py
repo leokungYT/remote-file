@@ -2259,6 +2259,41 @@ WEB_UI_HTML = r"""
     grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
     gap: 12px;
   }
+  /* ── แผงความคืบหน้าตอนดึงข้อมูลจากเครื่องลูก (ใช้ร่วมกันทุก dashboard) ── */
+  .dl-wrap {
+    max-width: 720px; margin: 40px auto; padding: 26px 28px;
+    background: linear-gradient(160deg, var(--bg-card), var(--bg-secondary));
+    border: 1px solid var(--border); border-radius: 18px;
+  }
+  .dl-head { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-secondary); }
+  .dl-head .spinner { width: 16px; height: 16px; border-width: 2px; margin: 0; flex: none; }
+  .dl-time { margin-left: auto; font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .dl-big {
+    text-align: center; margin: 16px 0 4px;
+    font-size: 40px; font-weight: 800; letter-spacing: -1px; color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .dl-big span { color: var(--text-dim); font-weight: 600; font-size: 24px; }
+  .dl-sub { text-align: center; font-size: 12px; color: var(--text-dim); margin-bottom: 16px; }
+  .dl-track { height: 8px; border-radius: 999px; background: rgba(255,255,255,0.07); overflow: hidden; }
+  .dl-bar {
+    height: 100%; width: 0%; border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--success));
+    transition: width 0.25s ease;
+  }
+  .dl-legend { display: flex; justify-content: center; gap: 16px; margin-top: 14px; font-size: 12px; }
+  .dl-legend b { font-variant-numeric: tabular-nums; }
+  .dl-dots { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; justify-content: center; }
+  .dl-dot {
+    font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-dim);
+    background: rgba(255,255,255,0.03);
+    transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+  }
+  .dl-dot.ok { color: var(--success); border-color: rgba(52,211,153,0.45); background: rgba(52,211,153,0.10); }
+  .dl-dot.err { color: var(--danger); border-color: rgba(248,113,113,0.45); background: rgba(248,113,113,0.10); }
+  .dl-dot.wait { opacity: 0.55; }
+
   /* VPN: เครื่อง 30 กว่าเครื่องในตารางแถวละเครื่อง ยาวจนต้องเลื่อนทั้งหน้า
      เปลี่ยนเป็นการ์ดไหลไปทางขวา เต็มแถวแล้วขึ้นบรรทัดใหม่ */
   .wg-grid {
@@ -2973,7 +3008,9 @@ function renderHeroDash(kind, comboTotals, grandTotal, perAgent, totalMachines, 
       <div class="stat-tile"><div class="stat-label">ไฟล์ no-hero รวม</div><div class="stat-val" style="color:var(--warning)">${noHeroTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${sorted.length}</div></div>
     </div>
-    ${loadStates.length ? `<h3 style="margin:14px 0 8px; font-size:14px; color:var(--text-secondary)">สถานะโหลดรายเครื่อง — ${loadDone}/${loadStates.length} เสร็จ</h3><div class="agent-stats pes-load-grid">${loadStatusRows}</div>` : ''}
+    ${loadStates.length ? dashInlineProgress(loadStates, loadDone) : ''}
+    ${loadStates.length && (loadDone < loadStates.length || loadStates.some(s => s.state !== 'success'))
+      ? `<div class="agent-stats pes-load-grid">${loadStatusRows}</div>` : ''}
     <div class="pick-panel" style="margin:0 0 18px">
       <div class="pick-head" style="margin-bottom:0">
         <span class="pick-title">🚫 ไฟล์ใน pes/no-hero <span style="color:var(--text-dim); font-weight:400">— ${noHeroTotal.toLocaleString()} ไฟล์ จากเครื่องที่เลือก</span></span>
@@ -3164,7 +3201,8 @@ function rpc(agentId, eventName, payload, waitMs) {
 // ทำงานกับหลายเครื่องพร้อมกัน แต่จำกัดจำนวนที่วิ่งพร้อมกัน (กัน server/เน็ตสำลัก)
 // คืนผลเรียงตามลำดับเดิมเสมอ
 const RPC_PARALLEL = 32;
-async function pMap(items, fn, limit) {
+// onEach(i, result) ถูกเรียกทันทีที่แต่ละเครื่องตอบ — เอาไว้อัปเดตแถบความคืบหน้า
+async function pMap(items, fn, limit, onEach) {
   const out = new Array(items.length);
   let next = 0;
   const worker = async () => {
@@ -3172,10 +3210,104 @@ async function pMap(items, fn, limit) {
       const i = next++;
       if (i >= items.length) return;
       out[i] = await fn(items[i], i);
+      if (onEach) { try { onEach(i, out[i]); } catch (e) {} }
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit || RPC_PARALLEL, items.length) }, worker));
   return out;
+}
+
+// ══════════════════════════════════════════════════════════════
+//  แผงความคืบหน้าตอนดึงข้อมูล — ใช้ร่วมกันทุก dashboard
+//  เดิมหน้าว่างเปล่าจนกว่าเครื่อง "สุดท้าย" จะตอบ เครื่องที่ปิดอยู่กิน timeout 20 วิเต็ม
+//  เลยดูเหมือนค้างทั้งที่ส่วนใหญ่ตอบมาตั้งนานแล้ว — ตอนนี้เห็นสดๆ ว่าใครตอบแล้ว/ยัง
+// ══════════════════════════════════════════════════════════════
+let _dlState = null;
+
+function dashLoaderHtml(agents, label) {
+  const names = (agents || []).map(a => a.name || a.hostname || a.agent_id);
+  _dlState = { total: names.length, done: 0, ok: 0, err: 0, t0: Date.now(), timer: null };
+  const dots = names.map((n, i) =>
+    `<span class="dl-dot wait" id="dl_d_${i}">${escHtml(n)}</span>`).join('');
+  // นาฬิกาเดินเอง ให้รู้ว่าไม่ได้ค้าง
+  setTimeout(() => {
+    if (!_dlState) return;
+    _dlState.timer = setInterval(() => {
+      const el = document.getElementById('dlTime');
+      if (!el || !_dlState) { if (_dlState && _dlState.timer) clearInterval(_dlState.timer); return; }
+      el.textContent = ((Date.now() - _dlState.t0) / 1000).toFixed(1) + ' วิ';
+    }, 100);
+  }, 0);
+  return `
+    <div class="dl-wrap">
+      <div class="dl-head">
+        <div class="spinner"></div>
+        <span>${escHtml(label || 'กำลังดึงข้อมูลจากเครื่องลูก')}</span>
+        <span class="dl-time" id="dlTime">0.0 วิ</span>
+      </div>
+      <div class="dl-big"><span id="dlDone">0</span> <span>/ ${names.length}</span></div>
+      <div class="dl-sub">เครื่องที่ตอบแล้ว</div>
+      <div class="dl-track"><div class="dl-bar" id="dlBar"></div></div>
+      <div class="dl-legend">
+        <span style="color:var(--success)">✓ สำเร็จ <b id="dlOk">0</b></span>
+        <span style="color:var(--danger)">✕ ไม่ตอบ <b id="dlErr">0</b></span>
+        <span style="color:var(--text-dim)">⋯ รออยู่ <b id="dlWait">${names.length}</b></span>
+      </div>
+      <div class="dl-dots">${dots}</div>
+    </div>`;
+}
+
+// เรียกทุกครั้งที่เครื่องหนึ่งตอบ — ok=false คือไม่ตอบ/ผิดพลาด
+function dashLoaderTick(i, ok) {
+  const st = _dlState;
+  if (!st) return;
+  st.done++;
+  if (ok) st.ok++; else st.err++;
+  const dot = document.getElementById('dl_d_' + i);
+  if (dot) { dot.classList.remove('wait'); dot.classList.add(ok ? 'ok' : 'err'); }
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  set('dlDone', st.done); set('dlOk', st.ok); set('dlErr', st.err);
+  set('dlWait', st.total - st.done);
+  const bar = document.getElementById('dlBar');
+  if (bar) bar.style.width = Math.round(st.done * 100 / Math.max(1, st.total)) + '%';
+}
+
+// แถบความคืบหน้าแบบบาง สำหรับหน้าที่วาดผลใหม่ทุกครั้งที่มีเครื่องตอบ (เช่น Dashboard PES)
+// โหลดครบแล้วจะยุบเหลือสรุปบรรทัดเดียว ไม่เกะกะ
+function dashInlineProgress(states, done) {
+  const total = states.length;
+  const ok = states.filter(s => s.state === 'success').length;
+  const warn = states.filter(s => s.state === 'warning').length;
+  const err = states.filter(s => s.state === 'error').length;
+  const pct = Math.round(done * 100 / Math.max(1, total));
+  const finished = done >= total;
+  const head = finished
+    ? `<span style="color:var(--success)">✓ โหลดครบ ${total} เครื่อง</span>`
+    : `<span class="spinner" style="width:13px;height:13px;border-width:2px;margin:0;display:inline-block;vertical-align:-2px"></span>
+       <span style="margin-left:7px">กำลังโหลด <b>${done}</b>/<b>${total}</b> เครื่อง</span>`;
+  const bits = [
+    ok ? `<span style="color:var(--success)">✓ ${ok}</span>` : '',
+    warn ? `<span style="color:var(--warning)">⚠ ${warn}</span>` : '',
+    err ? `<span style="color:var(--danger)">✕ ${err}</span>` : '',
+  ].filter(Boolean).join('<span style="color:var(--text-dim)"> · </span>');
+  return `
+    <div style="margin:14px 0 10px">
+      <div style="display:flex; align-items:center; gap:10px; font-size:13px; color:var(--text-secondary); margin-bottom:7px">
+        <span>${head}</span><span style="flex:1"></span><span style="font-size:12px">${bits}</span>
+      </div>
+      ${finished && !warn && !err ? '' :
+        `<div class="dl-track"><div class="dl-bar" style="width:${pct}%"></div></div>`}
+    </div>`;
+}
+
+function dashLoaderStop() {
+  if (_dlState && _dlState.timer) clearInterval(_dlState.timer);
+  _dlState = null;
+}
+
+// ใส่ต่อท้าย pMap ของ dashboard: อัปเดตแถบความคืบหน้าให้อัตโนมัติ
+function dlTick(okOf) {
+  return (i, r) => dashLoaderTick(i, okOf ? okOf(r) : !(r && r.error));
 }
 
 function countFolderOnAgent(agentId, subpath, base) {
@@ -3231,13 +3363,13 @@ async function openPlayDashboard() {
       ${pcSelectHtml(_playScope, '_playScope=this.value; openPlayDashboard()')}
       <button class="btn btn-primary" onclick="openPlayDashboard()">🔄 รีเฟรช</button>
     </div>
-    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง (main\\${escHtml(_playFolder)})...</div>`;
+    ${dashLoaderHtml(agents, 'กำลังดึงข้อมูลจาก main\\' + _playFolder)}`;
   if (!allAgents.length) { content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>'; return; }
 
   const perAgent = [];
   const stageTotal = {};
   let grandTotal = 0, onlineCount = 0;
-  const res = await pMap(agents, a => countFolderOnAgent(a.agent_id, _playFolder, 'main'));
+  const res = await pMap(agents, a => countFolderOnAgent(a.agent_id, _playFolder, 'main'), null, dlTick());
   agents.forEach((a, i) => {
     const name = a.name || a.hostname || a.agent_id;
     const r = res[i];
@@ -3257,7 +3389,7 @@ async function openPlayDashboard() {
     perAgent.push({ name, stages, total });
   });
   _playData = { perAgent, stageTotal, totalMachines: agents.length, onlineCount, grandTotal };
-  _renderPlay();
+  dashLoaderStop(); _renderPlay();
 }
 
 function _renderPlay() {
@@ -3395,7 +3527,7 @@ function openSevenDayDashboard() {
       ${pcSelectHtml(_sevenScope, '_sevenScope=this.value; openSevenDayDashboard()')}
       <button class="btn btn-primary" onclick="openSevenDayDashboard()">🔄 รีเฟรช</button>
     </div>
-    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง (โฟลเดอร์ ${_sevenBase}/7day-check)...</div>`;
+    ${dashLoaderHtml(agents, 'กำลังดึงข้อมูลจาก ' + _sevenBase + '/7day-check')}`;
   if (!allAgents.length) { content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>'; return; }
   _sevenLoad(agents);
 }
@@ -3404,7 +3536,7 @@ async function _sevenLoad(agents) {
   const perAgent = [];
   const catTotal = {};
   let grandTotal = 0, onlineCount = 0;
-  const svRes = await pMap(agents, a => countFolderOnAgent(a.agent_id, '7day-check', _sevenBase));
+  const svRes = await pMap(agents, a => countFolderOnAgent(a.agent_id, '7day-check', _sevenBase), null, dlTick());
   agents.forEach((a, ai) => {
     const name = a.name || a.hostname || a.agent_id;
     const r = svRes[ai];
@@ -3422,7 +3554,7 @@ async function _sevenLoad(agents) {
     perAgent.push({ name, cats, total: (r.ids || []).length });
   });
   _sevenData = { perAgent, catTotal, totalMachines: agents.length, onlineCount, grandTotal };
-  _render7Day();
+  dashLoaderStop(); _render7Day();
 }
 
 function _render7Day() {
@@ -3548,7 +3680,7 @@ function openCoinDashboard() {
       ${pcSelectHtml(_coinScope, '_coinScope=this.value; openCoinDashboard()')}
       <button class="btn btn-primary" onclick="openCoinDashboard()">🔄 รีเฟรช</button>
     </div>
-    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง (โฟลเดอร์ pes/check-coin)...</div>`;
+    ${dashLoaderHtml(agents, 'กำลังดึงข้อมูลจาก pes/check-coin')}`;
   if (!allAgents.length) { content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>'; return; }
   _coinLoad(agents);
 }
@@ -3557,7 +3689,7 @@ async function _coinLoad(agents) {
   const perAgent = [];
   const numTotal = {};
   let grandTotal = 0, grandCoin = 0, onlineCount = 0;
-  const ccRes = await pMap(agents, a => countFolderOnAgent(a.agent_id, 'check-coin', 'pes'));
+  const ccRes = await pMap(agents, a => countFolderOnAgent(a.agent_id, 'check-coin', 'pes'), null, dlTick());
   agents.forEach((a, ai) => {
     const name = a.name || a.hostname || a.agent_id;
     const r = ccRes[ai];
@@ -3583,7 +3715,7 @@ async function _coinLoad(agents) {
   _coinPicked = new Set([..._coinPicked].filter(k => numTotal[k]));
   if (_coinFilter) _coinPicked = new Set(_coinKeysIn(numTotal));   // รีเฟรชแล้วเลขใหม่ที่เข้าเงื่อนไขก็ติดมาด้วย
   _coinData = { perAgent, numTotal, totalMachines: agents.length, onlineCount, grandTotal, grandCoin };
-  _renderCoin();
+  dashLoaderStop(); _renderCoin();
 }
 
 function _coinCmp(a, b) {          // เลขมากไปน้อย, 'อื่นๆ' ท้ายสุด
@@ -3751,7 +3883,7 @@ async function openFolderDash(kind) {
       ${pcSelectHtml(_folderScope[kind], `_folderScope['${kind}']=this.value; ${cfg.reopen}()`)}
       <button class="btn btn-primary" onclick="${cfg.reopen}()">🔄 รีเฟรช</button>
     </div>
-    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+    ${dashLoaderHtml(agents)}`;
 
   if (!allAgents.length) {
     content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
@@ -3760,7 +3892,7 @@ async function openFolderDash(kind) {
 
   const perAgent = [];
   let total = 0, onlineCount = 0;
-  const fdRes = await pMap(agents, a => countFolderOnAgent(a.agent_id, cfg.filesub || cfg.subpath, cfg.base));
+  const fdRes = await pMap(agents, a => countFolderOnAgent(a.agent_id, cfg.filesub || cfg.subpath, cfg.base), null, dlTick());
   agents.forEach((a, i) => {
     const name = a.name || a.hostname || a.agent_id;
     const ir = fdRes[i];
@@ -3773,7 +3905,7 @@ async function openFolderDash(kind) {
       perAgent.push({ name, agentId: a.agent_id, count: cnt, exists: ir ? ir.exists : undefined });
     }
   });
-  renderFolderDash(kind, perAgent, agents.length, onlineCount, total);
+  dashLoaderStop(); renderFolderDash(kind, perAgent, agents.length, onlineCount, total);
 }
 
 // แผง "⚖️ แบ่งไฟล์ให้พอดี" — ใช้ร่วมกันระหว่าง dashboard โฟลเดอร์ปกติกับหน้า Backup
@@ -4235,7 +4367,7 @@ async function openRangerDashboard() {
       ${pcSelectHtml(_rangerScope, '_rangerScope=this.value; openRangerDashboard()')}
       <button class="btn btn-primary" onclick="openRangerDashboard()">🔄 รีเฟรช</button>
     </div>
-    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+    ${dashLoaderHtml(agents)}`;
 
   if (!allAgents.length) {
     content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
@@ -4248,7 +4380,7 @@ async function openRangerDashboard() {
 
   // ถามพร้อมกันทีละ 8 เครื่อง — ของเดิมถามทีละเครื่อง 29 รอบ เครื่องที่ไม่ตอบ
   // กิน timeout 20 วิต่อตัว หน้าเลยค้างเป็นนาที
-  const rgRes = await pMap(agents, a => countRangerOnAgent(a.agent_id));
+  const rgRes = await pMap(agents, a => countRangerOnAgent(a.agent_id), null, dlTick());
   agents.forEach((a, i) => {
     const name = a.name || a.hostname || a.agent_id;
     const res = rgRes[i];
@@ -4265,7 +4397,7 @@ async function openRangerDashboard() {
     const combos = res.combos || {};
     for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
   });
-  renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, agents.length, onlineCount);
+  dashLoaderStop(); renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, agents.length, onlineCount);
 }
 
 function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, totalMachines, onlineCount) {
@@ -4402,7 +4534,7 @@ async function openBackupRich() {
       ${pcSelectHtml(_backupScope, '_backupScope=this.value; openBackupRich()')}
       <button class="btn btn-primary" onclick="openBackupRich()">🔄 รีเฟรช</button>
     </div>
-    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+    ${dashLoaderHtml(agents)}`;
 
   if (!allAgents.length) {
     content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
@@ -4417,7 +4549,7 @@ async function openBackupRich() {
   const bkRes = await pMap(agents, a => Promise.all([
     countBackupOnAgent(a.agent_id),
     countFolderOnAgent(a.agent_id, 'input-id', 'main'),
-  ]));
+  ]), null, dlTick(v => !!(v && v[0] && !v[0].error)));
   agents.forEach((a, i) => {
     const name = a.name || a.hostname || a.agent_id;
     const [res, ir] = bkRes[i] || [];
@@ -4442,7 +4574,7 @@ async function openBackupRich() {
     perAgent,
   };
   _backupRenderArgs = [comboTotals, grandTotal, matchedTotal, perAgent, agents.length, onlineCount];
-  renderBackupDash(...(_backupRenderArgs));
+  dashLoaderStop(); renderBackupDash(...(_backupRenderArgs));
 }
 
 // วาดหน้า Backup ใหม่จากข้อมูลเดิม (ใช้ตอนติ๊กเลือกเครื่องสำหรับแบ่ง input-id)
@@ -4598,14 +4730,14 @@ async function openRangerFindDashboard(useCache) {
   if (_rfScope !== 'ALL' && !allAgents.some(a => a.agent_id === _rfScope)) _rfScope = 'ALL';
   const agents = _rfScope === 'ALL' ? allAgents : allAgents.filter(a => a.agent_id === _rfScope);
 
-  if (useCache && _rfCache) { renderRangerFind(_rfCache); return; }
+  if (useCache && _rfCache) { dashLoaderStop(); renderRangerFind(_rfCache); return; }
 
   content.innerHTML = `
     <div class="toolbar">
       <h2 style="flex:1; font-size:18px">🔎 Line Ranger-Find — ${RANGER_CFG.label}</h2>
       <button class="btn btn-primary">🔄 รีเฟรช</button>
     </div>
-    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+    ${dashLoaderHtml(agents)}`;
 
   if (!allAgents.length) {
     content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
@@ -4618,7 +4750,7 @@ async function openRangerFindDashboard(useCache) {
   let onlineCount = 0;
 
   // 'folder' = อ่านชื่อตัวจากชื่อโฟลเดอร์ (backup-id\<ชุด>\<ชื่อตัว>\) ไม่ใช่จากชื่อไฟล์
-  const rfRes = await pMap(agents, a => countRangerOnAgent(a.agent_id, 'folder'));
+  const rfRes = await pMap(agents, a => countRangerOnAgent(a.agent_id, 'folder'), null, dlTick());
   agents.forEach((a, ai) => {
     const name = a.name || a.hostname || a.agent_id;
     const res = rfRes[ai];
@@ -7342,7 +7474,7 @@ async function openCookieDashboard() {
       ${pcSelectHtml(cookieScope, 'cookieScope=this.value; openCookieDashboard()')}
       <button class="btn btn-primary" onclick="openCookieDashboard()">🔄 รีเฟรช</button>
     </div>
-    <div class="loading"><div class="spinner"></div>กำลังดึงข้อมูลจาก ${agents.length} เครื่อง...</div>`;
+    ${dashLoaderHtml(agents)}`;
 
   if (!allAgents.length) {
     content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>';
