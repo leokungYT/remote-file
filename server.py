@@ -2600,7 +2600,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openCoinDashboard()" title="ไฟล์ .dat ใน pes/check-coin แยกตามเลข [900] ... รายเครื่อง + โหลด .zip">🪙 check-coin</button>
     <button class="btn" onclick="openLoginSuccessDashboard()" title="ไฟล์ใน main/login-success รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">✅ login-success</button>
     <button class="btn" onclick="openFastRandomDashboard()">🎲 fast-random</button>
-    <button class="btn" onclick="openPlayDashboard()" title="ไฟล์ .xml ใน main\\play ของ Line Ranger แยกตามเลข stage (30/100/150) + โหลด .zip">🎮 play-stage</button>
+    <button class="btn" onclick="openPlayDashboard()" title="ไฟล์ .xml ใน main\\play-stage30-100-150 ของ Line Ranger แยกตามเลข stage (30/100/150) + โหลด .zip">🎮 play-stage</button>
     <button class="btn" onclick="openNoHeroDashboard()" title="ไฟล์ใน pes/no-hero รายเครื่อง + โหลด/ย้ายออกมาทั้งหมด">🚫 no-hero</button>
     <button class="btn" onclick="openBottiketDashboard()">🎫 Dashboard bot-tiket</button>
     <button class="btn" onclick="openBroadcastInput()">📤 ส่งเข้า input-id (ทุกเครื่อง)</button>
@@ -3323,8 +3323,8 @@ const PLAY_FOLDER_KEY = 'playFolder';
 let _playScope = 'ALL';
 let _playPicked = 'ALL';      // เลข stage ที่เลือกกรอง
 let _playData = null;
-let _playFolder = 'play';
-try { _playFolder = localStorage.getItem(PLAY_FOLDER_KEY) || 'play'; } catch (e) {}
+let _playFolder = 'play-stage30-100-150';
+try { _playFolder = localStorage.getItem(PLAY_FOLDER_KEY) || 'play-stage30-100-150'; } catch (e) {}
 
 // ดึงเลข stage จากชื่อไฟล์ — รับได้หลายแบบ: play-stage30, stage 30, [30], ..._30.xml
 function _playStageOf(name) {
@@ -3344,7 +3344,7 @@ function _playCmp(a, b) {      // เลขน้อยไปมาก, 'อื�
 }
 
 function _playSetFolder(v) {
-  _playFolder = (v || '').trim().replace(/^[\\/]+|[\\/]+$/g, '') || 'play';
+  _playFolder = (v || '').trim().replace(/^[\\/]+|[\\/]+$/g, '') || 'play-stage30-100-150';
   try { localStorage.setItem(PLAY_FOLDER_KEY, _playFolder); } catch (e) {}
   openPlayDashboard();
 }
