@@ -3321,27 +3321,11 @@ function countFolderOnAgent(agentId, subpath, base) {
 // ═══════════════════════════════════════════════════════════
 const PLAY_FOLDER_KEY = 'playFolder';
 let _playScope = 'ALL';
-let _playPicked = 'ALL';      // เลข stage ที่เลือกกรอง
 let _playData = null;
 let _playFolder = 'play-stage30-100-150';
+let _playOpen = {};              // agent_id → เปิด/ปิดการ์ด
+let _playQuery = '';             // ตัวกรองชื่อไฟล์
 try { _playFolder = localStorage.getItem(PLAY_FOLDER_KEY) || 'play-stage30-100-150'; } catch (e) {}
-
-// ดึงเลข stage จากชื่อไฟล์ — รับได้หลายแบบ: play-stage30, stage 30, [30], ..._30.xml
-function _playStageOf(name) {
-  const n = String(name || '');
-  let m = n.match(/stage[\s_-]*(\d+)/i);          // play-stage30  (แบบที่ใช้จริง)
-  if (!m) m = n.match(/\[\s*(\d+)\s*\]/);          // [30]
-  if (!m) m = n.match(/(?:^|[^\d])(\d+)(?:[^\d]*)$/);  // เลขท้ายชื่อไฟล์
-  return m ? String(Number(m[1])) : null;
-}
-// regex ที่ใช้สั่ง agent กรองไฟล์ตอนโหลด zip — ต้องกัน stage30 ไปชน stage300
-function _playRe(stage) { return 'stage[\\s_-]*0*' + stage + '(?!\\d)'; }
-
-function _playCmp(a, b) {      // เลขน้อยไปมาก, 'อื่นๆ' ท้ายสุด
-  if (a === 'อื่นๆ') return 1;
-  if (b === 'อื่นๆ') return -1;
-  return Number(a) - Number(b);
-}
 
 function _playSetFolder(v) {
   _playFolder = (v || '').trim().replace(/^[\\/]+|[\\/]+$/g, '') || 'play-stage30-100-150';
@@ -3359,7 +3343,7 @@ async function openPlayDashboard() {
 
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">🎮 Dashboard play-stage — main\\${escHtml(_playFolder)}</h2>
+      <h2 style="flex:1; font-size:18px">🎮 play-stage — main\\${escHtml(_playFolder)}</h2>
       ${pcSelectHtml(_playScope, '_playScope=this.value; openPlayDashboard()')}
       <button class="btn btn-primary" onclick="openPlayDashboard()">🔄 รีเฟรช</button>
     </div>
@@ -3367,64 +3351,95 @@ async function openPlayDashboard() {
   if (!allAgents.length) { content.innerHTML = '<div class="empty-state"><div class="icon">🖥️</div><h3>ยังไม่มีเครื่องลูกออนไลน์</h3></div>'; return; }
 
   const perAgent = [];
-  const stageTotal = {};
   let grandTotal = 0, onlineCount = 0;
   const res = await pMap(agents, a => countFolderOnAgent(a.agent_id, _playFolder, 'main'), null, dlTick());
   agents.forEach((a, i) => {
     const name = a.name || a.hostname || a.agent_id;
     const r = res[i];
-    if (r && r.error) { perAgent.push({ name, error: r.error }); return; }
+    if (r && r.error) { perAgent.push({ agent_id: a.agent_id, name, error: r.error }); return; }
     onlineCount++;
-    if (r && r.exists === false) { perAgent.push({ name, exists: false, stages: {}, total: 0 }); return; }
-    const stages = {};
-    let total = 0;
-    (r.entries || []).forEach(full => {
-      const fn = String(full).split(/[\\/]/).pop();
-      if (!/\.xml$/i.test(fn)) return;                 // เอาเฉพาะ .xml ตามที่ขอ
-      const st = _playStageOf(fn) || 'อื่นๆ';
-      stages[st] = (stages[st] || 0) + 1;
-      stageTotal[st] = (stageTotal[st] || 0) + 1;
-      total++; grandTotal++;
-    });
-    perAgent.push({ name, stages, total });
+    if (r && r.exists === false) { perAgent.push({ agent_id: a.agent_id, name, exists: false, files: [] }); return; }
+    const files = (r.entries || [])
+      .map(full => ({ full: String(full), name: String(full).split(/[\\/]/).pop() }))
+      .filter(f => /\.xml$/i.test(f.name))
+      .sort((x, y) => x.name.localeCompare(y.name, undefined, { numeric: true }));
+    grandTotal += files.length;
+    perAgent.push({ agent_id: a.agent_id, name, files });
   });
-  _playData = { perAgent, stageTotal, totalMachines: agents.length, onlineCount, grandTotal };
+  _playData = { perAgent, totalMachines: agents.length, onlineCount, grandTotal };
   dashLoaderStop(); _renderPlay();
+}
+
+// เอาเฉพาะไฟล์ที่ชื่อเข้ากับคำค้นในช่องค้นหา
+function _playFilter(files) {
+  const q = _playQuery.trim().toLowerCase();
+  if (!q) return files;
+  return files.filter(f => f.name.toLowerCase().includes(q));
+}
+
+// 1 แถว 1 ไฟล์ พร้อมปุ่มโหลด
+function _playFileRow(agentId, f) {
+  const esc = escAttr(agentId);
+  return `<div class="file-row" style="display:flex; align-items:center; justify-content:space-between; padding:6px 8px; border-bottom:1px solid var(--border); font-size:13px">
+    <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; margin-right:8px" title="${escAttr(f.full)}">📄 ${escHtml(f.name)}</span>
+    <button class="btn" style="padding:4px 10px; font-size:12px" onclick="downloadFileFrom('${esc}','${escAttr(f.full)}','${escAttr(f.name)}')" title="ดาวน์โหลด">💾</button>
+  </div>`;
+}
+
+function _playToggle(agentId) {
+  _playOpen[agentId] = !_playOpen[agentId];
+  _renderPlay();
+}
+
+function _playSearch(v) {
+  _playQuery = v || '';
+  // อัปเดตเฉพาะส่วนรายการ ไม่ต้องวาดใหม่ทั้งหน้า (ไม่งั้นช่องค้นหาจะเสียโฟกัส)
+  const list = document.getElementById('playList');
+  if (list) list.innerHTML = _playListHtml();
+}
+
+function _playListHtml() {
+  if (!_playData) return '';
+  return _playData.perAgent.map(p => {
+    if (p.error) {
+      return `<div class="mid-card" style="padding:10px"><div class="mid-name">🖥️ ${escHtml(p.name)}</div>
+        <div style="color:var(--danger); font-size:12px; margin-top:4px">${escHtml(p.error)}</div></div>`;
+    }
+    if (p.exists === false) {
+      return `<div class="mid-card" style="padding:10px"><div class="mid-name">🖥️ ${escHtml(p.name)}</div>
+        <div style="color:var(--warning); font-size:12px; margin-top:4px">ไม่พบ ${escHtml(_playFolder)}</div></div>`;
+    }
+    const filtered = _playFilter(p.files);
+    const open = !!_playOpen[p.agent_id];
+    const esc = escAttr(p.agent_id);
+    const rows = open
+      ? (filtered.length
+          ? filtered.slice(0, 500).map(f => _playFileRow(p.agent_id, f)).join('')
+            + (filtered.length > 500 ? `<div style="padding:6px 8px; font-size:12px; color:var(--text-dim)">แสดง 500/${filtered.length} ไฟล์ — ใช้ช่องค้นหาเพื่อกรอง</div>` : '')
+          : '<div style="padding:8px; font-size:12px; color:var(--text-dim)">ไม่มีไฟล์ตรงคำค้น</div>')
+      : '';
+    return `<div class="mid-card" style="padding:0; overflow:hidden">
+      <div style="padding:10px 12px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; background:var(--bg-card)"
+           onclick="_playToggle('${esc}')">
+        <div class="mid-name" style="margin:0">${open ? '▼' : '▶'} 🖥️ ${escHtml(p.name)}
+          <span style="color:var(--text-dim); font-weight:400">(${p.files.length} ไฟล์${_playQuery ? ' · ตรงคำค้น ' + filtered.length : ''})</span></div>
+      </div>
+      ${rows}
+    </div>`;
+  }).join('');
 }
 
 function _renderPlay() {
   if (!_playData) return;
-  const { perAgent, stageTotal, totalMachines, onlineCount, grandTotal } = _playData;
+  const { totalMachines, onlineCount, grandTotal } = _playData;
   const content = document.getElementById('contentArea');
-  const stages = Object.keys(stageTotal).sort(_playCmp);
-  const picked = _playPicked;
-  const pickedTotal = picked === 'ALL' ? grandTotal : (stageTotal[picked] || 0);
-
-  const chip = (c, n, on) => `<div class="stat-tile" style="cursor:pointer;${on ? ' border-color:var(--accent); box-shadow:0 0 0 1px var(--accent)' : ''}" onclick="_playPicked='${escAttr(c)}'; _renderPlay()">
-      <div class="stat-label">${escHtml(c === 'ALL' ? 'ทุก stage' : 'stage ' + c)}</div>
-      <div class="stat-val" style="color:var(--accent)">${n.toLocaleString()}</div></div>`;
-  const chips = chip('ALL', grandTotal, picked === 'ALL') + stages.map(c => chip(c, stageTotal[c], picked === c)).join('');
-
-  const cards = perAgent.map(p => {
-    if (p.error) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--danger); font-size:13px">${escHtml(p.error)}</div></div>`;
-    if (p.exists === false) return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:var(--warning)">—</div><div class="mid-label">ไม่พบ ${escHtml(_playFolder)}</div></div>`;
-    if (picked === 'ALL') {
-      const lines = Object.keys(p.stages).sort(_playCmp).map(c =>
-        `<div style="display:flex; justify-content:space-between; font-size:12px; padding:1px 0"><span>${escHtml(c === 'อื่นๆ' ? c : 'stage ' + c)}</span><b style="color:var(--accent)">${p.stages[c]}</b></div>`).join('')
-        || '<div style="font-size:12px; color:var(--text-dim)">ว่าง</div>';
-      return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)} <span style="color:var(--text-dim); font-weight:400">(${p.total})</span></div><div style="margin-top:6px">${lines}</div></div>`;
-    }
-    const c = p.stages[picked] || 0;
-    return `<div class="mid-card" data-name="${escHtml(p.name)}"><div class="mid-name">🖥️ ${escHtml(p.name)}</div><div class="mid-count" style="color:${c === 0 ? 'var(--text-dim)' : 'var(--accent)'}">${c}</div><div class="mid-label">stage ${escHtml(picked)}</div></div>`;
-  }).join('');
-
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">🎮 play-stage — main\\${escHtml(_playFolder)}${picked !== 'ALL' ? ' · <b>stage ' + escHtml(picked) + '</b>' : ''}</h2>
+      <h2 style="flex:1; font-size:18px">🎮 play-stage — main\\${escHtml(_playFolder)}</h2>
       <label style="display:flex; align-items:center; gap:6px; font-size:13px; white-space:nowrap" title="ชื่อโฟลเดอร์ใต้ main ที่เก็บไฟล์ .xml">
-        📁 main\\<input type="text" id="playFolderIn" value="${escAttr(_playFolder)}" style="width:130px; padding:6px 8px"
+        📁 main\\<input type="text" id="playFolderIn" value="${escAttr(_playFolder)}" style="width:170px; padding:6px 8px"
           onchange="_playSetFolder(this.value)" onkeydown="if(event.key==='Enter')_playSetFolder(this.value)"></label>
-      <input type="text" class="dash-search" placeholder="🔍 ค้นหาเครื่อง..." oninput="filterMidCards(this.value)">
+      <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อไฟล์..." value="${escAttr(_playQuery)}" oninput="_playSearch(this.value)">
       ${pcSelectHtml(_playScope, '_playScope=this.value; openPlayDashboard()')}
       <button class="btn btn-primary" onclick="openPlayDashboard()">🔄 รีเฟรช</button>
     </div>
@@ -3433,26 +3448,20 @@ function _renderPlay() {
       <div class="stat-tile"><div class="stat-label">ออนไลน์</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
       <div class="stat-tile"><div class="stat-label">ไฟล์ .xml ทั้งหมด</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
     </div>
-    <h3 style="margin:14px 0 8px; font-size:13px; color:var(--text-secondary)">เลือก stage (คลิกกรอง)</h3>
-    <div class="stat-row" style="flex-wrap:wrap; gap:8px">${chips}</div>
-    <h3 style="margin:18px 0 8px; font-size:13px; color:var(--text-secondary)">รายเครื่อง</h3>
-    <div class="machine-grid">${cards}</div>
-    <div id="midNoResult" style="display:none; text-align:center; padding:36px; color:var(--text-dim)">🔍 ไม่พบเครื่อง</div>
 
-    <div class="pick-panel" style="margin-top:18px">
-      <div class="pick-head">
-        <span class="pick-title">📦 โหลด${picked === 'ALL' ? 'ทุก stage' : ' <b>stage ' + escHtml(picked) + '</b>'} เป็น .zip ไฟล์เดียว
-          <span style="color:var(--text-dim); font-weight:400">— รวมจาก ${onlineCount} เครื่อง · ${pickedTotal.toLocaleString()} ไฟล์</span></span>
-      </div>
-      <div class="pick-head" style="margin-bottom:0">
-        <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer">
-          <input type="checkbox" id="pyMove" style="width:auto">
-          <span>ติ๊ก = <b style="color:var(--danger)">ย้ายออกมา</b> (ลบต้นทางหลังโหลดสำเร็จ) · ไม่ติ๊ก = <b style="color:var(--success)">คัดลอก</b></span>
-        </label>
-        <button class="btn btn-primary" id="pyBtn" onclick="_playExport()" ${pickedTotal ? '' : 'disabled'}>
-          📦 โหลด${picked === 'ALL' ? 'ทั้งหมด' : ' stage ' + escHtml(picked)} (${pickedTotal.toLocaleString()} ไฟล์)</button>
-        <button class="btn" id="pyMoveBtn" style="border-color:var(--danger); color:var(--danger)" onclick="_playExport(true)" ${pickedTotal ? '' : 'disabled'}
-          title="zip แล้วลบต้นทางทุกเครื่องหลังส่งขึ้น server สำเร็จ (ถามยืนยันก่อน)">📤 ย้ายออกมา</button>
+    <div class="pick-panel" style="margin-top:14px">
+      <div class="pick-head" style="margin-bottom:0; justify-content:space-between; align-items:center">
+        <span class="pick-title">📦 โหลดทั้งหมดเป็น .zip ไฟล์เดียว
+          <span style="color:var(--text-dim); font-weight:400">— รวมจาก ${onlineCount} เครื่อง · ${grandTotal.toLocaleString()} ไฟล์</span></span>
+        <div style="display:flex; gap:8px; align-items:center">
+          <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer">
+            <input type="checkbox" id="pyMove" style="width:auto">
+            <span>ย้ายออก (ลบต้นทาง)</span>
+          </label>
+          <button class="btn btn-primary" id="pyBtn" onclick="_playExport()" ${grandTotal ? '' : 'disabled'}>📦 โหลด .zip</button>
+          <button class="btn" id="pyMoveBtn" style="border-color:var(--danger); color:var(--danger)" onclick="_playExport(true)" ${grandTotal ? '' : 'disabled'}
+            title="zip แล้วลบต้นทางทุกเครื่องหลังส่งขึ้น server สำเร็จ">📤 ย้าย</button>
+        </div>
       </div>
       <div id="pyProg" style="display:none; margin-top:10px">
         <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:5px">
@@ -3461,36 +3470,25 @@ function _renderPlay() {
         </div>
         <div class="progress-bar"><div class="progress-fill" id="pyBar" style="width:0%"></div></div>
       </div>
-      <div style="font-size:11px; color:var(--text-dim); margin-top:8px">
-        คลิก stage ด้านบนเพื่อเลือกว่าจะโหลดอันไหน · กรองด้วย regex ที่กัน stage30 ไปชน stage300
-      </div>
-    </div>`;
+    </div>
+
+    <h3 style="margin:16px 0 8px; font-size:13px; color:var(--text-secondary)">รายเครื่อง — คลิกชื่อเครื่องเพื่อกาง/พับรายการไฟล์</h3>
+    <div id="playList" style="display:flex; flex-direction:column; gap:8px">${_playListHtml()}</div>`;
 }
 
-// 📦 โหลดไฟล์ .xml ตาม stage ที่เลือก
+// 📦 โหลด .xml ทั้งหมดในโฟลเดอร์ เป็น zip ไฟล์เดียว
 function _playExport(forceMove) {
   if (!_playData) return;
-  const picked = _playPicked;
-  const all = Object.keys(_playData.stageTotal || {}).filter(x => x !== 'อื่นๆ');
-  let re = null, patsNot = false, tag = 'all';
-  if (picked === 'อื่นๆ') {
-    re = all.map(_playRe);       // ไม่ตรง stage ไหนเลย
-    patsNot = true;
-    tag = 'other';
-  } else if (picked !== 'ALL') {
-    re = [_playRe(picked)];
-    tag = 'stage' + picked;
-  }
   const move = forceMove === true ? true : !!(document.getElementById('pyMove') || {}).checked;
-  const label = 'play_' + _playFolder + '_' + tag;
+  const label = 'play_' + _playFolder;
   return rfRunExport({
     mode: 'flat', key: '', move: move,
     subpath: _playFolder, base: 'main',
     scope: _playScope,
-    pats_re: re, pats_not: patsNot,
+    pats_re: ['\\.xml$'], pats_not: false,
     label: (move ? 'move_' : '') + label,
     fileName: (move ? 'move_' : '') + label + '.zip',
-    confirmText: `⚠️ ย้ายไฟล์ ${picked === 'ALL' ? 'ทั้งหมด' : 'stage ' + picked} ใน main\\${_playFolder} ออกจากเครื่องที่เลือก ?`,
+    confirmText: `⚠️ ย้ายไฟล์ .xml ทั้งหมดใน main\\${_playFolder} ออกจากเครื่องที่เลือก ?`,
     ui: { btn: forceMove === true ? 'pyMoveBtn' : 'pyBtn', prog: 'pyProg', msg: 'pyMsg', bar: 'pyBar', pct: 'pyPct' },
   });
 }
@@ -9060,6 +9058,14 @@ function buildBreadcrumb(path) {
 // ═══════════════════════════════════════════════════════════
 
 // Download
+// ดาวน์โหลดจากเครื่องที่ระบุชัด (ไม่ยึดกับ currentAgent) — ใช้ในหน้า dashboard ที่ไม่ได้คลิกเลือกเครื่องก่อน
+function downloadFileFrom(agentId, filePath, fileName) {
+  const prev = currentAgent;
+  currentAgent = agentId;
+  try { downloadFile(filePath, fileName); }
+  finally { currentAgent = prev; }
+}
+
 function downloadFile(filePath, fileName) {
   toast('กำลังดาวน์โหลด ' + fileName + '...', 'info');
 
