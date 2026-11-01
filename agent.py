@@ -2654,11 +2654,27 @@ def _mumu_info_raw(mgr, timeout=None):
         except Exception:
             timeout = 25
     last = ""
+    # MuMuManager รุ่นใหม่ (5.x) ไม่รับคำว่า 'all' แล้ว — พ่นหน้า help ออกมา
+    # USAGE: info [--vmindex <vmindex>]  — ไม่ใส่ -v เลย = ลิสต์ทุกจอ
+    try:
+        out, _rc = _run_hidden([mgr, "info"], timeout=timeout)
+        if not _mumu_is_help(out):
+            data = _mumu_json(out)
+            if data is not None:
+                flag_ok = _mumu_vflag.get("ok") or _mumu_vflag_order()[0]
+                return data, flag_ok, out
+        last = out
+    except Exception as e:
+        last = f"เรียกไม่สำเร็จ: {e}"
+
     for flag in _mumu_vflag_order():
         try:
             out, _rc = _run_hidden([mgr, "info", flag, "all"], timeout=timeout)
         except Exception as e:
             last = f"เรียกไม่สำเร็จ: {e}"
+            continue
+        if _mumu_is_help(out):
+            last = out
             continue
         data = _mumu_json(out)
         if data is not None:

@@ -8140,9 +8140,11 @@ async function buSendLgrBat(agentId, base, name) {
   return uploadToInput(agentId, name || 'autoupdate-lg.bat', BU_LGR_BAT.length, b64, base, '.');
 }
 
-// ส่งไฟล์อัปเดตตามโหมดของหน้า
+// ส่งไฟล์อัปเดต — ตัดสินจาก base ของเครื่องนั้น ไม่ใช่ _buMode ทั้งหน้า
+//   main = LGR (autoupdate-lg.bat จาก GitHub) · อย่างอื่น (pes/cookie-run/...) = force-update.bat
+function buIsLgr(cfg) { return String(cfg && cfg.base || '').toLowerCase() === 'main'; }
 function buSendAny(agentId, cfg) {
-  return _buMode === 'lgr' ? buSendLgrBat(agentId, cfg.base, cfg.name) : buSendBat(agentId, cfg.base);
+  return buIsLgr(cfg) ? buSendLgrBat(agentId, cfg.base, cfg.name) : buSendBat(agentId, cfg.base);
 }
 
 // path เต็มของโฟลเดอร์โปรเจกต์บนเครื่องนั้น (จาก allowed_paths ที่ agent ส่งมาตอน register)
@@ -8201,10 +8203,10 @@ async function buWaitJob(agentId, base, pid, maxMs) {
 }
 
 // อัปเดต LGR หนึ่งเครื่อง: หยุดบอทใน main → ส่ง autoupdate-lg.bat → รัน → รอจบ → อ่านผลจาก log → (เปิดบอทใหม่)
-async function buUpdateOneLgr(i, quiet) {
+async function buUpdateOneLgr(i, quiet, cfgOverride) {
   const a = _buAgents[i];
   if (!a) return false;
-  const cfg = buCfg();
+  const cfg = cfgOverride || buCfgFor(i);
   const el = document.getElementById('bu_status_' + i);
   const setSt = (html) => { if (el) el.innerHTML = html; };
   const mname = a.name || a.hostname || a.agent_id;
@@ -8271,16 +8273,16 @@ async function buUpdateOneLgr(i, quiet) {
 async function buSendBatSelected() {
   const idxs = buIncluded();
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'error'); return; }
-  const cfg = buCfg();
   let ok = 0;
   for (const i of idxs) {
     const a = _buAgents[i];
+    const cfg = buCfgFor(i);
     const el = document.getElementById('bu_status_' + i);
-    if (el) el.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังส่ง ' + escHtml(cfg.name) + ' ...</span>';
+    if (el) el.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังส่ง ' + escHtml(cfg.name) + ' (' + escHtml(cfg.base) + ') ...</span>';
     try {
       await buSendAny(a.agent_id, cfg);
       ok++;
-      if (el) el.innerHTML = '<span style="color:var(--success); font-size:12px">📤 ส่ง ' + escHtml(cfg.name) + ' แล้ว</span>';
+      if (el) el.innerHTML = '<span style="color:var(--success); font-size:12px">📤 ส่ง ' + escHtml(cfg.name) + ' (' + escHtml(cfg.base) + ') แล้ว</span>';
     } catch (e) {
       if (el) el.innerHTML = '<span style="color:var(--danger); font-size:12px">❌ ส่งไฟล์ไม่สำเร็จ: ' + escHtml(String(e.message || e)) + '</span>';
     }
@@ -8288,21 +8290,60 @@ async function buSendBatSelected() {
   toast('ส่งไฟล์เสร็จ: ' + ok + '/' + idxs.length + ' เครื่อง', ok === idxs.length ? 'success' : 'error');
 }
 
+// ชื่อไฟล์เริ่มต้นของแต่ละโปรเจกต์ — ใช้ตอน dropdown เปลี่ยนแล้วช่อง "ไฟล์" ยังเป็นค่า default
+const BU_DEFAULT_NAME = { main: 'autoupdate-lg.bat', pes: 'force-update.bat' };
+const BU_ALL_DEFAULTS = Object.values(BU_DEFAULT_NAME);
+function buDefaultName(base) { return BU_DEFAULT_NAME[String(base || '').toLowerCase()] || 'force-update.bat'; }
+
 function buCfg() {
   const M = BU_MODES[_buMode] || BU_MODES.bot;
   const g = (id) => document.getElementById(id);
   const sel = g('buProject'), file = g('buFile'), also = g('buAlsoAgent'), stop = g('buStopFirst'), rs = g('buRestart');
   const name = file ? (file.value || '').trim() : '';
+  const base = sel ? sel.value : M.base;
   return {
-    base: sel ? sel.value : M.base,
-    name: name || M.name,
+    base: base,
+    name: name || buDefaultName(base) || M.name,
     alsoAgent: also ? also.checked : false,
     stopFirst: stop ? stop.checked : true,          // โหมด LGR: หยุดบอทใน main ก่อนอัปเดต
     restart: rs ? (rs.value || '').trim() : '',     // โหมด LGR: ไฟล์ที่จะเปิดหลังอัปเดต (ว่าง = ไม่เปิด)
   };
 }
 
+// cfg ของเครื่องการ์ด i: ถ้าการ์ดเลือก dropdown/ไฟล์เอง ใช้ของการ์ด ไม่งั้นใช้ของ global
+function buCfgFor(i) {
+  const g = buCfg();
+  const psel = document.getElementById('bu_proj_' + i);
+  const pfile = document.getElementById('bu_file_' + i);
+  const base = psel && psel.value ? psel.value : g.base;
+  const nameRaw = pfile ? (pfile.value || '').trim() : '';
+  const name = nameRaw || (base === g.base ? g.name : buDefaultName(base));
+  return Object.assign({}, g, { base: base, name: name });
+}
+
+// global dropdown เปลี่ยนโปรเจกต์ -> เติมชื่อไฟล์ default ของโปรเจกต์นั้นให้ (ถ้าช่องยังเป็น default ตัวอื่น)
+function buOnProjectChange() {
+  const sel = document.getElementById('buProject');
+  const file = document.getElementById('buFile');
+  if (sel && file) {
+    const cur = (file.value || '').trim();
+    if (!cur || BU_ALL_DEFAULTS.includes(cur)) file.value = buDefaultName(sel.value);
+  }
+  buSaveCfg();
+}
+
 function buSaveCfg() { try { localStorage.setItem((BU_MODES[_buMode] || BU_MODES.bot).key, JSON.stringify(buCfg())); } catch (e) {} }
+
+// การ์ด i เปลี่ยน dropdown -> อัปเดต placeholder ของช่องไฟล์ให้เป็น default ของโปรเจกต์ใหม่
+function buCardSync(i) {
+  const sel = document.getElementById('bu_proj_' + i);
+  const file = document.getElementById('bu_file_' + i);
+  if (!sel || !file) return;
+  const def = buDefaultName(sel.value);
+  file.placeholder = def;
+  const cur = (file.value || '').trim();
+  if (cur && BU_ALL_DEFAULTS.includes(cur) && cur !== def) file.value = '';
+}
 
 function buIncluded() {
   const out = [];
@@ -8343,6 +8384,11 @@ function openBotUpdateDashboard(mode) {
     '<option value="' + escAttr(p.key) + '"' + (cfg.base === p.key ? ' selected' : '') + '>' + escHtml(p.label) + '</option>').join('');
 
   // ค่าเริ่มต้น "ไม่ติ๊ก" ทุกเครื่อง — ต้องเลือกเองก่อนถึงจะโดนอัปเดต (กันเผลอทับทั้งฟลีต)
+  // แต่ละการ์ดมี dropdown + ช่องไฟล์ของตัวเอง -> override ได้รายเครื่อง (เครื่องนี้อัป pes, อีกเครื่องอัป main)
+  const cardSelectStyle = 'background:var(--bg-card); border:1px solid var(--border); color:var(--text-primary); border-radius:6px; padding:4px 8px; font-size:12px';
+  const cardFileStyle = 'background:var(--bg-card); border:1px solid var(--border); color:var(--text-primary); border-radius:6px; padding:4px 8px; font-size:12px; width:180px';
+  const cardProjOpts = (sel) => RUN_PROJECTS.map(p =>
+    '<option value="' + escAttr(p.key) + '"' + (sel === p.key ? ' selected' : '') + '>' + escHtml(p.label) + '</option>').join('');
   const cards = _buAgents.map((a, i) => {
     const label = escHtml(a.name || a.hostname || a.agent_id);
     return '<div class="mumu-card" id="bu_card_' + i + '">' +
@@ -8354,6 +8400,10 @@ function openBotUpdateDashboard(mode) {
         '<div class="mumu-actions">' +
           '<button class="btn btn-primary" onclick="buUpdateOne(' + i + ')">⬆️ อัปเดตเครื่องนี้</button>' +
         '</div>' +
+      '</div>' +
+      '<div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding:6px 10px 0">' +
+        '<select id="bu_proj_' + i + '" style="' + cardSelectStyle + '" onchange="buCardSync(' + i + ')" title="โปรเจกต์ที่จะอัปเดตบนเครื่องนี้">' + cardProjOpts(cfg.base) + '</select>' +
+        '<input type="text" id="bu_file_' + i + '" style="' + cardFileStyle + '" placeholder="' + escAttr(cfg.name) + '" title="ไฟล์ .bat ที่จะรันบนเครื่องนี้ (ว่าง = ตาม default ของโปรเจกต์)">' +
       '</div>' +
       '<div class="mumu-body" id="bu_status_' + i + '"><span style="color:var(--text-dim); font-size:12px">— ยังไม่ได้สั่งอัปเดต</span></div>' +
     '</div>';
@@ -8369,7 +8419,7 @@ function openBotUpdateDashboard(mode) {
         '<span class="pick-title">⚙️ เลือกโปรเจกต์ + ไฟล์อัปเดตที่จะสั่งรันบนเครื่องลูก</span>' +
       '</div>' +
       '<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">' +
-        '<select id="buProject" class="btn project-select" style="' + inputStyle + '" onchange="buSaveCfg()">' + projOpts + '</select>' +
+        '<select id="buProject" class="btn project-select" style="' + inputStyle + '" onchange="buOnProjectChange()">' + projOpts + '</select>' +
         '<input type="text" id="buFile" class="dash-search" style="flex:1; min-width:220px" placeholder="' + escAttr(M.name) + '" value="' + escAttr(cfg.name) + '" oninput="buSaveCfg()">' +
         '<label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; white-space:nowrap">' +
           '<input type="checkbox" id="buAlsoAgent"' + (cfg.alsoAgent ? ' checked' : '') + ' style="width:auto; margin:0" onchange="buSaveCfg()"> อัปเดต agent ด้วย' +
@@ -8410,12 +8460,13 @@ function openBotUpdateDashboard(mode) {
 async function buUpdateOne(i, quiet) {
   const a = _buAgents[i];
   if (!a) return false;
-  const cfg = buCfg();
+  const cfg = buCfgFor(i);
   const el = document.getElementById('bu_status_' + i);
   const setSt = (html) => { if (el) el.innerHTML = html; };
   const mname = a.name || a.hostname || a.agent_id;
 
-  if (_buMode === 'lgr') return buUpdateOneLgr(i, quiet);
+  // เลือกโฟลว์จาก base ของการ์ดนี้ (ไม่ใช่ _buMode) — การ์ดที่เลือก main = LGR, pes = force-update
+  if (buIsLgr(cfg)) return buUpdateOneLgr(i, quiet, cfg);
 
   const runOnce = () => mcReq(a.agent_id, 'request_run_file',
     { sub: 'start', base_match: cfg.base, name: cfg.name, hidden: false }, 60000);
@@ -8475,13 +8526,21 @@ async function buUpdateOne(i, quiet) {
 async function buUpdateSelected() {
   const idxs = buIncluded();
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง (ติ๊กเครื่องที่จะอัปเดตก่อน)', 'error'); return; }
-  const cfg = buCfg();
-  const names = idxs.map(i => (_buAgents[i].name || _buAgents[i].hostname || _buAgents[i].agent_id)).join('\n  • ');
-  const modeNote = _buMode !== 'lgr' ? '' :
-    ' (ดึงจาก GitHub leokungYT/main' + (cfg.stopFirst ? ' · หยุดบอทก่อน' : '') +
-    (cfg.restart ? ' · เปิด ' + cfg.restart + ' หลังเสร็จ' : '') + ')';
-  if (!confirm('สั่งอัปเดต ' + idxs.length + ' เครื่องที่ติ๊กไว้ ?\n\nจะรัน "' + cfg.name + '" ในโปรเจกต์ ' + cfg.base + modeNote +
-               (cfg.alsoAgent ? ' + อัปเดต agent ด้วย' : '') + '\n\n  • ' + names + '\n\nเครื่องที่ไม่ได้ติ๊กจะไม่ถูกแตะ')) return;
+  const g = buCfg();
+  // สรุปงาน: นับว่าแต่ละเครื่องจะไปอัปโปรเจกต์ไหน (รายเครื่องเลือกเองได้)
+  const lines = idxs.map(i => {
+    const a = _buAgents[i];
+    const c = buCfgFor(i);
+    const mname = a.name || a.hostname || a.agent_id;
+    return '  • ' + mname + ' → ' + c.base + '\\' + c.name + (buIsLgr(c) ? ' (LGR GitHub)' : '');
+  }).join('\n');
+  const lgrAny = idxs.some(i => buIsLgr(buCfgFor(i)));
+  const modeNote = !lgrAny ? '' :
+    '\n\nโหมด LGR: ดึงจาก GitHub leokungYT/main' + (g.stopFirst ? ' · หยุดบอทก่อน' : '') +
+    (g.restart ? ' · เปิด ' + g.restart + ' หลังเสร็จ' : '');
+  if (!confirm('สั่งอัปเดต ' + idxs.length + ' เครื่องที่ติ๊กไว้ ?' +
+               (g.alsoAgent ? ' + อัปเดต agent ด้วย' : '') + '\n\n' + lines + modeNote +
+               '\n\nเครื่องที่ไม่ได้ติ๊กจะไม่ถูกแตะ')) return;
 
   let ok = 0;
   for (const i of idxs) {
