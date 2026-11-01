@@ -508,11 +508,13 @@ def _dispatch_command(data):
         elif action == "delete_many":
             handle_delete_many(req_id, payload)
         elif action == "count_heroes":
-            handle_count_heroes(req_id, payload)
+            # os.walk โฟลเดอร์ใหญ่กินเวลาหลายวิ ถ้ารันบน thread หลักของ socket client
+            # จะบล็อก event ตัวถัดไป เครื่องเลยเห็นเป็น "ไม่ตอบ" ทั้งๆ ที่กำลังนับอยู่
+            _spawn_with_client(lambda: handle_count_heroes(req_id, payload))
         elif action == "count_folder":
-            handle_count_folder(req_id, payload)
+            _spawn_with_client(lambda: handle_count_folder(req_id, payload))
         elif action == "count_prefix_ids":
-            handle_count_prefix_ids(req_id, payload)
+            _spawn_with_client(lambda: handle_count_prefix_ids(req_id, payload))
         elif action == "export_folder":
             handle_export_folder(req_id, payload)
         elif action == "balance_pull":
@@ -520,7 +522,7 @@ def _dispatch_command(data):
         elif action == "balance_push":
             handle_balance_push(req_id, payload)
         elif action == "list_ids":
-            handle_list_ids(req_id, payload)
+            _spawn_with_client(lambda: handle_list_ids(req_id, payload))
         elif action == "rename_file":
             handle_rename(req_id, payload)
         elif action == "move_file":
