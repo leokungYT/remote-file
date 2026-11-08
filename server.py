@@ -3167,6 +3167,7 @@ function openBottiketDashboard() { return openFolderDash('bottiket'); }
 //  จับคู่ได้ถูกตัวเสมอ จึงยิงพร้อมกันได้
 // ══════════════════════════════════════════════════════════════
 const _rpcWait = new Map();          // ref -> ตัวรับ request_id
+const _rpcPending = new Set();       // finish() ของทุก rpc ที่ยังรออยู่ ใช้ bail รวม
 let _rpcSeq = 0;
 let _rpcBound = false;
 
@@ -3188,7 +3189,13 @@ function rpc(agentId, eventName, payload, waitMs) {
   const wait = waitMs === undefined ? 20000 : waitMs;
   return new Promise((resolve) => {
     let done = false;
-    const finish = (v) => { if (!done) { done = true; _rpcWait.delete(ref); resolve(v || {}); } };
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      _rpcWait.delete(ref); _rpcPending.delete(finish);
+      resolve(v || {});
+    };
+    _rpcPending.add(finish);
     _rpcWait.set(ref, (d) => {
       if (!d.request_id) { finish({ error: d.error || 'ส่งคำสั่งไม่สำเร็จ' }); return; }
       socket.once('response_' + d.request_id, (resp) => finish(resp));
@@ -3196,6 +3203,13 @@ function rpc(agentId, eventName, payload, waitMs) {
     socket.emit(eventName, Object.assign({ agent_id: agentId, ref: ref }, payload || {}));
     if (wait > 0) setTimeout(() => finish({ error: 'หมดเวลา (เครื่องไม่ตอบ)' }), wait);
   });
+}
+
+// ปลด rpc ทุกตัวที่ยังค้างในหน้า — ใช้ตอน user กดปุ่ม "ข้ามเครื่องที่ยังรอ"
+function rpcBailAll(msg) {
+  const list = Array.from(_rpcPending);
+  _rpcPending.clear();
+  for (const f of list) { try { f({ error: msg || 'ข้ามเครื่องที่ค้าง' }); } catch (e) {} }
 }
 
 // ทำงานกับหลายเครื่องพร้อมกัน แต่จำกัดจำนวนที่วิ่งพร้อมกัน (กัน server/เน็ตสำลัก)
@@ -3244,6 +3258,8 @@ function dashLoaderHtml(agents, label) {
         <div class="spinner"></div>
         <span>${escHtml(label || 'กำลังดึงข้อมูลจากเครื่องลูก')}</span>
         <span class="dl-time" id="dlTime">0.0 วิ</span>
+        <span style="flex:1"></span>
+        <button class="btn" id="dlBail" onclick="dashLoaderBail()" title="ไม่รอเครื่องที่ยังไม่ตอบ — ใช้เท่าที่ได้" style="font-size:12px; padding:5px 10px">⏭ ข้ามเครื่องที่ยังรอ</button>
       </div>
       <div class="dl-big"><span id="dlDone">0</span> <span>/ ${names.length}</span></div>
       <div class="dl-sub">เครื่องที่ตอบแล้ว</div>
@@ -3255,6 +3271,13 @@ function dashLoaderHtml(agents, label) {
       </div>
       <div class="dl-dots">${dots}</div>
     </div>`;
+}
+
+// ปุ่ม "ข้ามเครื่องที่ยังรอ" — ตัด rpc ที่ค้างทิ้ง เครื่องนั้นจะกลายเป็น "ไม่ตอบ" ให้ pMap เดินต่อ
+function dashLoaderBail() {
+  const b = document.getElementById('dlBail');
+  if (b) { b.disabled = true; b.textContent = '⏳ กำลังข้าม...'; }
+  rpcBailAll('ข้ามโดยผู้ใช้');
 }
 
 // เรียกทุกครั้งที่เครื่องหนึ่งตอบ — ok=false คือไม่ตอบ/ผิดพลาด
@@ -3270,6 +3293,13 @@ function dashLoaderTick(i, ok) {
   set('dlWait', st.total - st.done);
   const bar = document.getElementById('dlBar');
   if (bar) bar.style.width = Math.round(st.done * 100 / Math.max(1, st.total)) + '%';
+  // ถ้าตอบมาเกิน 90% แล้ว ให้นับถอยหลัง 20 วิเพื่อข้ามเครื่องที่ค้างโดยอัตโนมัติ
+  // ไม่ต้องให้ user มานั่งกดเอง (ก่อนหน้านี้ 28/29 รอตลอดชาติเพราะเครื่องเดียวค้าง)
+  if (!st.autoBail && st.total > 1 && (st.total - st.done) <= Math.max(1, Math.ceil(st.total * 0.1))) {
+    st.autoBail = setTimeout(() => {
+      if (_dlState && _dlState.done < _dlState.total) rpcBailAll('หมดเวลาอัตโนมัติ (รอเครื่องอื่นนานเกิน 20 วิ)');
+    }, 20000);
+  }
 }
 
 // แถบความคืบหน้าแบบบาง สำหรับหน้าที่วาดผลใหม่ทุกครั้งที่มีเครื่องตอบ (เช่น Dashboard PES)
@@ -3301,7 +3331,10 @@ function dashInlineProgress(states, done) {
 }
 
 function dashLoaderStop() {
-  if (_dlState && _dlState.timer) clearInterval(_dlState.timer);
+  if (_dlState) {
+    if (_dlState.timer) clearInterval(_dlState.timer);
+    if (_dlState.autoBail) clearTimeout(_dlState.autoBail);
+  }
   _dlState = null;
 }
 
@@ -3311,7 +3344,8 @@ function dlTick(okOf) {
 }
 
 function countFolderOnAgent(agentId, subpath, base) {
-  return rpc(agentId, 'request_list_ids', { subpath: subpath, base_match: base }, 0);
+  // 90 วิ: โฟลเดอร์ใหญ่ยังนับทัน · เครื่องที่ค้าง/ตายหลุดออกเองได้ ไม่ลากหน้าค้าง
+  return rpc(agentId, 'request_list_ids', { subpath: subpath, base_match: base }, 90000);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -4345,10 +4379,12 @@ let _rangerScope = 'ALL';
 
 // นับ id ในโฟลเดอร์ main/backup-id ของเครื่องนั้น (ไม่ throw — คืน object เสมอ)
 function countRangerOnAgent(agentId, by) {
+  // wait=0 เดิม = ไม่มี timeout เลย เครื่องเดียวที่ค้างลากทั้งหน้าค้างตลอดชาติ
+  // 90 วิ = พอให้โฟลเดอร์ใหญ่ๆ นับเสร็จ แต่เครื่องที่ตายไปแล้วหลุดออกเองได้
   return rpc(agentId, 'request_count_prefix_ids', {
     subpath: RANGER_CFG.subpath, base_match: RANGER_CFG.base,
     exts: ['.xml'], by: by || 'filename',
-  }, 0);
+  }, 90000);
 }
 
 async function openRangerDashboard() {
