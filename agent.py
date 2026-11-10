@@ -210,6 +210,11 @@ COOKIE_INPUT_PATH = (os.environ.get("COOKIE_INPUT_PATH") or _cfg.get("cookie_inp
 # MuMu Player 12: path ของ MuMuManager.exe (ปล่อยว่าง = ค้นหาอัตโนมัติจาก path มาตรฐาน)
 MUMU_MANAGER_PATH = (os.environ.get("MUMU_MANAGER_PATH") or _cfg.get("mumu_manager_path") or "").strip()
 
+# watchdog เจอหน้าต่าง "Startup failed" ของ MuMu → ปิด+เปิดจอนั้นใหม่ + รัน .bat ล่าสุดซ้ำ
+# ปิดได้ใน config.json: {"mumu_watchdog": false}
+MUMU_WATCHDOG = _cfg.get("mumu_watchdog", True)
+MUMU_WATCHDOG_INTERVAL = int(_cfg.get("mumu_watchdog_interval") or 20)   # วินาที
+
 CHUNK_SIZE = 512 * 1024  # 512KB per chunk
 RECONNECT_DELAY = 5  # seconds
 
@@ -1978,6 +1983,8 @@ _RUN_EXTS = (".bat", ".cmd", ".exe", ".py")
 _RUN_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_run_state.json")
 _run_lock = threading.Lock()
 _run_jobs = {}   # key (path ตัวพิมพ์เล็ก) -> {"path","name","base","pid","started"}
+# เก็บ payload ล่าสุดของ _run_start — watcher ที่กู้ MuMu จะเอามารันซ้ำหลังเปิดจอใหม่
+_last_run_data = {"data": None}
 
 
 def _pid_alive(pid):
@@ -2183,6 +2190,13 @@ def _run_start(data):
     with _run_lock:
         _run_jobs[key] = job
         _run_state_save()
+    # จำ payload ไว้ — watcher จะเอามาสั่งซ้ำตอนกู้ MuMu Startup failed
+    try:
+        _last_run_data["data"] = {"base_match": data.get("base_match"),
+                                  "name": data.get("name"),
+                                  "hidden": bool(data.get("hidden"))}
+    except Exception:
+        pass
     logger.info(f"  run_file: เปิด {job['name']} (PID {proc.pid}){' แบบซ่อนหน้าต่าง' if hidden else ''}")
     return {"success": True, "started": True, "pid": proc.pid,
             "name": job["name"], "path": full}
@@ -2837,6 +2851,220 @@ def _mumu_kill_all():
     if errors:
         res["warn"] = "; ".join(errors[:3])
     return res
+
+
+# ─── MuMu "Startup failed" watchdog ──────────────────────────
+# เจอ emulator ที่ขึ้น Startup failed → สั่งปิด+เปิดจอนั้น แล้ว rerun .bat ล่าสุด
+# ข้อความที่จับ: อังกฤษ/ไทย/จีน (MuMu Global ใช้ ENG, MuMu CN ใช้ 启动失败)
+_MUMU_FAIL_MARKERS = (
+    "startup failed",
+    "failed to start",
+    "เปิดไม่สำเร็จ",
+    "เริ่มต้นไม่สำเร็จ",
+    "启动失败",
+    "try to repair and restart",
+    "repair and restart",
+)
+_MUMU_WATCHDOG_RECENT = {}   # title -> last_fix_timestamp (กัน retry ถี่เกิน)
+
+
+def _mumu_scan_failed_windows():
+    """เดินดู top-level window ทั้งหมด หา window ของ MuMu ที่โชว์ 'Startup failed'
+
+    คืน [{hwnd, pid, title}, ...]
+    """
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return []
+
+    user32 = ctypes.windll.user32
+    k32 = ctypes.windll.kernel32
+    psapi = ctypes.windll.psapi
+
+    EnumWindows = user32.EnumWindows
+    EnumChildWindows = user32.EnumChildWindows
+    GetWindowTextW = user32.GetWindowTextW
+    GetWindowThreadProcessId = user32.GetWindowThreadProcessId
+    IsWindowVisible = user32.IsWindowVisible
+    GetModuleBaseNameW = psapi.GetModuleBaseNameW
+    OpenProcess = k32.OpenProcess
+    CloseHandle = k32.CloseHandle
+
+    EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    PROCESS_VM_READ = 0x0010
+
+    results = []
+
+    def _owner_name(pid):
+        try:
+            h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, False, pid)
+            if not h:
+                h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if not h:
+                    return ""
+            try:
+                buf = ctypes.create_unicode_buffer(260)
+                GetModuleBaseNameW(h, None, buf, 260)
+                return (buf.value or "").lower()
+            finally:
+                CloseHandle(h)
+        except Exception:
+            return ""
+
+    def _window_all_text(hwnd):
+        parts = []
+        buf = ctypes.create_unicode_buffer(1024)
+        GetWindowTextW(hwnd, buf, 1024)
+        if buf.value:
+            parts.append(buf.value)
+
+        def _child_cb(child, _lp):
+            try:
+                b = ctypes.create_unicode_buffer(1024)
+                GetWindowTextW(child, b, 1024)
+                if b.value:
+                    parts.append(b.value)
+            except Exception:
+                pass
+            return True
+
+        try:
+            EnumChildWindows(hwnd, EnumProc(_child_cb), 0)
+        except Exception:
+            pass
+        return " ".join(parts).lower()
+
+    def _top_cb(hwnd, _lp):
+        try:
+            if not IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            pname = _owner_name(pid.value)
+            if not pname or ("mumu" not in pname and "nemu" not in pname):
+                return True
+            all_text = _window_all_text(hwnd)
+            if any(m in all_text for m in _MUMU_FAIL_MARKERS):
+                title_buf = ctypes.create_unicode_buffer(512)
+                GetWindowTextW(hwnd, title_buf, 512)
+                results.append({"hwnd": int(hwnd),
+                                "pid": int(pid.value),
+                                "title": title_buf.value or ""})
+        except Exception:
+            pass
+        return True
+
+    try:
+        EnumWindows(EnumProc(_top_cb), 0)
+    except Exception:
+        pass
+    return results
+
+
+def _mumu_index_from_title(title):
+    """แปลง title ของ MuMu window → index ของ instance (ผ่าน _mumu_list match ชื่อ)"""
+    if not title:
+        return None
+    try:
+        lst = _mumu_list()
+    except Exception:
+        return None
+    if lst.get("error"):
+        return None
+    tl = title.lower()
+    # match ยาวก่อน — "up+pes+lgv2-1" ต้องไม่ไปตรง "up+pes+lgv2" (ที่ตัดสั้นกว่า)
+    inst = sorted(lst.get("instances", []),
+                  key=lambda x: len(str(x.get("name") or "")),
+                  reverse=True)
+    for item in inst:
+        nm = str(item.get("name") or "").strip().lower()
+        if nm and nm in tl:
+            return str(item.get("index"))
+    return None
+
+
+def _mumu_rerun_last_bat():
+    """สั่งรัน .bat ที่สั่งไว้ล่าสุดซ้ำ (watcher เรียกหลังเปิดจอใหม่)"""
+    data = _last_run_data.get("data")
+    if not data:
+        return False
+    try:
+        # ปล่อย force ไม่ต้องเช็ค already_running — ของเก่าตายไปกับ MuMu แล้ว
+        data = dict(data)
+        data["force"] = True
+        res = _run_start(data)
+        if res.get("error"):
+            logger.warning(f"  MuMu watchdog: rerun bat ไม่สำเร็จ — {res['error']}")
+            return False
+        logger.info(f"  MuMu watchdog: rerun {data.get('name')} สำเร็จ (PID {res.get('pid')})")
+        return True
+    except Exception as e:
+        logger.warning(f"  MuMu watchdog: rerun bat โยน exception — {e}")
+        return False
+
+
+def _mumu_fix_instance(index, title):
+    """ปิด+เปิดจอตาม index (control -v idx shutdown → launch)"""
+    mgr = _mumu_manager_path()
+    if not mgr:
+        logger.warning("  MuMu watchdog: หา MuMuManager.exe ไม่เจอ ข้ามการกู้")
+        return False
+    try:
+        _mumu_run_v(mgr, "control", str(index), "shutdown", timeout=30)
+    except Exception as e:
+        logger.warning(f"  MuMu watchdog: shutdown {index} พลาด — {e}")
+    time.sleep(2)
+    try:
+        out, _rc, flag = _mumu_run_v(mgr, "control", str(index), "launch", timeout=60)
+        if flag is None:
+            logger.warning(f"  MuMu watchdog: launch {index} ไม่สำเร็จ — {(out or '')[:120]}")
+            return False
+    except Exception as e:
+        logger.warning(f"  MuMu watchdog: launch {index} พลาด — {e}")
+        return False
+    logger.info(f"  MuMu watchdog: กู้จอ #{index} ({title}) สำเร็จ")
+    return True
+
+
+def _mumu_watchdog_loop():
+    """เดินวน scan window — เจอ Startup failed ให้ปิด+เปิด+rerun .bat"""
+    if not MUMU_WATCHDOG or os.name != "nt":
+        return
+    # รอ 60 วิหลังเปิด agent ค่อยเริ่ม — ให้ระบบตั้งตัวก่อน
+    time.sleep(60)
+    logger.info(f"🩺 MuMu watchdog: เปิดใช้งาน (เช็คทุก {MUMU_WATCHDOG_INTERVAL} วิ)")
+    while True:
+        try:
+            bad = _mumu_scan_failed_windows()
+            if bad:
+                now = time.time()
+                fixed_any = False
+                for w in bad:
+                    title = w.get("title") or ""
+                    # กัน retry ถี่เกิน — จอเดิมภายใน 2 นาทีไม่ซ้ำ
+                    last = _MUMU_WATCHDOG_RECENT.get(title, 0)
+                    if now - last < 120:
+                        continue
+                    _MUMU_WATCHDOG_RECENT[title] = now
+                    idx = _mumu_index_from_title(title)
+                    if idx is None:
+                        logger.warning(f"  MuMu watchdog: เจอ Startup failed แต่หา index ไม่เจอ — title='{title}'")
+                        continue
+                    logger.warning(f"⚠️ MuMu watchdog: จอ #{idx} ({title}) ขึ้น Startup failed — กู้อัตโนมัติ")
+                    if _mumu_fix_instance(idx, title):
+                        fixed_any = True
+                if fixed_any:
+                    # รอ 30 วิให้ emulator โหลดเสร็จ แล้ว rerun .bat ล่าสุด
+                    time.sleep(30)
+                    _mumu_rerun_last_bat()
+        except Exception as e:
+            logger.warning(f"  MuMu watchdog: scan พลาด — {e}")
+        time.sleep(MUMU_WATCHDOG_INTERVAL)
 
 
 _MUMU_VFLAGS = ("-v", "--vmindex")
@@ -5524,6 +5752,7 @@ def main():
     threading.Thread(target=agent_loop, daemon=True).start()
     threading.Thread(target=_peer_serve, daemon=True).start()   # แบ่งไฟล์ backup ให้เพื่อน
     threading.Thread(target=_periodic_autoupdate, daemon=True).start()  # เช็ก agent.py ใหม่เป็นระยะ
+    threading.Thread(target=_mumu_watchdog_loop, daemon=True).start()   # เจอ Startup failed → ปิด+เปิดจอ+รัน .bat ซ้ำ
 
     has_tray = False
     try:
