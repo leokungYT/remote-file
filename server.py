@@ -6482,7 +6482,7 @@ async function ocRunOne(i, cfg, quiet) {
   }
   if (cfg.close) {
     set(OC_S('accent', '⛔ ปิด MuMu ทั้งหมด...') + trail());
-    const cl = await mcReq(a.agent_id, 'request_mumu', { sub: 'close', indices: [] }, 120000);
+    const cl = await mcReq(a.agent_id, 'request_mumu', { sub: 'close', indices: [] }, 300000);
     if (cl.error) return fail('ปิด MuMu ไม่ได้: ' + cl.error);
     steps.push('ปิด MuMu ' + (cl.count || 0) + ' process');
     await _sleep(5000);           // ให้ process MuMu ตายสนิทก่อนสั่งเปิดใหม่
@@ -7379,7 +7379,7 @@ async function mcKill(i, quiet) {
   if (!quiet && !confirm(`💀 บังคับปิด MuMu ทั้งหมดของ ${a.name || a.agent_id} ?\nจอที่เปิดอยู่จะถูกปิดทันที`)) return;
   const b = document.getElementById('mc_insts_' + i);
   if (b) b.innerHTML = '<span style="color:var(--accent)">⏳ กำลังปิด MuMu...</span>';
-  const res = await mcReq(a.agent_id, 'request_mumu', { sub: 'close' }, 90000);
+  const res = await mcReq(a.agent_id, 'request_mumu', { sub: 'close' }, 300000);
   if (res.error) {
     if (b) b.innerHTML = `<span style="color:var(--danger)">❌ ${escHtml(res.error)}</span>`;
     if (!quiet) toast(res.error, 'error');

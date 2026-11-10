@@ -2740,109 +2740,100 @@ def _mumu_pids_alive():
     return pids, names
 
 
-def _mumu_kill_all():
-    """ปิดทุก process ของ MuMu — บังคับกระแทก ไม่รอ graceful ไม่แคร์ dialog
+def _ps_list_mumu_pids():
+    """ดึง PID ของ MuMu/Nemu ด้วย PowerShell — เร็วกว่า tasklist 10x บนเครื่องที่เปิด 100 จอ
 
-    วน 3 รอบ สลับหลายวิธี เพราะ:
-      - MuMu hang แล้ว shell โผล่ "application is not responding" ghost-dialog
-        ค้างทับ — dialog นี้ไม่ตายจนกว่า MuMu process ตายจริง
-      - ถ้า MuMu รัน integrity สูงกว่า agent (admin/service), ctypes TerminateProcess
-        โดน access denied → ต้อง enable SeDebugPrivilege + ลอง PowerShell/wmic คู่กัน
-      - PowerShell Stop-Process -Force = TerminateProcess ไม่ผ่าน WM_CLOSE
-        ข้ามปัญหา tasklist hang บนเครื่องที่เปิด 100 จอ
+    tasklist /fo csv บนเครื่องโหลดหนักใช้เวลาเกิน 60 วิประจำ
+    Get-Process อ่านจาก performance counter ตรงๆ ~1-2 วิ
+    """
+    if os.name != "nt":
+        return []
+    try:
+        out, _rc = _run_hidden([
+            "powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+            "Get-Process | Where-Object { $_.ProcessName -like 'MuMu*' -or "
+            "$_.ProcessName -like 'Nemu*' } | ForEach-Object { $_.Id }"
+        ], timeout=20)
+        return [ln.strip() for ln in (out or "").splitlines() if ln.strip().isdigit()]
+    except Exception:
+        return []
+
+
+def _mumu_kill_all():
+    """ปิดทุก process ของ MuMu — fast path ก่อน ถ้ายังเหลือค่อยหนัก
+
+    Fast path (รวม ~5-10 วิ):
+      1. เคาะ dialog "not responding" ที่ค้าง (dwm ghost-window)
+      2. PowerShell Stop-Process -Force -Name MuMu*, Nemu*, WerFault*, dwwin
+      3. taskkill /F /T /IM แบบ async (ไม่รอจบ) — สำรอง
+      4. ctypes TerminateProcess ของ PID ที่ยังเหลือ (SeDebugPrivilege แล้ว)
+
+    ไม่วนหลายรอบ ไม่เรียก tasklist ช้าๆ — เสร็จภายใน 30 วิเสมอ
     """
     killed_total, errors = 0, []
 
-    # ด่าน setup ครั้งเดียว — เปิด SeDebugPrivilege เผื่อ ctypes/PowerShell ต้องใช้
     try:
         _enable_sedebug_privilege()
     except Exception:
         pass
 
-    for round_i in range(3):
-        # ── ชั้น 0: เคาะ dialog "not responding" ที่ค้างอยู่ ──
-        try:
-            n_dlg = _dismiss_hung_window_dialogs()
-            if n_dlg:
-                logger.info(f"  MuMu kill[{round_i + 1}]: เคาะ dialog not-responding ออก {n_dlg} อัน")
-        except Exception:
-            pass
+    # ── 1: เคาะ ghost-dialog ก่อน (dwm จะไม่ให้ process ตายจน dialog ถูกปิด) ──
+    try:
+        n_dlg = _dismiss_hung_window_dialogs()
+        if n_dlg:
+            logger.info(f"  MuMu kill: เคาะ dialog not-responding ออก {n_dlg} อัน")
+    except Exception:
+        pass
 
-        # ── ชั้น 1: PowerShell Stop-Process -Force (เร็วและข้าม tasklist hang) ──
+    # ── 2: PowerShell blast (เร็วที่สุด + ข้าม shell hang) ──
+    try:
+        n_ps = _ps_stop_mumu()
+        if n_ps:
+            killed_total += n_ps
+            logger.info(f"  MuMu kill: PowerShell ล้ม {n_ps} process")
+    except Exception as e:
+        errors.append(f"ps: {e}")
+
+    # ── 3: taskkill ทุก image แบบ async (ไม่รอจบ) — ยิงแล้วทิ้ง ──
+    for img in _MUMU_IMAGES + _MUMU_ANCILLARY:
         try:
-            n_ps = _ps_stop_mumu()
-            if n_ps:
-                killed_total += n_ps
-                logger.info(f"  MuMu kill[{round_i + 1}]: PowerShell Stop-Process ล้ม {n_ps} process")
+            flags = 0
+            if os.name == "nt":
+                flags = 0x08000000   # CREATE_NO_WINDOW
+            subprocess.Popen(["taskkill", "/F", "/T", "/IM", img],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=flags)
         except Exception as e:
-            errors.append(f"ps: {e}")
+            errors.append(f"{img}: {e}")
 
-        # ── ชั้น 2: taskkill /F /T /IM ตามชื่อ (แบบเดิม) ──
-        for img in _MUMU_IMAGES + _MUMU_ANCILLARY:
-            try:
-                out, _rc = _run_hidden(["taskkill", "/F", "/T", "/IM", img], timeout=60)
-                n_hit = sum(1 for ln in out.splitlines() if "SUCCESS" in ln.upper())
-                killed_total += n_hit
-            except Exception as e:
-                errors.append(f"{img}: {e}")
-
-        # เคาะอีกรอบ — taskkill เพิ่งไป trigger dialog ใหม่
-        try:
-            _dismiss_hung_window_dialogs()
-        except Exception:
-            pass
-
-        # ── ชั้น 3: เช็คว่ามีอะไรเหลือ แล้วยิง PID + ctypes TerminateProcess ──
-        pids, names = _mumu_pids_alive()
-        if pids:
-            # taskkill /F /PID รวดเดียวหลาย PID
-            for i in range(0, len(pids), 40):
-                chunk = pids[i:i + 40]
-                args = ["taskkill", "/F", "/T"]
-                for pid in chunk:
-                    args += ["/PID", pid]
-                try:
-                    _run_hidden(args, timeout=60)
-                except Exception as e:
-                    errors.append(str(e))
-
-            # ctypes TerminateProcess ตรงๆ สำหรับที่ยังไม่ลง
-            leftover_pids, _ln = _mumu_pids_alive()
-            if leftover_pids:
-                n_ct = _ctypes_terminate_pids(leftover_pids)
-                if n_ct:
-                    killed_total += n_ct
-                    logger.info(f"  MuMu kill[{round_i + 1}]: ctypes TerminateProcess ล้ม {n_ct} PID")
-
-        # ── ชั้น 4: wmic เป็นด่านสำรองสุดท้ายของรอบนี้ ──
-        final_pids, _fn = _mumu_pids_alive()
-        if final_pids:
-            try:
-                _wmic_terminate_mumu()
-            except Exception:
-                pass
-
-        # เช็คจบรอบ — ถ้าเกลี้ยงแล้วไม่ต้องวนอีก
-        after_pids, _ = _mumu_pids_alive()
-        if not after_pids:
-            break
-        # เว้นครึ่งวิให้ shell เก็บ ghost-window ก่อนรอบถัดไป
-        time.sleep(0.5)
-
-    # รอบสุดท้าย: เคาะ dialog อีก เผื่อค้างเศษ
+    # รอ 1 วิให้ taskkill/PowerShell ทำงาน แล้วเคาะ dialog อีกที (taskkill อาจ trigger ใหม่)
+    time.sleep(1.0)
     try:
         _dismiss_hung_window_dialogs()
     except Exception:
         pass
 
-    final_pids, _ = _mumu_pids_alive()
-    if final_pids:
-        logger.warning(f"  MuMu kill: ยังเหลือค้าง {len(final_pids)} process (ปิดได้ {killed_total})")
+    # ── 4: เช็ค PID ที่เหลือด้วย PowerShell (เร็วกว่า tasklist เยอะ) + ctypes TerminateProcess ──
+    leftover = _ps_list_mumu_pids()
+    if leftover:
+        n_ct = _ctypes_terminate_pids(leftover)
+        if n_ct:
+            killed_total += n_ct
+            logger.info(f"  MuMu kill: ctypes TerminateProcess ล้ม {n_ct} PID (taskkill ไม่ลง)")
+        # เคาะ dialog ซ้ำ + รอให้ shell เก็บ ghost
+        time.sleep(0.3)
+        try:
+            _dismiss_hung_window_dialogs()
+        except Exception:
+            pass
+
+    final = _ps_list_mumu_pids()
+    if final:
+        logger.warning(f"  MuMu kill: ยังเหลือค้าง {len(final)} process (ปิดได้ {killed_total})")
     else:
         logger.info(f"  MuMu kill: ปิดครบ {killed_total} process")
 
-    # killed ส่งกลับเป็นรายชื่อ — ไม่สำคัญเท่า count/leftover
-    res = {"success": True, "killed": [], "count": killed_total, "leftover": len(final_pids)}
+    res = {"success": True, "killed": [], "count": killed_total, "leftover": len(final)}
     if errors:
         res["warn"] = "; ".join(errors[:3])
     return res
