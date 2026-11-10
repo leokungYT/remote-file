@@ -2505,40 +2505,228 @@ def _run_hidden(args, timeout=30):
 
 
 _MUMU_IMAGES = ("MuMu*", "Nemu*")       # ชื่อโปรเซสของ MuMu ทุกรุ่น (ใช้ wildcard ได้กับ taskkill /IM)
+# dialog "The application is not responding" + WerFault เกาะพ่วง MuMu ที่ hang
+# ถ้าไม่ล้มพวกนี้ด้วย ตัว MuMuPlayer จะค้างอยู่ใน Not Responding จนปิดไม่ลง
+_MUMU_ANCILLARY = ("WerFault.exe", "WerFaultSecure.exe", "dwwin.exe")
 
 
-def _mumu_kill_all():
-    """ปิดทุก process ของ MuMu
+def _dismiss_hung_window_dialogs():
+    """เคาะ "End Process" ให้ dialog 'The application is not responding' ที่ค้างอยู่หลาย ๆ อัน
 
-    *** ของเดิมช้ามากจนพังบนเครื่องที่เปิดหลายสิบจอ ***
-      - tasklist ไล่ "ทุก process ในเครื่อง" ซึ่งบนเครื่องที่รัน MuMu 15-100 จอ
-        ใช้เวลาเกิน 15 วิประจำ -> timeout -> ปิด MuMu ไม่ได้เลยสักตัว
-      - แล้วยังสั่ง taskkill ทีละ PID อีก (ตัวละไม่เกิน 10 วิ) 100 โปรเซส = ช้ามาก
-    ตอนนี้ยิง taskkill ด้วย wildcard ชื่อโปรเซสตรงๆ ไม่ต้องไล่ดูรายการก่อน
-    ถ้าวิธีนี้ไม่ได้ผลค่อยถอยไปใช้วิธีเดิม (แต่ขยายเวลาและสั่งรวดเดียวหลาย PID)
+    dialog นี้ไม่ใช่ลูกของ MuMu — มันเกิดจาก csrss/dwm เวลาใครก็ตามพยายามปิดหน้าต่างที่ hang
+    ถ้าไม่เคาะให้มันปิดก่อน taskkill /F บางทีต้องรอ grace period ของ shell ทำให้ one-click ค้าง
     """
-    killed, errors = [], []
-
-    # ── ทางหลัก: ฆ่าตามชื่อโปรเซสเลย ไม่ต้อง enumerate ──
-    #    /T = ฆ่าลูกหลานด้วย · ไม่เจอสักตัวจะคืน exit code 128 ซึ่งไม่ใช่ error
-    for img in _MUMU_IMAGES:
-        try:
-            out, _rc = _run_hidden(["taskkill", "/F", "/T", "/IM", img], timeout=90)
-            killed += [ln for ln in out.splitlines() if "SUCCESS" in ln.upper()]
-        except Exception as e:
-            errors.append(f"{img}: {e}")
-
-    if killed:
-        logger.info(f"  MuMu kill: ปิด {len(killed)} process (ตามชื่อโปรเซส)")
-        return {"success": True, "killed": killed, "count": len(killed)}
-
-    # ── ทางสำรอง: ไล่ดูรายการแล้วฆ่าตาม PID (เผื่อ wildcard ใช้ไม่ได้) ──
+    if os.name != "nt":
+        return 0
     try:
-        out, _ = _run_hidden(["tasklist", "/fo", "csv", "/nh"], timeout=120)
-    except Exception as e:
-        hint = (" · " + "; ".join(errors[:2])) if errors else ""
-        return {"error": f"ดูรายการโปรเซสไม่ทัน ({e}) — เครื่องน่าจะกำลังโหลดหนัก ลองใหม่อีกครั้ง{hint}"}
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return 0
 
+    user32 = ctypes.windll.user32
+    EnumWindows = user32.EnumWindows
+    GetClassNameW = user32.GetClassNameW
+    GetWindowTextW = user32.GetWindowTextW
+    IsWindowVisible = user32.IsWindowVisible
+    SendMessageW = user32.SendMessageW
+    PostMessageW = user32.PostMessageW
+    GetDlgItem = user32.GetDlgItem
+
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    WM_COMMAND = 0x0111
+    BM_CLICK = 0x00F5
+    IDOK = 1
+    # ID ของปุ่ม "End Process" บน dialog นี้คือ 1 (IDOK) แต่บน Windows บางเวอร์ชันเป็น 1010
+    CAND_BTN_IDS = (1, 1010, 2, 100)
+
+    closed = {"n": 0}
+
+    def _cb(hwnd, _lparam):
+        if not IsWindowVisible(hwnd):
+            return True
+        buf = ctypes.create_unicode_buffer(256)
+        GetClassNameW(hwnd, buf, 256)
+        cls = buf.value or ""
+        # dialog มาตรฐานของ Windows คือ class "#32770"
+        if cls != "#32770":
+            return True
+        tbuf = ctypes.create_unicode_buffer(512)
+        GetWindowTextW(hwnd, tbuf, 512)
+        title = (tbuf.value or "").lower()
+        # ภาษาอังกฤษ: Microsoft Windows + "not responding"
+        # ภาษาไทย: โปรแกรมไม่ตอบสนอง
+        looks_like = ("not responding" in title) or ("ไม่ตอบสนอง" in title) or \
+                     ("microsoft windows" in title and ("end process" in title or "end task" in title))
+        if not looks_like:
+            # บาง skin title ว่าง — เช็คข้อความใน static text child แทน
+            static = GetDlgItem(hwnd, 0xFFFF)
+            if not static:
+                return True
+            sbuf = ctypes.create_unicode_buffer(1024)
+            GetWindowTextW(static, sbuf, 1024)
+            s = (sbuf.value or "").lower()
+            if "not responding" not in s and "ไม่ตอบสนอง" not in s:
+                return True
+
+        for bid in CAND_BTN_IDS:
+            btn = GetDlgItem(hwnd, bid)
+            if btn:
+                PostMessageW(btn, BM_CLICK, 0, 0)
+                closed["n"] += 1
+                break
+        else:
+            # ปิดด้วย WM_COMMAND IDOK ตรงๆ เผื่อปุ่มหายาก
+            SendMessageW(hwnd, WM_COMMAND, IDOK, 0)
+            closed["n"] += 1
+        return True
+
+    try:
+        EnumWindows(EnumWindowsProc(_cb), 0)
+    except Exception:
+        pass
+    return closed["n"]
+
+
+_sedebug_tried = {"ok": False}
+
+
+def _enable_sedebug_privilege():
+    """เปิด SeDebugPrivilege ให้ process ตัวเอง — ไม่งั้น OpenProcess MuMu ที่รันสูงกว่าจะโดน access denied
+
+    agent ปกติไม่ใช่ admin — แต่ถ้า agent รันในฐานะ admin/system (autostart ของบางเครื่อง),
+    privilege นี้เปิดได้ และจะทำให้ TerminateProcess ลงกับ process ที่ integrity สูงกว่า
+    """
+    if os.name != "nt":
+        return False
+    if _sedebug_tried["ok"]:
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return False
+
+    class LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    class LUID_AND_ATTR(ctypes.Structure):
+        _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+    class TOKEN_PRIVILEGES(ctypes.Structure):
+        _fields_ = [("PrivilegeCount", wintypes.DWORD), ("Privileges", LUID_AND_ATTR * 1)]
+
+    TOKEN_ADJUST_PRIVILEGES = 0x20
+    TOKEN_QUERY = 0x8
+    SE_PRIVILEGE_ENABLED = 0x2
+
+    advapi = ctypes.windll.advapi32
+    k32 = ctypes.windll.kernel32
+
+    try:
+        h_tok = wintypes.HANDLE()
+        if not advapi.OpenProcessToken(k32.GetCurrentProcess(),
+                                       TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                                       ctypes.byref(h_tok)):
+            return False
+        luid = LUID()
+        if not advapi.LookupPrivilegeValueW(None, "SeDebugPrivilege", ctypes.byref(luid)):
+            k32.CloseHandle(h_tok)
+            return False
+        tp = TOKEN_PRIVILEGES()
+        tp.PrivilegeCount = 1
+        tp.Privileges[0].Luid = luid
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+        ok = advapi.AdjustTokenPrivileges(h_tok, False, ctypes.byref(tp),
+                                          0, None, None)
+        k32.CloseHandle(h_tok)
+        _sedebug_tried["ok"] = bool(ok)
+        return bool(ok)
+    except Exception:
+        return False
+
+
+def _ctypes_terminate_pids(pids):
+    """TerminateProcess ตรงๆ ผ่าน Win32 — ไม่ผ่าน shell ไม่โผล่ dialog ไม่รอ hang"""
+    if os.name != "nt" or not pids:
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return 0
+    _enable_sedebug_privilege()
+    k32 = ctypes.windll.kernel32
+    PROCESS_TERMINATE = 0x0001
+    OpenProcess = k32.OpenProcess
+    OpenProcess.restype = wintypes.HANDLE
+    OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    TerminateProcess = k32.TerminateProcess
+    TerminateProcess.restype = wintypes.BOOL
+    TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    CloseHandle = k32.CloseHandle
+    n = 0
+    for pid in pids:
+        try:
+            h = OpenProcess(PROCESS_TERMINATE, False, int(pid))
+            if not h:
+                continue
+            try:
+                if TerminateProcess(h, 1):
+                    n += 1
+            finally:
+                CloseHandle(h)
+        except Exception:
+            pass
+    return n
+
+
+def _ps_stop_mumu():
+    """PowerShell Stop-Process -Force — เร็วกว่า tasklist+taskkill เยอะ ข้าม shell hang
+
+    ใช้ wildcard ตามชื่อ ไม่ต้อง enumerate ก่อน · -Force = TerminateProcess
+    """
+    if os.name != "nt":
+        return 0
+    try:
+        out, _rc = _run_hidden([
+            "powershell", "-NoProfile", "-WindowStyle", "Hidden",
+            "-Command",
+            "$n=0; "
+            "Get-Process | Where-Object { $_.ProcessName -like 'MuMu*' -or $_.ProcessName -like 'Nemu*' -or "
+            "$_.ProcessName -like 'WerFault*' -or $_.ProcessName -eq 'dwwin' } | "
+            "ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction Stop; $n++ } catch {} }; "
+            "Write-Output $n"
+        ], timeout=60)
+        try:
+            return int((out or "0").strip().splitlines()[-1])
+        except Exception:
+            return 0
+    except Exception:
+        return 0
+
+
+def _wmic_terminate_mumu():
+    """wmic process where name like 'MuMu%' call terminate — สายสำรองถ้า PowerShell ก็พัง"""
+    if os.name != "nt":
+        return 0
+    n = 0
+    for like in ("MuMu%", "Nemu%", "WerFault%", "dwwin"):
+        try:
+            _run_hidden(["wmic", "process", "where",
+                         f"name like '{like}'", "call", "terminate"], timeout=60)
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _mumu_pids_alive():
+    """ไล่ดู PID ของ MuMu/Nemu ที่ยังเปิดอยู่ (ใช้เช็คหลัง taskkill ว่ามีเหลือค้างไหม)"""
+    try:
+        out, _ = _run_hidden(["tasklist", "/fo", "csv", "/nh"], timeout=60)
+    except Exception:
+        return [], []
     pids, names = [], []
     for line in out.splitlines():
         parts = [x.strip().strip('"') for x in line.split('","')]
@@ -2549,25 +2737,112 @@ def _mumu_kill_all():
         if ("mumu" in low or "nemu" in low) and len(parts) > 1 and parts[1].isdigit():
             pids.append(parts[1])
             names.append(name)
+    return pids, names
 
-    if not pids:
-        logger.info("  MuMu kill: ไม่มี process ของ MuMu เปิดอยู่")
-        return {"success": True, "killed": [], "count": 0}
 
-    # สั่งรวดเดียวหลาย PID (taskkill รับ /PID ซ้ำได้) แบ่งเป็นก้อนละ 40 กันคำสั่งยาวเกิน
-    for i in range(0, len(pids), 40):
-        chunk = pids[i:i + 40]
-        args = ["taskkill", "/F", "/T"]
-        for pid in chunk:
-            args += ["/PID", pid]
+def _mumu_kill_all():
+    """ปิดทุก process ของ MuMu — บังคับกระแทก ไม่รอ graceful ไม่แคร์ dialog
+
+    วน 3 รอบ สลับหลายวิธี เพราะ:
+      - MuMu hang แล้ว shell โผล่ "application is not responding" ghost-dialog
+        ค้างทับ — dialog นี้ไม่ตายจนกว่า MuMu process ตายจริง
+      - ถ้า MuMu รัน integrity สูงกว่า agent (admin/service), ctypes TerminateProcess
+        โดน access denied → ต้อง enable SeDebugPrivilege + ลอง PowerShell/wmic คู่กัน
+      - PowerShell Stop-Process -Force = TerminateProcess ไม่ผ่าน WM_CLOSE
+        ข้ามปัญหา tasklist hang บนเครื่องที่เปิด 100 จอ
+    """
+    killed_total, errors = 0, []
+
+    # ด่าน setup ครั้งเดียว — เปิด SeDebugPrivilege เผื่อ ctypes/PowerShell ต้องใช้
+    try:
+        _enable_sedebug_privilege()
+    except Exception:
+        pass
+
+    for round_i in range(3):
+        # ── ชั้น 0: เคาะ dialog "not responding" ที่ค้างอยู่ ──
         try:
-            _run_hidden(args, timeout=90)
-            killed += names[i:i + 40]
-        except Exception as e:
-            errors.append(str(e))
+            n_dlg = _dismiss_hung_window_dialogs()
+            if n_dlg:
+                logger.info(f"  MuMu kill[{round_i + 1}]: เคาะ dialog not-responding ออก {n_dlg} อัน")
+        except Exception:
+            pass
 
-    logger.info(f"  MuMu kill: ปิด {len(killed)} process (ตาม PID)")
-    res = {"success": True, "killed": killed, "count": len(killed)}
+        # ── ชั้น 1: PowerShell Stop-Process -Force (เร็วและข้าม tasklist hang) ──
+        try:
+            n_ps = _ps_stop_mumu()
+            if n_ps:
+                killed_total += n_ps
+                logger.info(f"  MuMu kill[{round_i + 1}]: PowerShell Stop-Process ล้ม {n_ps} process")
+        except Exception as e:
+            errors.append(f"ps: {e}")
+
+        # ── ชั้น 2: taskkill /F /T /IM ตามชื่อ (แบบเดิม) ──
+        for img in _MUMU_IMAGES + _MUMU_ANCILLARY:
+            try:
+                out, _rc = _run_hidden(["taskkill", "/F", "/T", "/IM", img], timeout=60)
+                n_hit = sum(1 for ln in out.splitlines() if "SUCCESS" in ln.upper())
+                killed_total += n_hit
+            except Exception as e:
+                errors.append(f"{img}: {e}")
+
+        # เคาะอีกรอบ — taskkill เพิ่งไป trigger dialog ใหม่
+        try:
+            _dismiss_hung_window_dialogs()
+        except Exception:
+            pass
+
+        # ── ชั้น 3: เช็คว่ามีอะไรเหลือ แล้วยิง PID + ctypes TerminateProcess ──
+        pids, names = _mumu_pids_alive()
+        if pids:
+            # taskkill /F /PID รวดเดียวหลาย PID
+            for i in range(0, len(pids), 40):
+                chunk = pids[i:i + 40]
+                args = ["taskkill", "/F", "/T"]
+                for pid in chunk:
+                    args += ["/PID", pid]
+                try:
+                    _run_hidden(args, timeout=60)
+                except Exception as e:
+                    errors.append(str(e))
+
+            # ctypes TerminateProcess ตรงๆ สำหรับที่ยังไม่ลง
+            leftover_pids, _ln = _mumu_pids_alive()
+            if leftover_pids:
+                n_ct = _ctypes_terminate_pids(leftover_pids)
+                if n_ct:
+                    killed_total += n_ct
+                    logger.info(f"  MuMu kill[{round_i + 1}]: ctypes TerminateProcess ล้ม {n_ct} PID")
+
+        # ── ชั้น 4: wmic เป็นด่านสำรองสุดท้ายของรอบนี้ ──
+        final_pids, _fn = _mumu_pids_alive()
+        if final_pids:
+            try:
+                _wmic_terminate_mumu()
+            except Exception:
+                pass
+
+        # เช็คจบรอบ — ถ้าเกลี้ยงแล้วไม่ต้องวนอีก
+        after_pids, _ = _mumu_pids_alive()
+        if not after_pids:
+            break
+        # เว้นครึ่งวิให้ shell เก็บ ghost-window ก่อนรอบถัดไป
+        time.sleep(0.5)
+
+    # รอบสุดท้าย: เคาะ dialog อีก เผื่อค้างเศษ
+    try:
+        _dismiss_hung_window_dialogs()
+    except Exception:
+        pass
+
+    final_pids, _ = _mumu_pids_alive()
+    if final_pids:
+        logger.warning(f"  MuMu kill: ยังเหลือค้าง {len(final_pids)} process (ปิดได้ {killed_total})")
+    else:
+        logger.info(f"  MuMu kill: ปิดครบ {killed_total} process")
+
+    # killed ส่งกลับเป็นรายชื่อ — ไม่สำคัญเท่า count/leftover
+    res = {"success": True, "killed": [], "count": killed_total, "leftover": len(final_pids)}
     if errors:
         res["warn"] = "; ".join(errors[:3])
     return res
