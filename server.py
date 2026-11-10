@@ -621,6 +621,18 @@ def handle_reboot_pc_req(data):
         emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
 
 
+@socketio.on("request_clear_temp")
+def handle_clear_temp_req(data):
+    """สั่งเครื่องลูกล้าง %TEMP% (ไฟล์ที่ถูกเปิดอยู่จะโดนข้าม)"""
+    req_id = send_to_agent(data["agent_id"], "clear_temp",
+                           {"min_age": data.get("min_age") or 0},
+                           request.sid)
+    if req_id:
+        _emit_sent(req_id, data)
+    else:
+        emit("error", {"message": f"Agent '{data['agent_id']}' is offline"})
+
+
 @socketio.on("request_self_update")
 def handle_self_update_req(data):
     """สั่งให้ agent ดึงโค้ดใหม่จาก GitHub + รีสตาร์ทตัวเอง"""
@@ -5051,10 +5063,32 @@ async function rfRunExport(o) {
 
   if (st && st.failed) {
     const failedNames = (st.failed_agents || []).join(', ');
-    setMsg(`ตอบครบ ${st.replied}/${st.expect} แต่ ${st.failed} เครื่องผิดพลาด${failedNames ? ` (${failedNames})` : ''}: ${(st.errors || [])[0] || 'ตรวจ log ที่ server'}`, 90);
-    toast('มีเครื่องส่งออกไม่สำเร็จ จึงไม่สร้าง ZIP ที่ข้อมูลไม่ครบ', 'error');
-    if (btn) btn.disabled = false;
-    return;
+    const errSample = (st.errors || [])[0] || 'ตรวจ log ที่ server';
+    // ถ้ายังมีไฟล์จากเครื่องที่สำเร็จอยู่แล้ว ให้ user เลือกได้ว่าจะโหลดเท่าที่ได้ หรือยกเลิก
+    // (เดิมบล็อกทันที เครื่องเดียวที่พังทำให้เครื่องอื่นเสียเปล่าทั้งหมด)
+    if (st.files) {
+      const okToDL = confirm(
+        'ตอบครบ ' + st.replied + '/' + st.expect + ' แต่ ' + st.failed + ' เครื่องผิดพลาด' +
+        (failedNames ? ' (' + failedNames + ')' : '') +
+        ':\n' + errSample +
+        '\n\nจะโหลด ZIP จากเครื่องที่สำเร็จ ' + st.done + '/' + st.expect + ' เครื่อง · ' +
+        st.files.toLocaleString() + ' ไฟล์ ไหม ?\n' +
+        '(เครื่องที่พัง เช่น เนื้อที่เต็ม ต้องไปเคลียร์เองแล้วค่อยสั่งใหม่)'
+      );
+      if (!okToDL) {
+        setMsg('ตอบครบ ' + st.replied + '/' + st.expect + ' แต่ ' + st.failed + ' เครื่องผิดพลาด' +
+               (failedNames ? ' (' + failedNames + ')' : '') + ': ' + errSample, 90);
+        if (btn) btn.disabled = false;
+        return;
+      }
+      // ลุยต่อ: ตกผ่านไปโค้ดดาวน์โหลดด้านล่าง (ไม่ return)
+    } else {
+      setMsg('ตอบครบ ' + st.replied + '/' + st.expect + ' แต่ ' + st.failed + ' เครื่องผิดพลาด' +
+             (failedNames ? ' (' + failedNames + ')' : '') + ': ' + errSample, 90);
+      toast('ไม่มีไฟล์จากเครื่องไหนสำเร็จเลย จึงไม่สร้าง ZIP', 'error');
+      if (btn) btn.disabled = false;
+      return;
+    }
   }
 
   if (!st || !st.files) {
@@ -7641,6 +7675,7 @@ function openBroadcastPanel(kind) {
         ${gameOpt('bot-tiket', '🎫 bot-tiket')}
       </select>
       <button class="btn" onclick="updateSelectedAgents()" title="ดึงโค้ดใหม่จาก GitHub + รีสตาร์ท agent">⬆️ อัปเดต agent (เครื่องที่เลือก)</button>
+      <button class="btn" onclick="clearTempSelected()" title="ล้างโฟลเดอร์ %TEMP% ของเครื่องที่เลือก (ไฟล์ที่กำลังใช้อยู่จะโดนข้าม)">🧹 ล้าง Temp (เครื่องที่เลือก)</button>
       <button class="btn" style="border-color:var(--danger); color:var(--danger)" onclick="clearInputAll()">🗑️ Clear ${cfg.label} (เครื่องที่เลือก)</button>
     </div>
     <div class="stat-row">
@@ -7965,6 +8000,38 @@ function listInputEntries(agentId, game, subpath) {
 // ลบหลายไฟล์ด้วยกลไก "ลบปกติ" เดียวกับ file browser (request_delete_many)
 function deleteManyOnAgent(agentId, paths) {
   return agentCall(agentId, 'request_delete_many', { paths: paths });
+}
+
+// 🧹 ล้าง %TEMP% ของเครื่องที่ติ๊ก — ไฟล์ที่กำลังใช้อยู่จะโดนข้าม (จับ exception เงียบ)
+async function clearTempSelected() {
+  const agents = getSelectedAgents();
+  if (!agents.length) { toast('ยังไม่ได้เลือกเครื่อง (ติ๊กเครื่องก่อน)', 'error'); return; }
+  if (!confirm(`🧹 ล้างโฟลเดอร์ %TEMP% ของ ${agents.length} เครื่องที่เลือก ?\n\n`
+    + `ไฟล์ที่กำลังถูกใช้งานอยู่จะโดนข้าม (ลบไม่ได้) · ปลอดภัยกับ agent — ของที่ agent ใช้ก็จะโดนข้ามเช่นกัน`)) return;
+
+  let okN = 0, failN = 0, totFiles = 0, totDirs = 0, totBytes = 0;
+  await Promise.all(agents.map(async (a) => {
+    const mname = a.name || a.hostname || a.agent_id;
+    const r = await mcReq(a.agent_id, 'request_clear_temp', {}, 300000);
+    if (r && r.success) {
+      okN++;
+      totFiles += (r.deleted_files || 0);
+      totDirs  += (r.deleted_dirs  || 0);
+      totBytes += (r.freed_bytes   || 0);
+      bcLog(`🧹 <b>${escHtml(mname)}</b> → ลบไฟล์ ${r.deleted_files || 0} / โฟลเดอร์ ${r.deleted_dirs || 0}`
+            + (r.failed ? ` <span style="color:var(--warning)">(ข้าม ${r.failed})</span>` : '')
+            + ` · คืนเนื้อที่ ${Math.round((r.freed_bytes || 0) / (1024 * 1024))} MB`
+            + ` · ว่าง ${r.free_mb_after || 0} MB`, false);
+    } else {
+      failN++;
+      let msg = (r && r.error) || 'ไม่ตอบ';
+      if (/unknown action/i.test(msg)) msg = 'agent เวอร์ชันเก่า — กด "⬆️ อัปเดต agent (เครื่องที่เลือก)" ก่อน';
+      bcLog(`❌ <b>${escHtml(mname)}</b> → ${escHtml(msg)}`, true);
+    }
+  }));
+  toast(`ล้าง Temp เสร็จ: ${okN}/${agents.length} เครื่อง · ลบไฟล์รวม ${totFiles.toLocaleString()} `
+        + `· คืน ${Math.round(totBytes / (1024 * 1024)).toLocaleString()} MB`,
+        failN ? 'warning' : 'success');
 }
 
 async function clearInputAll() {

@@ -533,6 +533,9 @@ def _dispatch_command(data):
             handle_shutdown(req_id, payload)
         elif action == "reboot_pc":
             handle_reboot_pc(req_id, payload)
+        elif action == "clear_temp":
+            # เดินทั้ง temp อาจใช้เวลา — โยนไป thread กันบล็อก socket
+            _spawn_with_client(lambda: handle_clear_temp(req_id, payload))
         elif action == "clear_input":
             handle_clear_input(req_id, payload)
         elif action == "self_update":
@@ -1421,10 +1424,16 @@ def _pick_tmp_dir(need_mb, near=None):
             nd = near if os.path.isdir(near) else os.path.dirname(near)
             if nd and os.path.isdir(nd):
                 cands.append(nd)
+                cands.append(os.path.join(nd, "_rfm_tmp"))
         except Exception:
             pass
+    # โฟลเดอร์ agent เอง (มักอยู่บนไดรฟ์อื่นที่ยังว่าง)
+    try:
+        cands.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "_rfm_tmp"))
+    except Exception:
+        pass
     if os.name == "nt":
-        for letter in "DEFGH":
+        for letter in "DEFGHIJK":
             root_dir = letter + ":\\"
             if os.path.isdir(root_dir):
                 cands.append(os.path.join(root_dir, "_rfm_tmp"))
@@ -1556,6 +1565,10 @@ def handle_export_folder(req_id, data):
     # เลือกไดรฟ์ที่ว่างพอ (temp ปกติบน C: มักเต็ม ทั้งที่ไดรฟ์อื่นยังว่าง)
     # ไม่ปฏิเสธล่วงหน้าแม้ดูเหมือนไม่พอ เพราะ zip เล็กกว่าไฟล์ดิบเสมอ — ลองก่อน พังค่อยบอกเหตุผล
     tmp_dir, free_mb = _pick_tmp_dir(need_mb, near=root)
+    if free_mb < need_mb:
+        # ลองกวาด zip ชั่วคราวแบบไม่สนอายุ (เผื่อมีของค้างเพิ่งพัง) แล้วเลือกใหม่
+        _sweep_tmp_zips(max_age=0)
+        tmp_dir, free_mb = _pick_tmp_dir(need_mb, near=root)
     if free_mb < need_mb:
         logger.warning(f"  export: เนื้อที่อาจไม่พอ — ต้องใช้ ~{need_mb} MB, {tmp_dir} ว่าง {free_mb} MB (ลองต่อ)")
 
@@ -4608,6 +4621,97 @@ def handle_reboot_pc(req_id, data):
 
     logger.warning(f"♻️ ได้รับคำสั่งรีสตาร์ทเครื่อง — จะรีสตาร์ทในอีก {delay} วินาที")
     send_response(req_id, {"success": True, "delay": delay})
+
+
+def handle_clear_temp(req_id, data):
+    """ล้าง %TEMP% ของเครื่องนี้ (ไฟล์ที่เปิดอยู่จะโดนข้าม — จับ exception เงียบ)
+
+    ไม่ลบตัวโฟลเดอร์ temp เอง ลบเฉพาะของข้างใน
+    skip โฟลเดอร์ที่ agent กำลังใช้อยู่ (_rfm_tmp, zip ที่กำลังอัป) ด้วย max_age ถ้าส่งมา
+    """
+    import shutil
+
+    try:
+        tdir = tempfile.gettempdir()
+    except Exception as e:
+        send_response(req_id, {"error": f"หา temp ไม่เจอ: {e}"})
+        return
+
+    try:
+        min_age = int(data.get("min_age") or 0)
+    except Exception:
+        min_age = 0
+    now = time.time()
+
+    free_before = _free_mb(tdir) or 0
+    deleted_files = 0
+    deleted_dirs = 0
+    failed = 0
+    freed = 0
+
+    try:
+        entries = os.listdir(tdir)
+    except Exception as e:
+        send_response(req_id, {"error": f"อ่าน temp ไม่ได้: {e}"})
+        return
+
+    for name in entries:
+        full = os.path.join(tdir, name)
+        try:
+            if min_age > 0:
+                try:
+                    if now - os.path.getmtime(full) < min_age:
+                        continue
+                except Exception:
+                    pass
+            if os.path.isfile(full) or os.path.islink(full):
+                try:
+                    sz = os.path.getsize(full)
+                except Exception:
+                    sz = 0
+                try:
+                    os.remove(full)
+                    deleted_files += 1
+                    freed += sz
+                except Exception:
+                    failed += 1
+            elif os.path.isdir(full):
+                # นับขนาดก่อนลบ (ประมาณ) — walk จะ raise ก็ช่างมัน ใช้ sum เท่าที่ได้
+                sub_bytes = 0
+                for root_dir, _dirs, files in os.walk(full):
+                    for fn in files:
+                        try:
+                            sub_bytes += os.path.getsize(os.path.join(root_dir, fn))
+                        except Exception:
+                            pass
+                try:
+                    shutil.rmtree(full, ignore_errors=False)
+                    deleted_dirs += 1
+                    freed += sub_bytes
+                except Exception:
+                    # บางไฟล์ในโฟลเดอร์ถูกเปิดอยู่ — ลบส่วนที่ได้ ignore ส่วนที่ไม่ได้
+                    try:
+                        shutil.rmtree(full, ignore_errors=True)
+                        deleted_dirs += 1
+                        freed += sub_bytes
+                    except Exception:
+                        failed += 1
+        except Exception:
+            failed += 1
+
+    free_after = _free_mb(tdir) or 0
+    logger.info(f"🧹 ล้าง temp: ลบไฟล์ {deleted_files} / โฟลเดอร์ {deleted_dirs} "
+                f"(พลาด {failed}) · คืนเนื้อที่ ~{freed // (1024 * 1024)} MB · ว่าง {free_after} MB")
+    send_response(req_id, {
+        "success": True,
+        "path": tdir,
+        "deleted_files": deleted_files,
+        "deleted_dirs": deleted_dirs,
+        "failed": failed,
+        "freed_bytes": freed,
+        "free_mb_before": free_before,
+        "free_mb_after": free_after,
+    })
 
 
 def handle_shutdown(req_id, data):
