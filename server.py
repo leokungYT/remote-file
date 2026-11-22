@@ -4605,18 +4605,20 @@ async function openRescanPanel(mode) {
     <div id="rescanBody" style="display:none"></div>
   `;
 
-  // นับโฟลเดอร์เดียวตาม mode ปัจจุบัน (เร็วขึ้น)
+  // นับโฟลเดอร์เดียวตาม mode ปัจจุบัน - pMap ให้ concurrency 8 + ไม่ค้าง
   const sub = _rescanMode;   // 'not-found' or 'login-failed'
-  const results = await Promise.all(agents.map(async a => {
-    const r = await _rescanCountOnAgent(a.agent_id, sub).catch(() => ({}));
+  const counts = await pMap(agents, a => _rescanCountOnAgent(a.agent_id, sub).catch(() => ({})), 8);
+  _rescanData = agents.map((a, i) => {
+    const r = counts[i] || {};
+    const count = (r && r.total_files) || 0;
     return {
       agent_id: a.agent_id,
       name: a.name || a.hostname || a.agent_id,
-      count: (r && r.total_files) || 0,
+      count: count,
       exists: !!(r && r.exists),
+      checked: count > 0,
     };
-  }));
-  _rescanData = results.map(r => ({ ...r, checked: r.count > 0 }));
+  });
   renderRescanPanel();
 }
 
@@ -4634,11 +4636,12 @@ function renderRescanPanel() {
   const btnBg = _rescanMode === 'login-failed' ? 'var(--danger)' : '#f39c12';
 
   const rows = _rescanData.map((r, i) => `
-    <tr>
-      <td><input type="checkbox" ${r.checked ? 'checked' : ''} onchange="_rescanData[${i}].checked=this.checked; renderRescanPanel()"></td>
-      <td><b>${escHtml(r.name)}</b></td>
-      <td style="text-align:right; color:${r.count ? color : 'var(--text-dim)'}">${r.count}</td>
-    </tr>`).join('');
+    <div style="display:flex; align-items:center; gap:12px; padding:8px 12px; border-bottom:1px solid var(--border, #333); background:${i%2===0?'transparent':'rgba(255,255,255,0.02)'}">
+      <input type="checkbox" ${r.checked ? 'checked' : ''} onchange="_rescanData[${i}].checked=this.checked; renderRescanPanel()" style="width:16px; height:16px">
+      <b style="flex:1">🖥️ ${escHtml(r.name)}</b>
+      <span style="color:${r.count ? color : 'var(--text-dim)'}; font-weight:700; min-width:60px; text-align:right">${r.count}</span>
+      <span style="color:var(--text-dim); font-size:12px; min-width:50px">ไฟล์</span>
+    </div>`).join('');
 
   body.innerHTML = `
     <div class="stat-row">
@@ -4661,14 +4664,14 @@ function renderRescanPanel() {
       </div>
     </div>
 
-    <table class="data-table" style="width:100%; margin-top:10px">
-      <thead><tr>
-        <th style="width:40px"></th>
-        <th>เครื่อง</th>
-        <th style="text-align:right">${escHtml(label)} (.xml)</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
+    <div style="background:var(--card-bg, #1a1a1a); border:1px solid var(--border, #333); border-radius:8px; overflow:hidden; margin-top:10px">
+      <div style="display:flex; align-items:center; gap:12px; padding:10px 12px; background:rgba(255,255,255,0.05); font-size:12px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px">
+        <span style="width:16px"></span>
+        <span style="flex:1">เครื่อง (${_rescanData.length} ตัว)</span>
+        <span style="min-width:120px; text-align:right">${escHtml(label)} (.xml)</span>
+      </div>
+      ${rows || '<div style="padding:20px; text-align:center; color:var(--text-dim)">ไม่มี agent ออนไลน์</div>'}
+    </div>
   `;
 }
 
