@@ -1679,15 +1679,27 @@ def handle_export_folder(req_id, data):
 
 def _reply_ids(req_id, folder):
     """สแกนโฟลเดอร์ folder แล้วส่งรายชื่อ id + full path จริงกลับ
-       (ids = ชื่อโชว์บน dashboard, entries = path จริงไว้ใช้ลบแบบปกติ)"""
+       (ids = ชื่อโชว์บน dashboard, entries = path จริงไว้ใช้ลบแบบปกติ)
+
+    LIMIT: ถ้าไฟล์เกิน 5000 -> truncate เหลือ 5000 + ส่ง 'truncated' flag
+    เพราะ response > 1-2MB ทำให้ socket.io หลุดในระหว่างส่ง (TCP write block)
+    โดยเฉพาะเมื่อยิงพร้อมกัน 27 agents ทางช่อง Tailscale ผ่าน relay"""
+    MAX_IDS = 5000
     exists = os.path.isdir(folder)
     ids = []
     entries = []
+    truncated = False
+    total_scanned = 0
     if exists:
         try:
             for name in sorted(os.listdir(folder)):
+                total_scanned += 1
                 full = os.path.join(folder, name)
-                entries.append(full)                       # path จริงทุกไฟล์/โฟลเดอร์ (ไว้ลบ)
+                if len(entries) < MAX_IDS:
+                    entries.append(full)
+                else:
+                    truncated = True
+                    continue
                 if name.startswith("."):
                     continue
                 stem = name if os.path.isdir(full) else os.path.splitext(name)[0]
@@ -1696,9 +1708,13 @@ def _reply_ids(req_id, folder):
         except Exception as e:
             send_response(req_id, {"error": str(e)})
             return
-    logger.info(f"  list_ids: {len(ids)} ids in {folder} (exists={exists})")
-    send_response(req_id, {"success": True, "ids": ids, "total": len(ids),
-                           "entries": entries, "folder": folder, "exists": exists})
+    msg = f"  list_ids: {len(ids)} ids in {folder} (exists={exists})"
+    if truncated:
+        msg += f" [TRUNCATED from {total_scanned}]"
+    logger.info(msg)
+    send_response(req_id, {"success": True, "ids": ids, "total": total_scanned,
+                           "entries": entries, "folder": folder, "exists": exists,
+                           "truncated": truncated, "sent_count": len(entries)})
 
 
 def _resolve_game_base(match):
