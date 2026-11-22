@@ -219,7 +219,7 @@ CHUNK_SIZE = 512 * 1024  # 512KB per chunk
 RECONNECT_DELAY = 5  # seconds
 # ถ้า disconnected นานกว่านี้ -> exit (ให้ agent-watchdog.bat รีสตาร์ท)
 # กัน agent ค้างใน reconnect loop ตลอดกาล (VPN Lock / DNS ค้าง / socket.io bug)
-STALE_DISCONNECT_SEC = int(_cfg.get("stale_disconnect_sec") or 90)
+STALE_DISCONNECT_SEC = int(_cfg.get("stale_disconnect_sec") or 60)
 # timestamp ครั้งล่าสุดที่เชื่อม server ได้ - ใช้วัด stale
 _last_connect_ts = [time.time()]
 
@@ -5385,6 +5385,22 @@ def _startup_autoupdate():
 # ═══════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════
+def _flush_dns_and_tailscale():
+    """flush DNS cache + ping Tailscale server (ปลุก MagicDNS/relay) - เรียกก่อน reconnect
+    กัน DNS cache เน่าของ ExpressVPN + ให้ Tailscale รับรู้ว่าต้องหาทางใหม่"""
+    try:
+        subprocess.run(["ipconfig", "/flushdns"], capture_output=True, timeout=5,
+                       creationflags=0x08000000)
+    except Exception:
+        pass
+    # ปลุก Tailscale: ping ไปที่ relay/magicDNS (ไม่ error ก็พอ)
+    try:
+        subprocess.run(["ping", "-n", "1", "-w", "500", "login.tailscale.com"],
+                       capture_output=True, timeout=5, creationflags=0x08000000)
+    except Exception:
+        pass
+
+
 def _connect_loop(url, client):
     """ลูปเชื่อมต่อ server หนึ่งเครื่อง + reconnect อัตโนมัติ
        server ที่ตายแล้ว (เช่นตัวสำรองที่เลิกใช้) จะถอยห่างขึ้นเรื่อยๆ สูงสุด 5 นาที
@@ -5394,6 +5410,10 @@ def _connect_loop(url, client):
         try:
             if fails == 0:
                 logger.info(f"🔗 Connecting to {url}...")
+            else:
+                # หลัง fail: flush DNS + ปลุก Tailscale ก่อนลองใหม่
+                # (ExpressVPN ชอบใส่ DNS ของตัวเอง + ลบ Tailscale route ตอน swap)
+                _flush_dns_and_tailscale()
             # ผ่าน tunnel/proxy (https):
             #   - Funnel (*.ts.net) วิ่งผ่าน relay — WebSocket มักหลุดกลางคัน จึงใช้ polling ล้วน
             #   - Cloudflare tunnel (pointer) รองรับ WebSocket ดี → เริ่ม polling แล้วให้ upgrade เป็น
