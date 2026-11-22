@@ -4589,6 +4589,7 @@ async function openRescanPanel(mode) {
   _rescanMode = (mode === 'login-failed') ? 'login-failed' : 'not-found';
   const content = document.getElementById('contentArea');
   const agents = (agentsData || []).filter(a => a && a.agent_id);
+  console.log('[rescan] open', _rescanMode, 'agents=', agents.length);
   if (!agents.length) { toast('ไม่พบ agent online', 'error'); return; }
 
   const title = _rescanMode === 'login-failed'
@@ -4601,8 +4602,8 @@ async function openRescanPanel(mode) {
       <button class="btn" onclick="openRescanPanel('login-failed')" ${_rescanMode==='login-failed'?'style="background:#e74c3c"':''}>login-failed</button>
       <button class="btn" onclick="openRangerDashboard()">← กลับ Dashboard</button>
     </div>
-    <div id="rescanLoader" style="padding:20px; color:var(--text-secondary)">⏳ กำลังนับไฟล์ทุกเครื่อง...</div>
-    <div id="rescanBody" style="display:none"></div>
+    <div id="rescanLoader" style="padding:20px; color:#aaa">⏳ กำลังนับไฟล์ทุกเครื่อง (${agents.length} เครื่อง)...</div>
+    <div id="rescanBody"></div>
   `;
 
   // นับโฟลเดอร์เดียวตาม mode ปัจจุบัน - pMap ให้ concurrency 8 + ไม่ค้าง
@@ -4625,52 +4626,51 @@ async function openRescanPanel(mode) {
 function renderRescanPanel() {
   const body = document.getElementById('rescanBody');
   const loader = document.getElementById('rescanLoader');
+  console.log('[rescan] renderRescanPanel', _rescanData.length, 'agents');
   if (loader) loader.style.display = 'none';
-  if (!body) return;
+  if (!body) { console.warn('[rescan] body element missing'); return; }
+  body.style.display = 'block';
 
   const total = _rescanData.reduce((s, r) => s + r.count, 0);
   const tickedCount = _rescanData.filter(r => r.checked).length;
   const tickedFiles = _rescanData.filter(r => r.checked).reduce((s, r) => s + r.count, 0);
   const label = _rescanMode === 'login-failed' ? 'login-failed' : 'not-found';
-  const color = _rescanMode === 'login-failed' ? 'var(--danger)' : 'var(--warning)';
-  const btnBg = _rescanMode === 'login-failed' ? 'var(--danger)' : '#f39c12';
+  const color = _rescanMode === 'login-failed' ? '#e74c3c' : '#f39c12';
+  const btnBg = color;
+  const dimColor = '#777';
 
   const rows = _rescanData.map((r, i) => `
-    <div style="display:flex; align-items:center; gap:12px; padding:8px 12px; border-bottom:1px solid var(--border, #333); background:${i%2===0?'transparent':'rgba(255,255,255,0.02)'}">
-      <input type="checkbox" ${r.checked ? 'checked' : ''} onchange="_rescanData[${i}].checked=this.checked; renderRescanPanel()" style="width:16px; height:16px">
-      <b style="flex:1">🖥️ ${escHtml(r.name)}</b>
-      <span style="color:${r.count ? color : 'var(--text-dim)'}; font-weight:700; min-width:60px; text-align:right">${r.count}</span>
-      <span style="color:var(--text-dim); font-size:12px; min-width:50px">ไฟล์</span>
+    <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; border-bottom:1px solid #2a2a2a; background:${i%2===0?'#1a1a1a':'#1f1f1f'}; color:#eee">
+      <input type="checkbox" ${r.checked ? 'checked' : ''} onchange="_rescanData[${i}].checked=this.checked; renderRescanPanel()" style="width:18px; height:18px; cursor:pointer">
+      <b style="flex:1; color:#eee">🖥️ ${escHtml(r.name)}</b>
+      <span style="color:${r.count ? color : dimColor}; font-weight:700; min-width:60px; text-align:right; font-size:15px">${r.count}</span>
+      <span style="color:${dimColor}; font-size:12px; min-width:50px">ไฟล์</span>
     </div>`).join('');
 
   body.innerHTML = `
-    <div class="stat-row">
-      <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${_rescanData.length}</div></div>
-      <div class="stat-tile"><div class="stat-label">ติ๊กไว้</div><div class="stat-val" style="color:var(--accent)">${tickedCount}</div></div>
-      <div class="stat-tile"><div class="stat-label">${escHtml(label)} รวม</div><div class="stat-val" style="color:${color}">${total.toLocaleString()}</div></div>
-      <div class="stat-tile"><div class="stat-label">ไฟล์ที่จะย้าย (ติ๊ก)</div><div class="stat-val" style="color:var(--accent)">${tickedFiles.toLocaleString()}</div></div>
+    <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin:16px 0">
+      <div style="background:#1a1a1a; border:1px solid #2a2a2a; border-radius:8px; padding:14px"><div style="color:${dimColor}; font-size:12px; text-transform:uppercase">เครื่องทั้งหมด</div><div style="font-size:24px; font-weight:700; color:#eee">${_rescanData.length}</div></div>
+      <div style="background:#1a1a1a; border:1px solid #2a2a2a; border-radius:8px; padding:14px"><div style="color:${dimColor}; font-size:12px; text-transform:uppercase">ติ๊กไว้</div><div style="font-size:24px; font-weight:700; color:#3498db">${tickedCount}</div></div>
+      <div style="background:#1a1a1a; border:1px solid #2a2a2a; border-radius:8px; padding:14px"><div style="color:${dimColor}; font-size:12px; text-transform:uppercase">${escHtml(label)} รวม</div><div style="font-size:24px; font-weight:700; color:${color}">${total.toLocaleString()}</div></div>
+      <div style="background:#1a1a1a; border:1px solid #2a2a2a; border-radius:8px; padding:14px"><div style="color:${dimColor}; font-size:12px; text-transform:uppercase">จะย้าย (ติ๊ก)</div><div style="font-size:24px; font-weight:700; color:#3498db">${tickedFiles.toLocaleString()}</div></div>
     </div>
 
-    <div class="pick-panel" style="margin:16px 0">
-      <div class="pick-head">
-        <span class="pick-title">🔁 ย้าย ${escHtml(label)}/*.xml -> input-id/ ของเครื่องที่ติ๊ก</span>
-        <button class="btn" onclick="_rescanToggleAll(true)">ติ๊กทุกเครื่อง</button>
-        <button class="btn" onclick="_rescanToggleAll(false)">เอาออกทั้งหมด</button>
-      </div>
-      <div class="pick-head" style="margin-bottom:0">
-        <button class="btn btn-primary" style="background:${btnBg}; border-color:${btnBg}" onclick="runRescan('${_rescanMode}')" ${tickedFiles ? '' : 'disabled'}>
-          🔁 Re-scan ${escHtml(label)} (${tickedCount} เครื่อง · ${tickedFiles.toLocaleString()} ไฟล์)
-        </button>
-      </div>
+    <div style="display:flex; align-items:center; gap:10px; padding:14px; background:#1a1a1a; border:1px solid #2a2a2a; border-radius:8px; margin-bottom:12px; flex-wrap:wrap">
+      <span style="flex:1; color:#eee; font-weight:600">🔁 ย้าย ${escHtml(label)}/*.xml → input-id/ ของเครื่องที่ติ๊ก</span>
+      <button onclick="_rescanToggleAll(true)" style="padding:6px 12px; background:#333; color:#eee; border:none; border-radius:6px; cursor:pointer">ติ๊กทุกเครื่อง</button>
+      <button onclick="_rescanToggleAll(false)" style="padding:6px 12px; background:#333; color:#eee; border:none; border-radius:6px; cursor:pointer">เอาออกทั้งหมด</button>
+      <button onclick="runRescan('${_rescanMode}')" ${tickedFiles ? '' : 'disabled'} style="padding:8px 16px; background:${btnBg}; color:#fff; border:none; border-radius:6px; font-weight:700; cursor:pointer; ${tickedFiles ? '' : 'opacity:0.4; cursor:not-allowed'}">
+        🔁 Re-scan ${escHtml(label)} (${tickedCount} เครื่อง · ${tickedFiles.toLocaleString()} ไฟล์)
+      </button>
     </div>
 
-    <div style="background:var(--card-bg, #1a1a1a); border:1px solid var(--border, #333); border-radius:8px; overflow:hidden; margin-top:10px">
-      <div style="display:flex; align-items:center; gap:12px; padding:10px 12px; background:rgba(255,255,255,0.05); font-size:12px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px">
-        <span style="width:16px"></span>
+    <div style="background:#1a1a1a; border:1px solid #2a2a2a; border-radius:8px; overflow:hidden">
+      <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; background:#252525; font-size:12px; color:${dimColor}; text-transform:uppercase; letter-spacing:0.5px">
+        <span style="width:18px"></span>
         <span style="flex:1">เครื่อง (${_rescanData.length} ตัว)</span>
         <span style="min-width:120px; text-align:right">${escHtml(label)} (.xml)</span>
       </div>
-      ${rows || '<div style="padding:20px; text-align:center; color:var(--text-dim)">ไม่มี agent ออนไลน์</div>'}
+      ${rows || '<div style="padding:20px; text-align:center; color:' + dimColor + '">ไม่มี agent ออนไลน์</div>'}
     </div>
   `;
 }
