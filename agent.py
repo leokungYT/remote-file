@@ -2354,20 +2354,37 @@ def _run_stop(data):
     # ── กวาดซ้ำ: ฆ่า process จริงที่ยังรันอยู่ในโฟลเดอร์โปรเจกต์ ──────────────
     #    เคสที่เจอบ่อย: บอทถูกเปิดจากทางอื่น (Task Scheduler / login.bat รีสตาร์ทตัวเอง /
     #    force-update.bat) agent เลยไม่มี PID ในมือ กด "หยุด" แล้วไม่มีอะไรเกิดขึ้น
+    #
+    #    แก้เพิ่ม: วนหลายรอบ (max 4 รอบ) เพราะ login.bat ที่มี :loop จะ respawn python ทันที
+    #    - รอบแรกฆ่า cmd.exe ก่อน (sort order) เพื่อตัดต้นตอ loop
+    #    - รอบถัดไปจับ python ตัวใหม่ที่ยังโผล่มา
+    #    - ถ้า 2 รอบติดกันไม่เจออะไรเลย = จบ
     base = _resolve_game_base((data.get("base_match") or "").strip().lower())
     note = None
     if base:
-        for pid, cmd in _procs_in_folder(base):
-            if pid in killed_pids or not _pid_alive(pid):
+        import time as _t
+        empty_rounds = 0
+        for round_idx in range(4):
+            procs = _procs_in_folder(base)
+            new_hits = [(pid, cmd) for pid, cmd in procs
+                        if pid not in killed_pids and _pid_alive(pid)]
+            if not new_hits:
+                empty_rounds += 1
+                if empty_rounds >= 2:
+                    break
+                _t.sleep(0.8)   # รออีกนิด เผื่อ respawn ช้า
                 continue
-            found += 1
-            label = os.path.basename(cmd.strip().strip('"').split('"')[0]) or f"pid {pid}"
-            ok, msg = _taskkill_tree(pid)
-            if ok:
-                killed_pids.add(pid)
-                stopped.append(label)
-            else:
-                errors.append(f"{label}: {msg}")
+            empty_rounds = 0
+            for pid, cmd in new_hits:
+                found += 1
+                label = os.path.basename(cmd.strip().strip('"').split('"')[0]) or f"pid {pid}"
+                ok, msg = _taskkill_tree(pid)
+                if ok:
+                    killed_pids.add(pid)
+                    stopped.append(label)
+                else:
+                    errors.append(f"{label}: {msg}")
+            _t.sleep(0.5)   # ให้ OS cleanup ก่อนวนเช็กซ้ำ
     else:
         note = (f"หาโฟลเดอร์โปรเจกต์ '{data.get('base_match')}' ที่เครื่องนี้ไม่เจอ "
                 "— เช็ก allowed_paths ใน config.json")
