@@ -217,6 +217,11 @@ MUMU_WATCHDOG_INTERVAL = int(_cfg.get("mumu_watchdog_interval") or 20)   # ว�
 
 CHUNK_SIZE = 512 * 1024  # 512KB per chunk
 RECONNECT_DELAY = 5  # seconds
+# ถ้า disconnected นานกว่านี้ -> exit (ให้ agent-watchdog.bat รีสตาร์ท)
+# กัน agent ค้างใน reconnect loop ตลอดกาล (VPN Lock / DNS ค้าง / socket.io bug)
+STALE_DISCONNECT_SEC = int(_cfg.get("stale_disconnect_sec") or 90)
+# timestamp ครั้งล่าสุดที่เชื่อม server ได้ - ใช้วัด stale
+_last_connect_ts = [time.time()]
 
 # ─── LOGGING ──────────────────────────────────────────────
 logging.basicConfig(
@@ -594,6 +599,7 @@ def _make_client(url):
         _local.client = client
         _client_connected[url] = True
         _ui_state["connected"] = True
+        _last_connect_ts[0] = time.time()   # stale-watchdog reset
         logger.info(f"✅ Connected to server: {url}")
         agent_id = AGENT_ID or AGENT_NAME or get_hostname()  # ใช้ name ถ้ามี กัน hostname ซ้ำชนกัน
         client.emit("agent_register", {
@@ -5591,9 +5597,32 @@ def agent_loop():
     _spawn_connect("http://127.0.0.1:5000")   # เผื่อเครื่องนี้รัน server เอง (เป็นทั้ง server+agent)
     threading.Thread(target=_discover_and_connect_loop, daemon=True,
                      name="discover").start()
+    threading.Thread(target=_stale_disconnect_watchdog, daemon=True,
+                     name="stale-watchdog").start()
     # คง thread นี้ไว้ (thread เชื่อมต่อจริงเป็น daemon แยกต่างหาก)
     while True:
         time.sleep(3600)
+
+
+def _stale_disconnect_watchdog():
+    """ถ้า agent disconnected ทุก server นานเกิน STALE_DISCONNECT_SEC -> exit
+    agent-watchdog.bat (Task Scheduler ทุก 5 นาที) จะรีสตาร์ท process ให้
+    กัน agent ค้างใน reconnect loop ตลอดกาล (VPN Lock / DNS ค้าง / socket.io bug)"""
+    import os as _os
+    logger.info(f"🐶 stale-disconnect watchdog started (threshold {STALE_DISCONNECT_SEC}s)")
+    while True:
+        time.sleep(15)
+        try:
+            if _any_connected():
+                _last_connect_ts[0] = time.time()
+                continue
+            down = time.time() - _last_connect_ts[0]
+            if down >= STALE_DISCONNECT_SEC:
+                logger.error(f"💀 disconnected {int(down)}s (>= {STALE_DISCONNECT_SEC}s) "
+                             f"- exiting สำหรับ agent-watchdog.bat รีสตาร์ท")
+                _os._exit(2)
+        except Exception as e:
+            logger.warning(f"stale-watchdog loop error: {e}")
 
 
 def run_tray():
