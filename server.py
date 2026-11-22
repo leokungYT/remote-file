@@ -4424,17 +4424,24 @@ async function openRangerDashboard() {
   }
 
   const comboTotals = {};
-  let grandTotal = 0, matchedTotal = 0, onlineCount = 0;
+  let grandTotal = 0, matchedTotal = 0, onlineCount = 0, notFoundTotal = 0, loginFailedTotal = 0;
   const perAgent = [];
 
   // ถามพร้อมกันทีละ 8 เครื่อง — ของเดิมถามทีละเครื่อง 29 รอบ เครื่องที่ไม่ตอบ
   // กิน timeout 20 วิต่อตัว หน้าเลยค้างเป็นนาที
+  // query 3 โฟลเดอร์ขนาน: backup-id (หลัก) + not-found + login-failed
   const rgRes = await pMap(agents, a => countRangerOnAgent(a.agent_id), null, dlTick());
+  const nfRes = await pMap(agents, a => _rescanCountOnAgent(a.agent_id, 'not-found').catch(() => ({})), null);
+  const lfRes = await pMap(agents, a => _rescanCountOnAgent(a.agent_id, 'login-failed').catch(() => ({})), null);
   agents.forEach((a, i) => {
     const name = a.name || a.hostname || a.agent_id;
     const res = rgRes[i];
+    const nf = (nfRes[i] && nfRes[i].total_files) || 0;
+    const lf = (lfRes[i] && lfRes[i].total_files) || 0;
+    notFoundTotal += nf;
+    loginFailedTotal += lf;
     if (!res || res.error) {
-      perAgent.push({ name, error: String((res && res.error) || 'ไม่ตอบกลับ') });
+      perAgent.push({ name, error: String((res && res.error) || 'ไม่ตอบกลับ'), nf, lf });
       return;
     }
     onlineCount++;
@@ -4442,14 +4449,17 @@ async function openRangerDashboard() {
     matchedTotal += res.matched_files || 0;
     perAgent.push({
       name, total: res.total_files || 0, matched: res.matched_files || 0, exists: res.exists,
+      nf: nf, lf: lf,
     });
     const combos = res.combos || {};
     for (const k in combos) comboTotals[k] = (comboTotals[k] || 0) + combos[k];
   });
-  dashLoaderStop(); renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, agents.length, onlineCount);
+  dashLoaderStop(); renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, agents.length, onlineCount, notFoundTotal, loginFailedTotal);
 }
 
-function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, totalMachines, onlineCount) {
+function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, totalMachines, onlineCount, notFoundTotal, loginFailedTotal) {
+  notFoundTotal = notFoundTotal || 0;
+  loginFailedTotal = loginFailedTotal || 0;
   const content = document.getElementById('contentArea');
   _folderScope['rangerid'] = _rangerScope;   // ให้ปุ่มโหลด .zip (fdExport) ใช้เครื่องที่เลือกอยู่ชุดเดียวกัน
 
@@ -4501,6 +4511,9 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
             + '<span style="color:var(--text-dim); margin:0 10px">·</span>'
             + '<span style="color:var(--text-secondary)" title="ไฟล์ .xml ทั้งหมดใน ' + RANGER_CFG.label + '">🗂️ ทั้งหมด ' + p.total.toLocaleString() + ' ไฟล์</span>';
     }
+    // nf/lf ติดท้ายเสมอถ้ามี > 0 (ให้เห็นเครื่องที่มีไฟล์ค้าง)
+    if (p.nf > 0) right += '<span style="color:var(--text-dim); margin:0 8px">·</span><span style="color:var(--warning)" title="not-found - คลิก Re-scan not-found บน toolbar">⚠️ nf ' + p.nf.toLocaleString() + '</span>';
+    if (p.lf > 0) right += '<span style="color:var(--text-dim); margin:0 8px">·</span><span style="color:var(--danger)" title="login-failed - คลิก Re-scan login-failed บน toolbar">❌ lf ' + p.lf.toLocaleString() + '</span>';
     return '<div class="agent-stat"><span>🖥️ ' + escHtml(p.name) + '</span><span>' + right + '</span></div>';
   }).join('');
 
@@ -4518,6 +4531,8 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
       <div class="stat-tile"><div class="stat-label">ออนไลน์ (ตอบกลับ)</div><div class="stat-val" style="color:var(--success)">${onlineCount}</div></div>
       <div class="stat-tile"><div class="stat-label">ไฟล์ ${RANGER_CFG.label} รวม</div><div class="stat-val" style="color:var(--accent)">${grandTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">id ที่มีชื่อฮีโร่</div><div class="stat-val" style="color:var(--success)">${matchedTotal.toLocaleString()}</div></div>
+      <div class="stat-tile" onclick="openRescanPanel('not-found')" style="cursor:pointer" title="คลิกเพื่อ Re-scan"><div class="stat-label">ไม่เจอฮีโร่ (not-found)</div><div class="stat-val" style="color:var(--warning)">${notFoundTotal.toLocaleString()}</div></div>
+      <div class="stat-tile" onclick="openRescanPanel('login-failed')" style="cursor:pointer" title="คลิกเพื่อ Re-scan"><div class="stat-label">login-failed</div><div class="stat-val" style="color:var(--danger)">${loginFailedTotal.toLocaleString()}</div></div>
       <div class="stat-tile"><div class="stat-label">จำนวนแบบ (combo)</div><div class="stat-val">${combos.length}</div></div>
     </div>
     <h3 style="margin:4px 0 12px; font-size:14px; color:var(--text-secondary)">รวมรายชื่อ — ทุกเครื่อง (ชื่อเดียวกันคนละ combo บวกรวมกัน)</h3>
