@@ -4602,13 +4602,35 @@ async function openRescanPanel(mode) {
       <button class="btn" onclick="openRescanPanel('login-failed')" ${_rescanMode==='login-failed'?'style="background:#e74c3c"':''}>login-failed</button>
       <button class="btn" onclick="openRangerDashboard()">← กลับ Dashboard</button>
     </div>
-    <div id="rescanLoader" style="padding:20px; color:#aaa">⏳ กำลังนับไฟล์ทุกเครื่อง (${agents.length} เครื่อง)...</div>
+    <div id="rescanLoader" style="padding:20px">
+      <div style="color:#aaa; margin-bottom:10px; display:flex; justify-content:space-between">
+        <span id="rescanLoadMsg">⏳ กำลังนับไฟล์ทุกเครื่อง...</span>
+        <span id="rescanLoadPct" style="color:#3498db; font-weight:700">0 / ${agents.length}</span>
+      </div>
+      <div style="height:8px; background:#2a2a2a; border-radius:4px; overflow:hidden">
+        <div id="rescanLoadBar" style="height:100%; width:0%; background:linear-gradient(90deg, #3498db, #2ecc71); transition:width 0.2s"></div>
+      </div>
+    </div>
     <div id="rescanBody"></div>
   `;
 
   // นับโฟลเดอร์เดียวตาม mode ปัจจุบัน - pMap ให้ concurrency 8 + ไม่ค้าง
   const sub = _rescanMode;   // 'not-found' or 'login-failed'
-  const counts = await pMap(agents, a => _rescanCountOnAgent(a.agent_id, sub).catch(() => ({})), 8);
+  let done = 0;
+  const updateBar = () => {
+    const pct = Math.round(done / agents.length * 100);
+    const bar = document.getElementById('rescanLoadBar');
+    const txt = document.getElementById('rescanLoadPct');
+    const msg = document.getElementById('rescanLoadMsg');
+    if (bar) bar.style.width = pct + '%';
+    if (txt) txt.textContent = done + ' / ' + agents.length + ' (' + pct + '%)';
+    if (msg) msg.textContent = done === agents.length ? '✅ นับเสร็จ - render...' : '⏳ กำลังนับไฟล์...';
+  };
+  const counts = await pMap(agents,
+    a => _rescanCountOnAgent(a.agent_id, sub).catch(() => ({})),
+    8,
+    () => { done++; updateBar(); }
+  );
   _rescanData = agents.map((a, i) => {
     const r = counts[i] || {};
     const count = (r && r.total_files) || 0;
@@ -4688,30 +4710,67 @@ async function runRescan(fromFolder) {
                `${picked.length} เครื่อง · รวม ${total.toLocaleString()} ไฟล์\n\n` +
                `ไฟล์จะหายไปจาก ${fromFolder}/ และเพิ่มในคิว input-id/\nบอทรอบถัดไปจะหยิบมาลองใหม่`)) return;
 
-  toast(`เริ่ม Re-scan ${picked.length} เครื่อง (ขนาน)...`, 'success');
+  // แสดง progress bar แทน body
+  const body = document.getElementById('rescanBody');
+  if (body) body.innerHTML = `
+    <div style="padding:20px; background:#1a1a1a; border:1px solid #2a2a2a; border-radius:8px; margin-top:10px">
+      <div style="display:flex; justify-content:space-between; color:#eee; margin-bottom:10px">
+        <span id="rescanRunMsg">⏳ กำลังย้ายไฟล์...</span>
+        <span id="rescanRunPct" style="color:#3498db; font-weight:700">0 / ${picked.length}</span>
+      </div>
+      <div style="height:10px; background:#2a2a2a; border-radius:5px; overflow:hidden">
+        <div id="rescanRunBar" style="height:100%; width:0%; background:linear-gradient(90deg, #f39c12, #e74c3c); transition:width 0.2s"></div>
+      </div>
+      <div id="rescanRunLog" style="margin-top:12px; max-height:200px; overflow-y:auto; font-size:12px; color:#aaa; font-family:monospace"></div>
+    </div>
+  `;
+
   const t0 = Date.now();
+  let done = 0, totalMoved = 0, okCount = 0;
+  const updateRunBar = () => {
+    const pct = Math.round(done / picked.length * 100);
+    const bar = document.getElementById('rescanRunBar');
+    const txt = document.getElementById('rescanRunPct');
+    const msg = document.getElementById('rescanRunMsg');
+    if (bar) bar.style.width = pct + '%';
+    if (txt) txt.textContent = done + ' / ' + picked.length + ' (' + pct + '%)';
+    if (msg) msg.textContent = done === picked.length ? '✅ ย้ายเสร็จ' : `⏳ กำลังย้าย... (${totalMoved} ไฟล์แล้ว)`;
+  };
+  const appendLog = (html) => {
+    const el = document.getElementById('rescanRunLog');
+    if (el) { el.innerHTML += html + '<br>'; el.scrollTop = el.scrollHeight; }
+  };
+
   const results = await Promise.allSettled(picked.map(r =>
     mcReq(r.agent_id, 'request_move_folder', {
       from_sub: fromFolder, to_sub: 'input-id', base_match: RANGER_CFG.base
     }, 90000).then(res => {
+      done++;
       if (res && res.error) {
-        bcLog(`❌ <b>${escHtml(r.name)}</b> → ${escHtml(res.error)}`, true);
+        appendLog(`<span style="color:#e74c3c">❌ ${escHtml(r.name)}: ${escHtml(res.error)}</span>`);
+        updateRunBar();
         return 0;
       }
       const moved = res.moved || 0;
+      totalMoved += moved;
+      okCount++;
+      appendLog(`<span style="color:#2ecc71">🔁 ${escHtml(r.name)}: ย้าย ${moved} ไฟล์</span>`);
+      updateRunBar();
       bcLog(`🔁 <b>${escHtml(r.name)}</b> → ย้าย ${moved} ไฟล์เข้า input-id`, false);
       return moved;
     }).catch(e => {
+      done++;
+      appendLog(`<span style="color:#e74c3c">❌ ${escHtml(r.name)}: ${escHtml(String(e.message || e))}</span>`);
+      updateRunBar();
       bcLog(`❌ <b>${escHtml(r.name)}</b> → ${escHtml(String(e.message || e))}`, true);
       return 0;
     })
   ));
-  const totalMoved = results.reduce((s, r) => s + (r.status === 'fulfilled' ? r.value : 0), 0);
   const dt = ((Date.now() - t0) / 1000).toFixed(1);
-  toast(`Re-scan เสร็จ: ย้าย ${totalMoved}/${total} ไฟล์ (${dt}s)`,
-        totalMoved === total ? 'success' : 'error');
-  // refresh counts
-  setTimeout(() => openRescanPanel(_rescanMode), 1500);
+  toast(`Re-scan เสร็จ: ย้าย ${totalMoved.toLocaleString()}/${total.toLocaleString()} ไฟล์ (${okCount}/${picked.length} เครื่อง, ${dt}s)`,
+        okCount === picked.length ? 'success' : 'error');
+  // refresh counts หลัง 2s
+  setTimeout(() => openRescanPanel(_rescanMode), 2000);
 }
 
 // ═══════════════════════════════════════════════════════════
