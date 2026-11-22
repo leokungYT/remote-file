@@ -8376,21 +8376,24 @@ async function buUpdateOneLgr(i, quiet, cfgOverride) {
 async function buSendBatSelected() {
   const idxs = buIncluded();
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'error'); return; }
-  let ok = 0;
-  for (const i of idxs) {
+  // ขนาน — ไฟล์เล็ก โหลด socket ไม่หนัก
+  const t0 = Date.now();
+  const results = await Promise.allSettled(idxs.map(i => {
     const a = _buAgents[i];
     const cfg = buCfgFor(i);
     const el = document.getElementById('bu_status_' + i);
     if (el) el.innerHTML = '<span style="color:var(--accent); font-size:12px">⏳ กำลังส่ง ' + escHtml(cfg.name) + ' (' + escHtml(cfg.base) + ') ...</span>';
-    try {
-      await buSendAny(a.agent_id, cfg);
-      ok++;
+    return buSendAny(a.agent_id, cfg).then(() => {
       if (el) el.innerHTML = '<span style="color:var(--success); font-size:12px">📤 ส่ง ' + escHtml(cfg.name) + ' (' + escHtml(cfg.base) + ') แล้ว</span>';
-    } catch (e) {
+      return true;
+    }).catch(e => {
       if (el) el.innerHTML = '<span style="color:var(--danger); font-size:12px">❌ ส่งไฟล์ไม่สำเร็จ: ' + escHtml(String(e.message || e)) + '</span>';
-    }
-  }
-  toast('ส่งไฟล์เสร็จ: ' + ok + '/' + idxs.length + ' เครื่อง', ok === idxs.length ? 'success' : 'error');
+      return false;
+    });
+  }));
+  const ok = results.filter(r => r.status === 'fulfilled' && r.value).length;
+  const dt = ((Date.now() - t0) / 1000).toFixed(1);
+  toast('ส่งไฟล์เสร็จ: ' + ok + '/' + idxs.length + ' เครื่อง (' + dt + 's)', ok === idxs.length ? 'success' : 'error');
 }
 
 // ชื่อไฟล์เริ่มต้นของแต่ละโปรเจกต์ — ใช้ตอน dropdown เปลี่ยนแล้วช่อง "ไฟล์" ยังเป็นค่า default
@@ -8641,56 +8644,81 @@ async function buUpdateSelected() {
   const modeNote = !lgrAny ? '' :
     '\n\nโหมด LGR: ดึงจาก GitHub leokungYT/main' + (g.stopFirst ? ' · หยุดบอทก่อน' : '') +
     (g.restart ? ' · เปิด ' + g.restart + ' หลังเสร็จ' : '');
-  if (!confirm('สั่งอัปเดต ' + idxs.length + ' เครื่องที่ติ๊กไว้ ?' +
+  if (!confirm('สั่งอัปเดต ' + idxs.length + ' เครื่องที่ติ๊กไว้ (ขนานพร้อมกัน) ?' +
                (g.alsoAgent ? ' + อัปเดต agent ด้วย' : '') + '\n\n' + lines + modeNote +
                '\n\nเครื่องที่ไม่ได้ติ๊กจะไม่ถูกแตะ')) return;
 
-  let ok = 0;
-  for (const i of idxs) {
-    if (await buUpdateOne(i, true)) ok++;
-  }
-  toast('สั่งอัปเดตเสร็จ: ' + ok + '/' + idxs.length + ' เครื่อง', ok === idxs.length ? 'success' : 'error');
+  // รันขนานทุกเครื่องพร้อมกัน — เร็วขึ้นมาก (เดิมรันทีละเครื่อง)
+  // เครื่องแต่ละตัวโหลด GitHub แยกกัน ไม่ชนกัน + socket ของ agent แต่ละตัวแยกกัน
+  toast('เริ่มสั่งอัปเดต ' + idxs.length + ' เครื่องพร้อมกัน...', 'success');
+  const t0 = Date.now();
+  let done = 0;
+  const results = await Promise.allSettled(idxs.map(i =>
+    buUpdateOne(i, true).then(res => {
+      done++;
+      return res;
+    }).catch(e => {
+      done++;
+      return false;
+    })
+  ));
+  const ok = results.filter(r => r.status === 'fulfilled' && r.value).length;
+  const dt = ((Date.now() - t0) / 1000).toFixed(1);
+  toast('อัปเดตเสร็จ: ' + ok + '/' + idxs.length + ' เครื่อง (' + dt + 's)',
+        ok === idxs.length ? 'success' : 'error');
 }
 
 // ── อัปเดต agent ทางไกล (ดึงโค้ดใหม่ + รีสตาร์ท) ──
+// ขนานได้ปลอดภัย — ส่งผ่าน _mcChain เหมือน mcReq (serialize แค่ emit+request_sent, แต่รอ response ขนานได้)
 function updateOneAgent(agentId) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    socket.once('request_sent', (data) => {
-      const rid = data.request_id;
-      socket.once('response_' + rid, (resp) => {
-        settled = true;
-        if (resp.error) reject(new Error(resp.error)); else resolve(resp);
-      });
-    });
-    socket.emit('request_self_update', { agent_id: agentId });
-    setTimeout(() => { if (!settled) reject(new Error('timeout (เครื่องอาจหลุด/ปิดไปแล้ว)')); }, 25000);
+    const done = (resp) => { if (settled) return; settled = true; if (resp && resp.error) reject(new Error(resp.error)); else resolve(resp || {}); };
+    _mcChain = _mcChain.then(() => new Promise((next) => {
+      let sent = false;
+      const onSent = (d) => {
+        sent = true;
+        socket.once('response_' + d.request_id, (resp) => done(resp));
+        setTimeout(() => done({ error: 'timeout (เครื่องอาจหลุด/ปิดไปแล้ว)' }), 25000);
+        next();
+      };
+      socket.once('request_sent', onSent);
+      setTimeout(() => {
+        if (!sent) { socket.off('request_sent', onSent); done({ error: 'เครื่องไม่ออนไลน์หรือไม่ตอบ' }); next(); }
+      }, 8000);
+      socket.emit('request_self_update', { agent_id: agentId });
+    }));
   });
 }
 
 async function updateSelectedAgents() {
   const agents = getSelectedAgents();
   if (!agents.length) { toast('ยังไม่ได้เลือกเครื่อง (ติ๊กเครื่องก่อน)', 'error'); return; }
-  if (!confirm(`สั่งอัปเดต agent + รีสตาร์ท ${agents.length} เครื่องที่เลือก ?\n\nแต่ละเครื่องจะดึงโค้ดใหม่จาก GitHub แล้วรีสตาร์ทตัวเอง (หลุดแล้วกลับมาเองในไม่กี่วิ)`)) return;
+  if (!confirm(`สั่งอัปเดต agent + รีสตาร์ท ${agents.length} เครื่องที่เลือก (ขนานพร้อมกัน) ?\n\nแต่ละเครื่องจะดึงโค้ดใหม่จาก GitHub แล้วรีสตาร์ทตัวเอง (หลุดแล้วกลับมาเองในไม่กี่วิ)`)) return;
 
-  let ok = 0;
-  for (const a of agents) {
+  // รันขนานทุกเครื่อง — Promise.allSettled กัน reject หยุดทั้งก้อน
+  toast(`เริ่มอัปเดต agent ${agents.length} เครื่องพร้อมกัน...`, 'success');
+  const t0 = Date.now();
+  const results = await Promise.allSettled(agents.map(a => {
     const mname = a.name || a.hostname || a.agent_id;
-    try {
-      const res = await updateOneAgent(a.agent_id);
-      ok++;
+    return updateOneAgent(a.agent_id).then(res => {
       if (res && res.updated === false) {
         bcLog(`✅ <b>${escHtml(mname)}</b> → เป็นเวอร์ชันล่าสุดอยู่แล้ว (ไม่ต้องอัปเดต)`, false);
       } else {
         bcLog(`⬆️ <b>${escHtml(mname)}</b> → มีของใหม่! กำลังอัปเดต + รีสตาร์ท...`, false);
       }
-    } catch (e) {
+      return true;
+    }).catch(e => {
       const msg = String(e.message || e);
       const isOld = /unknown action/i.test(msg);
       bcLog(`❌ <b>${escHtml(mname)}</b> → ${isOld ? 'agent เก่ายังไม่รองรับ (ต้องอัปเดตด้วยมือครั้งแรกก่อน)' : escHtml(msg)}`, true);
-    }
-  }
-  toast(`เช็กอัปเดต ${ok}/${agents.length} เครื่องเสร็จ`, 'success');
+      return false;
+    });
+  }));
+  const ok = results.filter(r => r.status === 'fulfilled' && r.value).length;
+  const dt = ((Date.now() - t0) / 1000).toFixed(1);
+  toast(`เช็กอัปเดต ${ok}/${agents.length} เครื่องเสร็จ (${dt}s)`,
+        ok === agents.length ? 'success' : 'error');
 }
 
 // ═══════════════════════════════════════════════════════════
