@@ -576,12 +576,17 @@ def send_response(req_id, data):
 
 
 def _make_client(url):
-    """สร้าง socketio client 1 ตัวต่อ server 1 เครื่อง พร้อมผูก event handler ครบชุด"""
+    """สร้าง socketio client 1 ตัวต่อ server 1 เครื่อง พร้อมผูก event handler ครบชุด
+    - reconnect เร็ว (2s) + randomization 0.5 (กัน 27 agents รีคอนพร้อมกันถล่ม server)
+    - reconnect ไม่จำกัดครั้ง - VPN rotate อาจทำ TCP ตาย ต้องพยายามเรื่อยๆ"""
     client = socketio.Client(
         reconnection=True,
-        reconnection_delay=RECONNECT_DELAY,
-        reconnection_delay_max=30,
+        reconnection_attempts=0,   # infinite
+        reconnection_delay=2,      # ลดจาก 5 -> 2 เพื่อ recover เร็วตอน VPN swap
+        reconnection_delay_max=20, # ลดจาก 30
+        randomization_factor=0.5,  # jitter ±50% - กัน thundering herd ถล่ม server
         logger=False,
+        engineio_logger=False,
     )
 
     @client.event

@@ -55,7 +55,9 @@ socketio = SocketIO(
     app,
     cors_allowed_origins="*",
     max_http_buffer_size=int(MAX_UPLOAD_MB * 1024 * 1024 * 1.5),  # base64 (+33%) + framing headroom
-    ping_timeout=60,    # ใจกว้างขึ้น: เครื่องที่ต่อผ่าน Funnel/VPN (relay ช้า) จะได้ไม่โดนตัดง่าย
+    # ใจกว้างมากขึ้น: VPN rotate ของ swap_bot ตัดเน็ตชั่วคราว 10-20s หลาย agents
+    # หลุดพร้อมกัน ping_timeout=120 ให้ทนได้ 2 รอบ ping interval
+    ping_timeout=120,
     ping_interval=25,
     async_mode="threading"
 )
