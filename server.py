@@ -6777,16 +6777,21 @@ function openRunFileDashboard() {
 }
 
 async function runLoadFiles() {
-  // ถามรายชื่อไฟล์จากเครื่องแรกที่ตอบได้ เอามาเป็นตัวเลือกในช่องกรอก
+  // ถามรายชื่อไฟล์จากเครื่องแรกที่ตอบได้ เอามาเป็นตัวเลือกในช่องกรอก (กรองเฉพาะ .bat / .cmd)
   const cfg = runCfg();
   const hint = document.getElementById('runFileHint');
   for (const a of _runAgents) {
     const res = await mcReq(a.agent_id, 'request_run_file', { sub: 'list', base_match: cfg.base }, 20000);
     if (res.error || !res.files) continue;
+    const bats = res.files.filter(f => /\.(bat|cmd)$/i.test(f));
     const dl = document.getElementById('runFileList');
-    if (dl) dl.innerHTML = res.files.map(f => `<option value="${escAttr(f)}">`).join('');
-    if (hint && res.files.length) {
-      hint.innerHTML = `พบไฟล์ที่รันได้ ${res.files.length} ไฟล์ในโฟลเดอร์ <code>${escHtml(res.base || cfg.base)}</code> (จากเครื่อง ${escHtml(a.name || a.hostname || a.agent_id)}) — กดที่ช่องกรอกเพื่อเลือก`;
+    if (dl) dl.innerHTML = bats.map(f => `<option value="${escAttr(f)}">`).join('');
+    if (hint) {
+      if (bats.length) {
+        hint.innerHTML = `พบไฟล์ .bat ที่รันได้ ${bats.length} ไฟล์ ในโฟลเดอร์ <code>${escHtml(res.base || cfg.base)}</code> (จากเครื่อง ${escHtml(a.name || a.hostname || a.agent_id)}) — กดที่ช่องกรอกเพื่อเลือก`;
+      } else {
+        hint.innerHTML = `<span style="color:var(--warning)">ไม่มีไฟล์ .bat ในโฟลเดอร์ <code>${escHtml(res.base || cfg.base)}</code> — พิมพ์ชื่อไฟล์เองได้</span>`;
+      }
     }
     return;
   }
@@ -6846,9 +6851,11 @@ async function runStartAll() {
   if (!cfg.name) { toast('ยังไม่ได้ใส่ชื่อไฟล์ที่จะรัน', 'error'); return; }
   const idxs = runIncluded();
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
-  if (!confirm(`▶️ สั่งรัน ${cfg.base}\\${cfg.name} ที่ ${idxs.length} เครื่อง ?`)) return;
-  for (const i of idxs) await runStart(i, true);
-  toast(`สั่งรันแล้ว ${idxs.length} เครื่อง`, 'success');
+  if (!confirm(`▶️ สั่งรัน ${cfg.base}\\${cfg.name} ที่ ${idxs.length} เครื่อง (ขนานพร้อมกัน) ?`)) return;
+  const t0 = Date.now();
+  await Promise.allSettled(idxs.map(i => runStart(i, true)));
+  const dt = ((Date.now() - t0) / 1000).toFixed(1);
+  toast(`สั่งรันแล้ว ${idxs.length} เครื่อง (${dt}s)`, 'success');
 }
 
 async function runStop(i, quiet) {
@@ -6888,9 +6895,11 @@ async function runStop(i, quiet) {
 async function runStopAll() {
   const idxs = runIncluded();
   if (!idxs.length) { toast('ยังไม่ได้ติ๊กเครื่อง', 'info'); return; }
-  if (!confirm(`⛔ หยุดไฟล์ที่กำลังรันอยู่ของ ${idxs.length} เครื่อง ?`)) return;
-  for (const i of idxs) await runStop(i, true);
-  toast('สั่งหยุดทุกเครื่องแล้ว', 'success');
+  if (!confirm(`⛔ หยุดไฟล์ที่กำลังรันอยู่ของ ${idxs.length} เครื่อง (ขนานพร้อมกัน) ?`)) return;
+  const t0 = Date.now();
+  await Promise.allSettled(idxs.map(i => runStop(i, true)));
+  const dt = ((Date.now() - t0) / 1000).toFixed(1);
+  toast(`สั่งหยุดทุกเครื่องแล้ว (${dt}s)`, 'success');
 }
 
 // ═══════════════════════════════════════════════════════════
