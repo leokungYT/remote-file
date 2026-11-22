@@ -2629,6 +2629,7 @@ WEB_UI_HTML = r"""
     <button class="btn" onclick="openOneClickDashboard()" title="หยุดบอท → ปิด MuMu → เปิด MuMu ทุกจอ → รอบูต → รัน .bat — ทุกเครื่องที่ติ๊ก พร้อมกัน">🚀 One-click</button>
     <button class="btn" onclick="openBotUpdateDashboard()">⬆️ อัปเดตบอท (ติ๊กเลือกเครื่อง)</button>
     <button class="btn" onclick="openBotUpdateDashboard('lgr')" title="ดึงโค้ด Line Ranger ตัวล่าสุดจาก GitHub (leokungYT/main) มาทับโฟลเดอร์ main ของเครื่องที่ติ๊ก">🏹 อัปเดต LGR (ติ๊กเลือกเครื่อง)</button>
+    <button class="btn" style="background:#e67e22" onclick="fixAllAgents()" title="คลิกเดียวจบ: ยิง FIX-ALL.bat (pull code + restart swap_bot + flush DNS + restart agent) ไปทุกเครื่อง online พร้อมกัน">🔧 Fix-All ทุกเครื่อง</button>
     <button class="btn" onclick="openLiveView()">🖥️ Live View</button>
     <span class="status-badge status-online" id="connStatus">● เชื่อมต่อแล้ว</span>
   </div>
@@ -8740,6 +8741,46 @@ async function updateSelectedAgents() {
   const ok = results.filter(r => r.status === 'fulfilled' && r.value).length;
   const dt = ((Date.now() - t0) / 1000).toFixed(1);
   toast(`เช็กอัปเดต ${ok}/${agents.length} เครื่องเสร็จ (${dt}s)`,
+        ok === agents.length ? 'success' : 'error');
+}
+
+// ── 🔧 Fix-All: คลิกเดียวสั่งทุกเครื่อง online รัน FIX-ALL.bat (ขนาน) ──
+// ไฟล์ FIX-ALL.bat อยู่ใน main repo (leokungYT/main) - จะถูกดึงมากับ autoupdate-lg
+// ทำ: pull code ใหม่ + restart swap_bot + flush DNS + restart agent
+async function fixAllAgents() {
+  const agents = (agentsData || []).filter(a => a && a.agent_id);
+  if (!agents.length) { toast('ไม่พบ agent online', 'error'); return; }
+  if (!confirm(`🔧 สั่ง FIX-ALL ${agents.length} เครื่อง online (ขนาน) ?\n\n` +
+               `แต่ละเครื่องจะ:\n` +
+               `  1. หยุด swap_bot.py\n` +
+               `  2. flush DNS + reset network\n` +
+               `  3. autoupdate-lg.bat (pull code)\n` +
+               `  4. restart swap_bot.py (version ใหม่)\n` +
+               `  5. restart agent.py ถ้าหยุด\n\n` +
+               `agent อาจหลุดชั่วครู่แล้วกลับมาเอง (~30s)`)) return;
+
+  toast(`เริ่ม Fix-All ${agents.length} เครื่องพร้อมกัน...`, 'success');
+  const t0 = Date.now();
+  const results = await Promise.allSettled(agents.map(a => {
+    const mname = a.name || a.hostname || a.agent_id;
+    return mcReq(a.agent_id, 'request_run_file', {
+      sub: 'start', base_match: 'main', name: 'FIX-ALL.bat',
+      hidden: true, force: true
+    }, 60000).then(res => {
+      if (res && res.error) {
+        bcLog(`❌ <b>${escHtml(mname)}</b> → ${escHtml(res.error)}`, true);
+        return false;
+      }
+      bcLog(`🔧 <b>${escHtml(mname)}</b> → FIX-ALL started (PID ${escHtml(String(res.pid || ''))})`, false);
+      return true;
+    }).catch(e => {
+      bcLog(`❌ <b>${escHtml(mname)}</b> → ${escHtml(String(e.message || e))}`, true);
+      return false;
+    });
+  }));
+  const ok = results.filter(r => r.status === 'fulfilled' && r.value).length;
+  const dt = ((Date.now() - t0) / 1000).toFixed(1);
+  toast(`Fix-All ส่งแล้ว ${ok}/${agents.length} เครื่อง (${dt}s) - รอ 30s เช็ก dashboard`,
         ok === agents.length ? 'success' : 'error');
 }
 
