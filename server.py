@@ -4509,7 +4509,8 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
       <h2 style="flex:1; font-size:18px">🏹 Dashboard Line Ranger</h2>
       ${pcSelectHtml(_rangerScope, '_rangerScope=this.value; openRangerDashboard()')}
       <input type="text" class="dash-search" placeholder="🔍 ค้นหาชื่อ / combo..." oninput="filterRangerCards(this.value)">
-      <button class="btn" onclick="openRescanPanel()" title="ย้ายไฟล์จาก not-found/ หรือ login-failed/ กลับเข้า input-id เพื่อลองใหม่">🔁 Re-scan not-found / login-failed</button>
+      <button class="btn" style="background:#f39c12" onclick="openRescanPanel('not-found')" title="ย้าย not-found/*.xml กลับเข้า input-id">🔁 Re-scan not-found</button>
+      <button class="btn" style="background:#e74c3c" onclick="openRescanPanel('login-failed')" title="ย้าย login-failed/*.xml กลับเข้า input-id">🔁 Re-scan login-failed</button>
       <button class="btn btn-primary" onclick="openRangerDashboard()">🔄 รีเฟรช</button>
     </div>
     <div class="stat-row">
@@ -4559,6 +4560,7 @@ function renderRangerDash(comboTotals, grandTotal, matchedTotal, perAgent, total
 //  ติ๊กเครื่อง + กด 1 ปุ่ม = ย้ายขนานทุกเครื่องที่ติ๊ก
 // ═══════════════════════════════════════════════════════════
 let _rescanData = [];   // [{agent_id, name, nf_count, lf_count, checked}]
+let _rescanMode = 'not-found';   // 'not-found' | 'login-failed' - which column the panel focuses on
 
 function _rescanCountOnAgent(agentId, subpath) {
   // นับ .xml ในโฟลเดอร์ย่อย - ใช้ count_prefix_ids ตัวเดียวกับ ranger dashboard
@@ -4568,36 +4570,38 @@ function _rescanCountOnAgent(agentId, subpath) {
   }, 60000);
 }
 
-async function openRescanPanel() {
+async function openRescanPanel(mode) {
+  _rescanMode = (mode === 'login-failed') ? 'login-failed' : 'not-found';
   const content = document.getElementById('contentArea');
   const agents = (agentsData || []).filter(a => a && a.agent_id);
   if (!agents.length) { toast('ไม่พบ agent online', 'error'); return; }
 
+  const title = _rescanMode === 'login-failed'
+    ? '🔁 Re-scan login-failed → input-id'
+    : '🔁 Re-scan not-found → input-id';
   content.innerHTML = `
     <div class="toolbar">
-      <h2 style="flex:1; font-size:18px">🔁 Re-scan not-found / login-failed → input-id</h2>
+      <h2 style="flex:1; font-size:18px">${title}</h2>
+      <button class="btn" onclick="openRescanPanel('not-found')" ${_rescanMode==='not-found'?'style="background:#f39c12"':''}>not-found</button>
+      <button class="btn" onclick="openRescanPanel('login-failed')" ${_rescanMode==='login-failed'?'style="background:#e74c3c"':''}>login-failed</button>
       <button class="btn" onclick="openRangerDashboard()">← กลับ Dashboard</button>
     </div>
     <div id="rescanLoader" style="padding:20px; color:var(--text-secondary)">⏳ กำลังนับไฟล์ทุกเครื่อง...</div>
     <div id="rescanBody" style="display:none"></div>
   `;
 
-  // นับทั้ง 2 โฟลเดอร์ พร้อมกันทุกเครื่อง
+  // นับโฟลเดอร์เดียวตาม mode ปัจจุบัน (เร็วขึ้น)
+  const sub = _rescanMode;   // 'not-found' or 'login-failed'
   const results = await Promise.all(agents.map(async a => {
-    const [nf, lf] = await Promise.all([
-      _rescanCountOnAgent(a.agent_id, 'not-found').catch(() => ({})),
-      _rescanCountOnAgent(a.agent_id, 'login-failed').catch(() => ({}))
-    ]);
+    const r = await _rescanCountOnAgent(a.agent_id, sub).catch(() => ({}));
     return {
       agent_id: a.agent_id,
       name: a.name || a.hostname || a.agent_id,
-      nf_count: (nf && nf.total_files) || 0,
-      lf_count: (lf && lf.total_files) || 0,
-      nf_exists: !!(nf && nf.exists),
-      lf_exists: !!(lf && lf.exists),
+      count: (r && r.total_files) || 0,
+      exists: !!(r && r.exists),
     };
   }));
-  _rescanData = results.map(r => ({ ...r, checked: true }));
+  _rescanData = results.map(r => ({ ...r, checked: r.count > 0 }));
   renderRescanPanel();
 }
 
@@ -4607,38 +4611,37 @@ function renderRescanPanel() {
   if (loader) loader.style.display = 'none';
   if (!body) return;
 
-  const nfTotal = _rescanData.reduce((s, r) => s + r.nf_count, 0);
-  const lfTotal = _rescanData.reduce((s, r) => s + r.lf_count, 0);
+  const total = _rescanData.reduce((s, r) => s + r.count, 0);
   const tickedCount = _rescanData.filter(r => r.checked).length;
+  const tickedFiles = _rescanData.filter(r => r.checked).reduce((s, r) => s + r.count, 0);
+  const label = _rescanMode === 'login-failed' ? 'login-failed' : 'not-found';
+  const color = _rescanMode === 'login-failed' ? 'var(--danger)' : 'var(--warning)';
+  const btnBg = _rescanMode === 'login-failed' ? 'var(--danger)' : '#f39c12';
 
   const rows = _rescanData.map((r, i) => `
     <tr>
       <td><input type="checkbox" ${r.checked ? 'checked' : ''} onchange="_rescanData[${i}].checked=this.checked; renderRescanPanel()"></td>
       <td><b>${escHtml(r.name)}</b></td>
-      <td style="text-align:right; color:${r.nf_count ? 'var(--warning)' : 'var(--text-dim)'}">${r.nf_count}</td>
-      <td style="text-align:right; color:${r.lf_count ? 'var(--danger)' : 'var(--text-dim)'}">${r.lf_count}</td>
+      <td style="text-align:right; color:${r.count ? color : 'var(--text-dim)'}">${r.count}</td>
     </tr>`).join('');
 
   body.innerHTML = `
     <div class="stat-row">
       <div class="stat-tile"><div class="stat-label">เครื่องทั้งหมด</div><div class="stat-val">${_rescanData.length}</div></div>
       <div class="stat-tile"><div class="stat-label">ติ๊กไว้</div><div class="stat-val" style="color:var(--accent)">${tickedCount}</div></div>
-      <div class="stat-tile"><div class="stat-label">not-found รวม</div><div class="stat-val" style="color:var(--warning)">${nfTotal.toLocaleString()}</div></div>
-      <div class="stat-tile"><div class="stat-label">login-failed รวม</div><div class="stat-val" style="color:var(--danger)">${lfTotal.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">${escHtml(label)} รวม</div><div class="stat-val" style="color:${color}">${total.toLocaleString()}</div></div>
+      <div class="stat-tile"><div class="stat-label">ไฟล์ที่จะย้าย (ติ๊ก)</div><div class="stat-val" style="color:var(--accent)">${tickedFiles.toLocaleString()}</div></div>
     </div>
 
     <div class="pick-panel" style="margin:16px 0">
       <div class="pick-head">
-        <span class="pick-title">🔁 Re-scan — ย้ายไฟล์กลับเข้า input-id ของเครื่องที่ติ๊ก</span>
+        <span class="pick-title">🔁 ย้าย ${escHtml(label)}/*.xml -> input-id/ ของเครื่องที่ติ๊ก</span>
         <button class="btn" onclick="_rescanToggleAll(true)">ติ๊กทุกเครื่อง</button>
         <button class="btn" onclick="_rescanToggleAll(false)">เอาออกทั้งหมด</button>
       </div>
-      <div class="pick-head" style="margin-bottom:0; gap:8px">
-        <button class="btn btn-primary" onclick="runRescan('not-found')" ${tickedCount && nfTotal ? '' : 'disabled'}>
-          🔁 Re-scan not-found (${tickedCount} เครื่อง · ${nfTotal.toLocaleString()} ไฟล์)
-        </button>
-        <button class="btn" style="background:var(--danger)" onclick="runRescan('login-failed')" ${tickedCount && lfTotal ? '' : 'disabled'}>
-          🔁 Re-scan login-failed (${tickedCount} เครื่อง · ${lfTotal.toLocaleString()} ไฟล์)
+      <div class="pick-head" style="margin-bottom:0">
+        <button class="btn btn-primary" style="background:${btnBg}; border-color:${btnBg}" onclick="runRescan('${_rescanMode}')" ${tickedFiles ? '' : 'disabled'}>
+          🔁 Re-scan ${escHtml(label)} (${tickedCount} เครื่อง · ${tickedFiles.toLocaleString()} ไฟล์)
         </button>
       </div>
     </div>
@@ -4647,8 +4650,7 @@ function renderRescanPanel() {
       <thead><tr>
         <th style="width:40px"></th>
         <th>เครื่อง</th>
-        <th style="text-align:right">not-found (.xml)</th>
-        <th style="text-align:right">login-failed (.xml)</th>
+        <th style="text-align:right">${escHtml(label)} (.xml)</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
@@ -4661,9 +4663,9 @@ function _rescanToggleAll(v) {
 }
 
 async function runRescan(fromFolder) {
-  const picked = _rescanData.filter(r => r.checked && (fromFolder === 'not-found' ? r.nf_count : r.lf_count));
+  const picked = _rescanData.filter(r => r.checked && r.count > 0);
   if (!picked.length) { toast('ไม่มีเครื่องที่ติ๊ก (หรือไม่มีไฟล์ใน ' + fromFolder + ')', 'error'); return; }
-  const total = picked.reduce((s, r) => s + (fromFolder === 'not-found' ? r.nf_count : r.lf_count), 0);
+  const total = picked.reduce((s, r) => s + r.count, 0);
   if (!confirm(`🔁 ย้ายไฟล์ .xml จาก ${fromFolder}/ -> input-id/\n\n` +
                `${picked.length} เครื่อง · รวม ${total.toLocaleString()} ไฟล์\n\n` +
                `ไฟล์จะหายไปจาก ${fromFolder}/ และเพิ่มในคิว input-id/\nบอทรอบถัดไปจะหยิบมาลองใหม่`)) return;
@@ -4691,7 +4693,7 @@ async function runRescan(fromFolder) {
   toast(`Re-scan เสร็จ: ย้าย ${totalMoved}/${total} ไฟล์ (${dt}s)`,
         totalMoved === total ? 'success' : 'error');
   // refresh counts
-  setTimeout(openRescanPanel, 1500);
+  setTimeout(() => openRescanPanel(_rescanMode), 1500);
 }
 
 // ═══════════════════════════════════════════════════════════
