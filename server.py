@@ -8320,10 +8320,10 @@ const BU_FORCE_BAT = [
   'py auto_update.py --silent --force --no-relaunch',
   'echo [3/3] Making sure the bot is running ...',
   'timeout /t 15 /nobreak >nul',
-  "powershell -NoProfile -Command \"if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*login.py*' }) { exit 0 } else { exit 1 }\"",
+  "powershell -NoProfile -Command \"if (Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -like '*login.py*' }) { exit 0 } else { exit 1 }\"",
   'if errorlevel 1 start "" login.bat',
   'echo [4/4] Making sure the remote agent is alive ...',
-  "powershell -NoProfile -Command \"if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*agent.py*' })) { $a = Get-ChildItem -Path C:\\Users\\*\\Downloads\\remote\\remote-file\\agent.py,C:\\remote-file\\agent.py,D:\\remote-file\\agent.py -ErrorAction SilentlyContinue | Select-Object -First 1; if ($a) { Start-Process pythonw -ArgumentList $a.FullName -WorkingDirectory $a.DirectoryName } }\" >nul 2>&1",
+  "powershell -NoProfile -Command \"if (-not (Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -like '*agent.py*' })) { $a = Get-ChildItem -Path C:\\Users\\*\\Downloads\\remote\\remote-file\\agent.py,C:\\remote-file\\agent.py,D:\\remote-file\\agent.py -ErrorAction SilentlyContinue | Select-Object -First 1; if ($a) { Start-Process pythonw -ArgumentList $a.FullName -WorkingDirectory $a.DirectoryName } }\" >nul 2>&1",
   'exit',
   ''
 ].join('\r\n');

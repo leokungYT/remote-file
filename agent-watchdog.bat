@@ -9,7 +9,9 @@
 :: ════════════════════════════════════════════════════════════════
 cd /d "%~dp0"
 
-powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*agent.py*' }) { exit 0 } else { exit 1 }"
+:: ต้องเช็ค $_.Name ด้วย! ถ้าดูแต่ CommandLine มันจะไปเจอ "คำสั่ง powershell ของตัวเอง"
+:: (บรรทัดนี้มีคำว่า agent.py อยู่) แล้วคิดว่า agent ยังรันอยู่ตลอด -> ไม่เคยปลุกเลย
+powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -like '*agent.py*' }) { exit 0 } else { exit 1 }"
 
 if errorlevel 1 (
     echo [Watchdog] agent is DOWN - flushing DNS + restarting...

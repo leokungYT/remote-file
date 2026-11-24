@@ -32,7 +32,7 @@ timeout /t 3 /nobreak >nul
 
 echo [4/4] Starting agent (it will pull the new version + reconnect) ...
 schtasks /Run /TN "RemoteFileAgent" >nul 2>&1
-powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*agent.py*' })) { $a = Get-ChildItem -Path C:\Users\*\Downloads\remote\remote-file\agent.py,C:\remote-file\agent.py,D:\remote-file\agent.py -ErrorAction SilentlyContinue | Select-Object -First 1; if ($a) { Start-Process pythonw -ArgumentList $a.FullName -WorkingDirectory $a.DirectoryName } }" >nul 2>&1
+powershell -NoProfile -Command "if (-not (Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.CommandLine -like '*agent.py*' })) { $a = Get-ChildItem -Path C:\Users\*\Downloads\remote\remote-file\agent.py,C:\remote-file\agent.py,D:\remote-file\agent.py -ErrorAction SilentlyContinue | Select-Object -First 1; if ($a) { Start-Process pythonw -ArgumentList $a.FullName -WorkingDirectory $a.DirectoryName } }" >nul 2>&1
 
 echo.
 echo ================================================================

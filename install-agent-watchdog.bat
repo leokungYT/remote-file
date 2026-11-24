@@ -7,7 +7,7 @@ set "TASK_NAME=RemoteFileAgent Watchdog"
 echo ===============================================
 echo   Install Agent Watchdog
 echo   Task : %TASK_NAME%
-echo   Runs : agent-watchdog.bat  every 5 minutes
+echo   Runs : agent-watchdog.bat  every 1 minute
 echo   Does : if agent.py is not running -> start it
 echo ===============================================
 echo.
@@ -19,7 +19,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-schtasks /Create /TN "%TASK_NAME%" /TR "\"%~dp0agent-watchdog.bat\"" /SC MINUTE /MO 5 /RL HIGHEST /F
+schtasks /Create /TN "%TASK_NAME%" /TR "\"%~dp0agent-watchdog.bat\"" /SC MINUTE /MO 1 /RL HIGHEST /F
 if errorlevel 1 (
     echo [ERROR] Failed to create the scheduled task.
     pause
@@ -27,7 +27,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [OK] Watchdog installed - agent will be restarted within 5 minutes if it dies.
+echo [OK] Watchdog installed - agent will be restarted within ~1 minute if it dies.
 echo   Run now      : schtasks /Run /TN "%TASK_NAME%"
 echo   Remove       : schtasks /Delete /TN "%TASK_NAME%" /F
 echo.
